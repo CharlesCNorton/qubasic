@@ -1,0 +1,6 @@
+qiskit>=1.0
+qiskit-aer>=0.13
+numpy>=1.24
+psutil>=5.9
+rich>=13.0
+# Optional: plotille>=5.0  (for SWEEP charts)

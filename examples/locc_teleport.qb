@@ -1,0 +1,19 @@
+# LOCC Teleportation — full protocol with classical correction
+# Alice teleports |+> to Bob using a pre-shared Bell pair.
+LOCC JOINT 3 3
+SHOTS 1024
+10 REM Prepare state to teleport: |+> on A[0]
+20 @A H 0
+30 REM Create shared entanglement: A[2] <-> B[0]
+40 SHARE A 2, B 0
+50 REM Alice entangles her data qubit with her half of the pair
+60 @A CX 0, 2
+70 @A H 0
+80 REM Alice measures and sends classical bits to Bob
+90 SEND A 0 -> m0
+100 SEND A 2 -> m1
+110 REM Bob applies corrections
+120 IF m1 THEN @B X 0
+130 IF m0 THEN @B Z 0
+140 REM Bob's qubit 0 now holds Alice's original |+> state
+150 MEASURE

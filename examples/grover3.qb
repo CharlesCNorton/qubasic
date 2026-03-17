@@ -1,0 +1,27 @@
+# Grover's Search — find |101> among 8 states
+# Classically ~4 queries; quantum: 2 iterations, ~95% success.
+QUBITS 3
+SHOTS 1024
+10 REM Superposition
+20 H 0 : H 1 : H 2
+30 REM === Grover iteration 1 ===
+40 REM Oracle: flip phase of |101>
+50 X 1
+60 H 2 : CCX 0,1,2 : H 2
+70 X 1
+80 REM Diffusion
+90 H 0 : H 1 : H 2
+100 X 0 : X 1 : X 2
+110 H 2 : CCX 0,1,2 : H 2
+120 X 0 : X 1 : X 2
+130 H 0 : H 1 : H 2
+140 REM === Grover iteration 2 ===
+150 X 1
+160 H 2 : CCX 0,1,2 : H 2
+170 X 1
+180 H 0 : H 1 : H 2
+190 X 0 : X 1 : X 2
+200 H 2 : CCX 0,1,2 : H 2
+210 X 0 : X 1 : X 2
+220 H 0 : H 1 : H 2
+230 MEASURE

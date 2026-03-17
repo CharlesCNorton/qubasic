@@ -1,0 +1,549 @@
+"""QBASIC LOCC mixin — commands, execution, and display for multi-register mode."""
+
+import re
+import time
+
+import numpy as np
+
+from qbasic_core.engine import (
+    LOCCEngine, ExecResult,
+    GATE_TABLE, GATE_ALIASES,
+    _np_gate_matrix, _sample_one_np,
+    _get_ram_gb,
+    LOCC_MAX_JOINT_QUBITS, LOCC_MAX_SPLIT_QUBITS, LOCC_MAX_REGISTERS,
+    LOCC_SEND_SHOT_CAP, LOCC_SEND_QUBIT_THRESHOLD,
+    RAM_BUDGET_FRACTION,
+    RE_SEND, RE_SHARE, RE_AT_REG_LINE,
+    RE_MEAS, RE_RESET, RE_MEASURE_BASIS,
+    RE_CTRL, RE_INV,
+)
+
+
+class LOCCMixin:
+    """LOCC commands, execution, and display for QBasicTerminal.
+
+    Requires: TerminalProtocol — uses self.locc, self.locc_mode, self.shots,
+    self.program, self.variables, self.subroutines, self._max_iterations,
+    self._custom_gates, self.eval_expr(), self._eval_with_vars(),
+    self._substitute_vars(), self._expand_statement(), self._tokenize_gate(),
+    self._gate_info(), self._resolve_qubit(), self._parse_syndrome(),
+    self._split_colon_stmts(), self._exec_control_flow(),
+    self.print_histogram(), self._print_statevector(), self._print_bloch_single().
+    """
+
+    # ── LOCC Commands ─────────────────────────────────────────────────
+
+    def cmd_locc(self, rest):
+        args = rest.upper().split()
+        if not args:
+            if self.locc_mode:
+                mode = "JOINT" if self.locc.joint else "SPLIT"
+                reg_desc = '  '.join(f"{n}={s}q" for n, s in
+                                     zip(self.locc.names, self.locc.sizes))
+                print(f"LOCC {mode}: {reg_desc}")
+                tot, peak = self.locc.mem_gb()
+                print(f"  RAM per instance: {tot:.1f} GB (with overhead)")
+                if self.locc.classical:
+                    print(f"  Classical: {self.locc.classical}")
+            else:
+                print("LOCC OFF. Usage: LOCC [JOINT] <n1> <n2> [n3 ...]")
+            return
+
+        if args[0] == 'OFF':
+            self.locc = None
+            self.locc_mode = False
+            print("LOCC OFF — back to normal Aer mode")
+            return
+
+        if args[0] == 'STATUS':
+            if not self.locc_mode:
+                print("NOT IN LOCC MODE")
+                return
+            mode = "JOINT" if self.locc.joint else "SPLIT"
+            reg_desc = '  '.join(f"{n}={s}q" for n, s in
+                                 zip(self.locc.names, self.locc.sizes))
+            print(f"LOCC {mode}: {reg_desc}")
+            tot, peak = self.locc.mem_gb()
+            print(f"  RAM per instance: {tot:.1f} GB (with overhead)")
+            ram = _get_ram_gb()
+            if ram:
+                budget = ram[0] * RAM_BUDGET_FRACTION
+                max_par = int(budget / tot) if tot > 0 else 0
+                if max_par > 0:
+                    print(f"  Max parallel in 80% budget: ~{max_par}")
+            print(f"  Classical vars: {self.locc.classical if self.locc.classical else '(none)'}")
+            return
+
+        joint = False
+        nums = args
+        if args[0] == 'JOINT':
+            joint = True
+            nums = args[1:]
+        elif args[0] == 'SPLIT':
+            nums = args[1:]
+
+        if len(nums) < 2:
+            print("?USAGE: LOCC [JOINT|SPLIT] <n1> <n2> [n3 ...]")
+            return
+        if len(nums) > LOCC_MAX_REGISTERS:
+            print(f"?MAX {LOCC_MAX_REGISTERS} registers (A-Z)")
+            return
+
+        sizes = [int(n) for n in nums]
+        total = sum(sizes)
+        if joint and total > LOCC_MAX_JOINT_QUBITS:
+            print(f"?JOINT mode limited to {LOCC_MAX_JOINT_QUBITS} total qubits (requested {total})")
+            return
+        if not joint and max(sizes) > LOCC_MAX_SPLIT_QUBITS:
+            print(f"?Each register limited to {LOCC_MAX_SPLIT_QUBITS} qubits")
+            return
+
+        # Pre-check RAM before allocating
+        mode = "JOINT" if joint else "SPLIT"
+        temp_eng = LOCCEngine(sizes, joint=joint)
+        tot, peak = temp_eng.mem_gb()
+        ram = _get_ram_gb()
+        if ram and tot > ram[1]:
+            print(f"?BLOCKED: LOCC {mode} needs ~{tot:.1f} GB but only "
+                  f"{ram[1]:.1f} GB available. Reduce register sizes.")
+            return
+
+        self.locc = temp_eng
+        self.locc_mode = True
+        reg_desc = '  '.join(f"{n}={s}q" for n, s in
+                             zip(self.locc.names, sizes))
+        print(f"LOCC {mode}: {reg_desc}  ({total} total)")
+        print(f"  RAM per instance: {tot:.1f} GB (with overhead)")
+        if ram:
+            sys_total, avail = ram
+            budget = sys_total * RAM_BUDGET_FRACTION
+            if tot > 0:
+                max_par = int(budget / tot)
+                if max_par > 0:
+                    print(f"  Max parallel instances in 80% budget: ~{max_par}")
+        if not joint:
+            print(f"  Registers are INDEPENDENT — no cross-register entanglement")
+            print(f"  Use SEND/IF for classical coordination")
+        else:
+            print(f"  Joint statevector — use SHARE for pre-shared entanglement")
+        if peak > 30:
+            print(f"  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
+
+    def cmd_send(self, rest):
+        if not self.locc_mode:
+            print("?SEND requires LOCC mode")
+            return
+        m = re.match(r'([A-Z])\s+(\S+)\s*->\s*(\w+)', rest, re.IGNORECASE)
+        if not m:
+            print("?USAGE: SEND <reg> <qubit> -> <var>")
+            return
+        reg = m.group(1).upper()
+        if reg not in self.locc.names:
+            print(f"?UNKNOWN REGISTER: {reg} (have {', '.join(self.locc.names)})")
+            return
+        qubit = int(self.eval_expr(m.group(2)))
+        var = m.group(3)
+        n_reg = self.locc.get_size(reg)
+        if qubit < 0 or qubit >= n_reg:
+            print(f"?QUBIT {qubit} OUT OF RANGE for register {reg} (0-{n_reg-1})")
+            return
+        outcome = self.locc.send(reg, qubit)
+        self.variables[var] = outcome
+        self.locc.classical[var] = outcome
+        print(f"  {reg}[{qubit}] -> {var} = {outcome}")
+
+    def cmd_share(self, rest):
+        if not self.locc_mode:
+            print("?SHARE requires LOCC mode")
+            return
+        m = re.match(r'([A-Z])\s+(\d+)\s*,?\s*([A-Z])\s+(\d+)', rest, re.IGNORECASE)
+        if not m:
+            print("?USAGE: SHARE <reg1> <qubit> <reg2> <qubit>")
+            return
+        reg1, q1 = m.group(1).upper(), int(m.group(2))
+        reg2, q2 = m.group(3).upper(), int(m.group(4))
+        for r in (reg1, reg2):
+            if r not in self.locc.names:
+                print(f"?UNKNOWN REGISTER: {r}")
+                return
+        try:
+            self.locc.share(reg1, q1, reg2, q2)
+            print(f"  Bell pair |Phi+> created: {reg1}[{q1}] <-> {reg2}[{q2}]")
+        except RuntimeError as e:
+            print(f"?{e}")
+
+    def cmd_loccinfo(self):
+        """Show LOCC protocol metrics after a run."""
+        if not self.locc_mode:
+            print("?NOT IN LOCC MODE")
+            return
+        mode = "JOINT" if self.locc.joint else "SPLIT"
+        print(f"\n  LOCC Protocol Metrics ({mode})")
+        reg_desc = '  '.join(f"{n}={s}q" for n, s in
+                             zip(self.locc.names, self.locc.sizes))
+        print(f"  Registers: {reg_desc}  ({self.locc.n_regs} parties)")
+        n_classical = len(self.locc.classical)
+        print(f"  Classical bits exchanged: {n_classical}")
+        if self.locc.classical:
+            for k, v in self.locc.classical.items():
+                print(f"    {k} = {v}")
+        n_sends = sum(1 for l in self.program.values()
+                      if re.search(r'\bSEND\b', l, re.IGNORECASE))
+        print(f"  SEND operations: {n_sends}")
+        print(f"  Communication rounds: ~{n_sends}")
+        tot, peak = self.locc.mem_gb()
+        print(f"  Memory: {tot:.1f} GB")
+        print()
+
+    # ── LOCC Display ──────────────────────────────────────────────────
+
+    def _locc_state(self, rest=''):
+        reg = rest.strip().upper() if rest else ''
+        if self.locc.joint:
+            if not reg or reg in self.locc.names:
+                sizes = '+'.join(str(s) for s in self.locc.sizes)
+                print(f"\n  Joint statevector ({sizes} qubits):")
+                self._print_statevector(self.locc.sv, self.locc.n_total)
+        else:
+            show = [reg] if reg and reg in self.locc.names else self.locc.names
+            for name in show:
+                size = self.locc.get_size(name)
+                print(f"\n  Register {name} ({size} qubits):")
+                self._print_statevector(self.locc.svs[name], size)
+
+    def _locc_bloch(self, rest):
+        m = re.match(r'([A-Z])\s*(\d*)', rest.strip(), re.IGNORECASE) if rest.strip() else None
+        if m and m.group(1):
+            reg = m.group(1).upper()
+            if reg not in self.locc.names:
+                print(f"?UNKNOWN REGISTER: {reg}")
+                return
+            sv = self.locc.get_sv(reg)
+            n = self.locc.get_n(reg)
+            idx = self.locc._idx(reg)
+            if m.group(2):
+                q = int(m.group(2))
+                actual_q = q if not self.locc.joint else q + self.locc.offsets[idx]
+                print(f"  [Register {reg}, qubit {q}]")
+                self._print_bloch_single(sv, actual_q, n)
+            else:
+                n_show = self.locc.get_size(reg)
+                for q in range(min(n_show, 4)):
+                    actual_q = q if not self.locc.joint else q + self.locc.offsets[idx]
+                    print(f"  [Register {reg}, qubit {q}]")
+                    self._print_bloch_single(sv, actual_q, n)
+                    print()
+        else:
+            print(f"?USAGE: BLOCH <reg> [qubit]  (registers: {', '.join(self.locc.names)})")
+
+    # ── LOCC Execution ────────────────────────────────────────────────
+
+    def _locc_run(self):
+        """Execute program in LOCC mode (N registers)."""
+        sorted_lines = sorted(self.program.keys())
+        if not sorted_lines:
+            print("NOTHING TO RUN")
+            return
+        has_measure = any(self.program[l].strip().upper() == 'MEASURE'
+                         for l in sorted_lines)
+        has_send = any(re.search(r'\bSEND\b', self.program[l], re.IGNORECASE)
+                       for l in sorted_lines)
+        if has_send:
+            self._locc_run_with_send(sorted_lines, has_measure)
+        else:
+            self._locc_run_vectorized(sorted_lines, has_measure)
+
+    def _locc_run_with_send(self, sorted_lines, has_measure):
+        """LOCC execution with SEND — re-executes per shot for Born-rule branching."""
+        sizes_str = '+'.join(str(s) for s in self.locc.sizes)
+        mode = "JOINT" if self.locc.joint else "SPLIT"
+        shots = self.shots
+        max_q = max(self.locc.sizes)
+        if max_q > LOCC_SEND_QUBIT_THRESHOLD and shots > LOCC_SEND_SHOT_CAP:
+            print(f"  WARNING: capping at {LOCC_SEND_SHOT_CAP} shots for "
+                  f"{max_q}-qubit LOCC w/ SEND (per-shot re-execution)")
+            shots = LOCC_SEND_SHOT_CAP
+
+        per_reg = {name: {} for name in self.locc.names}
+        counts_joint = {}
+        t0 = time.time()
+        progress_interval = max(1, shots // 10)
+
+        for shot in range(shots):
+            self.locc.reset()
+            try:
+                self._locc_execute_program(sorted_lines)
+            except (RuntimeError, ValueError) as e:
+                print(f"?RUNTIME ERROR: {e}")
+                return
+            if has_measure:
+                if self.locc.joint:
+                    out = _sample_one_np(self.locc.sv, self.locc.n_total)
+                    parts = []
+                    pos = len(out)
+                    for i in range(self.locc.n_regs):
+                        size = self.locc.sizes[i]
+                        parts.append(out[pos - size:pos])
+                        pos -= size
+                else:
+                    parts = [_sample_one_np(self.locc.svs[name],
+                             self.locc.get_size(name))
+                             for name in self.locc.names]
+                for name, bits in zip(self.locc.names, parts):
+                    per_reg[name][bits] = per_reg[name].get(bits, 0) + 1
+                jkey = '|'.join(parts)
+                counts_joint[jkey] = counts_joint.get(jkey, 0) + 1
+            if shots > 50 and (shot + 1) % progress_interval == 0:
+                pct = 100 * (shot + 1) // shots
+                print(f"  {pct}% ({shot+1}/{shots} shots)...",
+                      end='\r', flush=True)
+
+        if shots > 50:
+            print(" " * 40, end='\r')  # clear progress line
+        dt = time.time() - t0
+        print(f"\nRAN {len(self.program)} lines, LOCC {mode} "
+              f"{sizes_str}q, {shots} shots in {dt:.2f}s")
+        if has_measure:
+            self._locc_display_results(per_reg, counts_joint)
+            self.last_counts = counts_joint
+
+    def _locc_run_vectorized(self, sorted_lines, has_measure):
+        """LOCC execution without SEND — single execution, vectorized sampling."""
+        sizes_str = '+'.join(str(s) for s in self.locc.sizes)
+        mode = "JOINT" if self.locc.joint else "SPLIT"
+        t0 = time.time()
+
+        self.locc.reset()
+        try:
+            self._locc_execute_program(sorted_lines)
+        except (RuntimeError, ValueError) as e:
+            print(f"?RUNTIME ERROR: {e}")
+            return
+
+        if has_measure:
+            per_reg, cj = self.locc.sample_joint(self.shots)
+            dt = time.time() - t0
+            print(f"\nRAN {len(self.program)} lines, LOCC {mode} "
+                  f"{sizes_str}q, {self.shots} shots in {dt:.2f}s")
+            self._locc_display_results(per_reg, cj)
+            if not cj:
+                print(f"\n  (SPLIT mode, no SEND — registers are independent)")
+            self.last_counts = cj if cj else per_reg.get('A', {})
+        else:
+            dt = time.time() - t0
+            print(f"\nRAN {len(self.program)} lines, LOCC in {dt:.2f}s")
+            regs = ', '.join(self.locc.names)
+            print(f"(no MEASURE — use STATE {regs} to inspect)")
+
+    def _locc_display_results(self, per_reg, counts_joint):
+        """Display per-register and joint histograms."""
+        for name in self.locc.names:
+            size = self.locc.get_size(name)
+            print(f"\n  Register {name} ({size}q):")
+            self.print_histogram(per_reg[name])
+        if counts_joint and self.locc.n_regs <= 4:
+            jlabel = '|'.join(self.locc.names)
+            print(f"\n  Joint ({jlabel}):")
+            self.print_histogram(counts_joint)
+
+    def _locc_execute_program(self, sorted_lines):
+        """Execute all LOCC program lines using numpy engine."""
+        loop_stack = []
+        run_vars = dict(self.variables)
+        ip = 0
+        _iters = 0
+        while ip < len(sorted_lines):
+            _iters += 1
+            if _iters > self._max_iterations:
+                raise RuntimeError(f"LOOP LIMIT ({self._max_iterations}) — possible infinite loop")
+            line_num = sorted_lines[ip]
+            stmt = self.program[line_num].strip()
+            if stmt.upper() == 'MEASURE':
+                ip += 1
+                continue
+            try:
+                result = self._locc_exec_line(stmt, loop_stack, sorted_lines, ip, run_vars)
+            except Exception as e:
+                raise RuntimeError(f"LINE {line_num}: {e}") from None
+            if result is ExecResult.END:
+                break
+            elif isinstance(result, int):
+                ip = result
+            else:
+                ip += 1
+
+    def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars):
+        """Execute one line in LOCC mode."""
+        handled, result = self._exec_control_flow(
+            stmt, loop_stack, sorted_lines, ip, run_vars,
+            lambda s, ls, sl, i, rv: self._locc_exec_line(s, ls, sl, i, rv))
+        if handled:
+            return result
+
+        if ':' in stmt:
+            for sub in self._split_colon_stmts(stmt):
+                self._locc_exec_line(sub, loop_stack, sorted_lines, ip, run_vars)
+            return ExecResult.ADVANCE
+
+        resolved = self._substitute_vars(stmt, run_vars)
+
+        m = RE_SEND.match(resolved)
+        if m:
+            reg = m.group(1).upper()
+            qubit = int(self.eval_expr(m.group(2)))
+            var = m.group(3)
+            outcome = self.locc.send(reg, qubit)
+            run_vars[var] = outcome
+            self.locc.classical[var] = outcome
+            return ExecResult.ADVANCE
+
+        m = RE_SHARE.match(resolved)
+        if m:
+            reg1, q1 = m.group(1).upper(), int(m.group(2))
+            reg2, q2 = m.group(3).upper(), int(m.group(4))
+            self.locc.share(reg1, q1, reg2, q2)
+            return ExecResult.ADVANCE
+
+        m = RE_AT_REG_LINE.match(resolved)
+        if m:
+            reg = m.group(1).upper()
+            gate_stmt = m.group(2).strip()
+            if self._locc_try_special(reg, gate_stmt, run_vars):
+                return ExecResult.ADVANCE
+            self._locc_apply_gate(reg, gate_stmt)
+            return ExecResult.ADVANCE
+
+        raise ValueError(f"LOCC mode requires @A/@B prefix, SEND, SHARE, or IF: {stmt}")
+
+    def _locc_try_special(self, reg, stmt, run_vars):
+        """Handle MEAS/RESET/MEASURE_X/Y/Z/SYNDROME in LOCC mode."""
+        m = RE_MEAS.match(stmt)
+        if m:
+            qubit = int(self._eval_with_vars(m.group(1), run_vars))
+            var = m.group(2)
+            outcome = self.locc.send(reg, qubit)
+            run_vars[var] = outcome
+            self.variables[var] = outcome
+            self.locc.classical[var] = outcome
+            return True
+
+        m = RE_RESET.match(stmt)
+        if m:
+            qubit = int(self._eval_with_vars(m.group(1), run_vars))
+            outcome = self.locc.send(reg, qubit)
+            if outcome == 1:
+                self.locc.apply(reg, 'X', (), [qubit])
+            return True
+
+        m = RE_MEASURE_BASIS.match(stmt)
+        if m:
+            basis = m.group(1).upper()
+            qubit = int(self._eval_with_vars(m.group(2), run_vars))
+            if basis == 'X':
+                self.locc.apply(reg, 'H', (), [qubit])
+            elif basis == 'Y':
+                self.locc.apply(reg, 'SDG', (), [qubit])
+                self.locc.apply(reg, 'H', (), [qubit])
+            outcome = self.locc.send(reg, qubit)
+            var = f"m{basis.lower()}_{qubit}"
+            run_vars[var] = outcome
+            self.variables[var] = outcome
+            self.locc.classical[var] = outcome
+            return True
+
+        parsed = self._parse_syndrome(stmt, run_vars)
+        if parsed is not None:
+            pauli_str, qubits, var = parsed
+            n_reg = self.locc.get_size(reg)
+            anc = n_reg - 1
+            if anc in qubits:
+                raise ValueError(
+                    f"Qubit {anc} needed as ancilla but appears in stabilizer. "
+                    f"Increase register size by 1.")
+            self.locc.apply(reg, 'H', (), [anc])
+            for p, q in zip(pauli_str, qubits):
+                if p != 'I':
+                    self.locc.apply(reg, self._PAULI_TO_CONTROLLED[p], (), [anc, q])
+            self.locc.apply(reg, 'H', (), [anc])
+            outcome = self.locc.send(reg, anc)
+            if outcome == 1:
+                self.locc.apply(reg, 'X', (), [anc])
+            run_vars[var] = outcome
+            self.variables[var] = outcome
+            self.locc.classical[var] = outcome
+            return True
+
+        return False
+
+    def _locc_apply_gate(self, reg, gate_stmt):
+        """Parse and apply a gate to a LOCC register via numpy."""
+        expanded = self._expand_statement(gate_stmt)
+        for stmt in expanded:
+            tokens = self._tokenize_gate(stmt)
+            if not tokens:
+                continue
+            gate_name = tokens[0].upper()
+            gate_name = GATE_ALIASES.get(gate_name, gate_name)
+            if gate_name == 'BARRIER':
+                continue
+
+            # CTRL modifier: build controlled gate matrix and apply directly
+            m_ctrl = RE_CTRL.match(stmt)
+            if m_ctrl:
+                inner_name = m_ctrl.group(1).upper()
+                inner_name = GATE_ALIASES.get(inner_name, inner_name)
+                args = [a.strip() for a in m_ctrl.group(2).replace(',', ' ').split()]
+                ctrl_qubit = self._resolve_qubit(args[0])
+                target_qubits = [self._resolve_qubit(a) for a in args[1:]]
+                inner_matrix = _np_gate_matrix(inner_name, ())
+                dim = inner_matrix.shape[0]
+                n_inner_qubits = int(np.log2(dim))
+                if len(target_qubits) != n_inner_qubits:
+                    raise ValueError(
+                        f"CTRL {inner_name} needs 1 control + {n_inner_qubits} "
+                        f"target qubit(s), got {len(target_qubits)} target(s)")
+                controlled = np.eye(2 * dim, dtype=complex)
+                controlled[dim:, dim:] = inner_matrix
+                all_qubits = [ctrl_qubit] + target_qubits
+                n_reg = self.locc.get_size(reg)
+                for q in all_qubits:
+                    if q < 0 or q >= n_reg:
+                        raise ValueError(f"QUBIT {q} OUT OF RANGE for {reg} (0-{n_reg-1})")
+                self.locc.apply_matrix(reg, controlled, all_qubits)
+                continue
+
+            # INV modifier: apply conjugate transpose of the gate matrix
+            m_inv = RE_INV.match(stmt)
+            if m_inv:
+                inner_name = m_inv.group(1).upper()
+                inner_name = GATE_ALIASES.get(inner_name, inner_name)
+                inv_args = [a.strip() for a in m_inv.group(2).replace(',', ' ').split()]
+                info = self._gate_info(inner_name)
+                if info is None:
+                    raise ValueError(f"UNKNOWN GATE: {inner_name}")
+                n_params, n_qubits_needed = info
+                params = [self.eval_expr(a) for a in inv_args[:n_params]]
+                qubits = [self._resolve_qubit(a) for a in inv_args[n_params:n_params+n_qubits_needed]]
+                matrix = _np_gate_matrix(inner_name, tuple(params)).conj().T
+                n_reg = self.locc.get_size(reg)
+                for q in qubits:
+                    if q < 0 or q >= n_reg:
+                        raise ValueError(f"QUBIT {q} OUT OF RANGE for {reg} (0-{n_reg-1})")
+                self.locc.apply_matrix(reg, matrix, qubits)
+                continue
+
+            info = self._gate_info(gate_name)
+            if info is None:
+                raise ValueError(f"UNKNOWN GATE: {gate_name}")
+            n_params, n_qubits_needed = info
+            args = tokens[1:]
+            if len(args) < n_params + n_qubits_needed:
+                raise ValueError(f"{gate_name} needs {n_params} params + "
+                                 f"{n_qubits_needed} qubits")
+            params = [self.eval_expr(a) for a in args[:n_params]]
+            qubits = [self._resolve_qubit(a) for a in args[n_params:n_params+n_qubits_needed]]
+            n_reg = self.locc.get_size(reg)
+            for q in qubits:
+                if q < 0 or q >= n_reg:
+                    raise ValueError(f"QUBIT {q} OUT OF RANGE for {reg} (0-{n_reg-1})")
+            self.locc.apply(reg, gate_name, tuple(params), qubits)

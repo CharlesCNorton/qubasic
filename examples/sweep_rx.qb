@@ -1,0 +1,7 @@
+# Parameter Sweep — rotate a qubit from |0> to |1> and back
+# Shows how measurement probability changes with rotation angle.
+# Run with: LOAD examples/sweep_rx.qb then SWEEP angle 0 2*PI 12
+QUBITS 1
+SHOTS 512
+10 RX angle, 0
+20 MEASURE

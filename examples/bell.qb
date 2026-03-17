@@ -1,0 +1,6 @@
+# Bell State — the simplest entanglement
+# Two qubits, perfectly correlated: always 00 or always 11.
+QUBITS 2
+10 H 0
+20 CX 0,1
+30 MEASURE
