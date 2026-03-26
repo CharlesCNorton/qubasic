@@ -433,35 +433,34 @@ class LOCCMixin:
 
     def _locc_try_special(self, reg, stmt, run_vars):
         """Handle MEAS/RESET/MEASURE_X/Y/Z/SYNDROME in LOCC mode."""
-        m = RE_MEAS.match(stmt)
-        if m:
-            qubit = int(self._eval_with_vars(m.group(1), run_vars))
-            var = m.group(2)
+        from qbasic_core.parser import parse_stmt
+        from qbasic_core.statements import MeasStmt, ResetStmt, MeasureBasisStmt, SyndromeStmt
+        p = parse_stmt(stmt)
+
+        if isinstance(p, MeasStmt):
+            qubit = int(self._eval_with_vars(p.qubit_expr, run_vars))
             outcome = self.locc.send(reg, qubit)
-            run_vars[var] = outcome
-            self.variables[var] = outcome
-            self.locc.classical[var] = outcome
+            run_vars[p.var] = outcome
+            self.variables[p.var] = outcome
+            self.locc.classical[p.var] = outcome
             return True
 
-        m = RE_RESET.match(stmt)
-        if m:
-            qubit = int(self._eval_with_vars(m.group(1), run_vars))
+        if isinstance(p, ResetStmt):
+            qubit = int(self._eval_with_vars(p.qubit_expr, run_vars))
             outcome = self.locc.send(reg, qubit)
             if outcome == 1:
                 self.locc.apply(reg, 'X', (), [qubit])
             return True
 
-        m = RE_MEASURE_BASIS.match(stmt)
-        if m:
-            basis = m.group(1).upper()
-            qubit = int(self._eval_with_vars(m.group(2), run_vars))
-            if basis == 'X':
+        if isinstance(p, MeasureBasisStmt):
+            qubit = int(self._eval_with_vars(p.qubit_expr, run_vars))
+            if p.basis == 'X':
                 self.locc.apply(reg, 'H', (), [qubit])
-            elif basis == 'Y':
+            elif p.basis == 'Y':
                 self.locc.apply(reg, 'SDG', (), [qubit])
                 self.locc.apply(reg, 'H', (), [qubit])
             outcome = self.locc.send(reg, qubit)
-            var = f"m{basis.lower()}_{qubit}"
+            var = f"m{p.basis.lower()}_{qubit}"
             run_vars[var] = outcome
             self.variables[var] = outcome
             self.locc.classical[var] = outcome

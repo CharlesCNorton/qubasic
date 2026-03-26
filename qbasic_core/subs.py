@@ -20,10 +20,10 @@ class SubroutineMixin:
     """
 
     def _init_subs(self) -> None:
-        self._sub_defs: dict[str, dict[str, Any]] = {}  # name -> {params, start_ip, end_ip}
+        self._sub_defs: dict[str, dict[str, Any]] = {}
         self._func_defs: dict[str, dict[str, Any]] = {}
         self._scope_stack: list[dict[str, Any]] = []
-        self._static_vars: dict[str, dict[str, Any]] = {}  # sub_name -> {var: val}
+        self._static_vars: dict[str, dict[str, Any]] = {'_GLOBAL': {}}
         self._call_stack: list[dict[str, Any]] = []
 
     def _scan_subs(self, sorted_lines: list[int]) -> None:
@@ -216,11 +216,12 @@ class SubroutineMixin:
         self._scope_stack.append(dict(self.variables))
 
     def _pop_scope(self) -> None:
-        # Save STATIC vars before restoring
+        # Save STATIC vars for the current frame before restoring outer scope
         if self._call_stack:
-            sub_name = self._call_stack[-1].get('sub_name') or self._call_stack[-1].get('func_name', '')
-            if sub_name and sub_name in self._static_vars:
-                for vname in self._static_vars[sub_name]:
+            frame = self._call_stack[-1]
+            sub_name = frame.get('sub_name') or frame.get('func_name') or ''
+            if sub_name in self._static_vars:
+                for vname in list(self._static_vars[sub_name]):
                     self._static_vars[sub_name][vname] = self.variables.get(vname, 0)
         if self._scope_stack:
             self.variables.clear()

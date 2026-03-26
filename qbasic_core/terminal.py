@@ -746,8 +746,11 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             self.io.writeln("?@register syntax requires LOCC mode (try: LOCC <n1> <n2>)")
             return
         # Build and execute through the same gate pipeline as cmd_run
+        from qbasic_core.exec_context import ExecContext
         qc = QuantumCircuit(self.num_qubits)
-        self._exec_line(line, qc, [], [0], 0, dict(self.variables))
+        imm_ctx = ExecContext(sorted_lines=[0], ip=0,
+                              run_vars=dict(self.variables), qc=qc)
+        self._exec_line(line, ctx=imm_ctx)
         qc.save_statevector()
         backend = AerSimulator(method='statevector')
         result = backend.run(transpile(qc, backend)).result()
@@ -1186,22 +1189,20 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             return r[1] if r else ExecResult.ADVANCE
         if isinstance(parsed, IfThenStmt):
             def _recurse_if(s, ls, sl, i, rv):
-                return self._exec_line(s, qc, ls, sl, i, rv)
+                return self._exec_line(s, qc=qc, loop_stack=ls, sorted_lines=sl, ip=i, run_vars=rv)
             r = self._cf_if_then(stmt, run_vars, loop_stack, sorted_lines, ip, _recurse_if)
             return r[1] if r else ExecResult.ADVANCE
         if isinstance(parsed, AtRegStmt) and not self.locc_mode:
             raise ValueError("@register syntax requires LOCC mode (try: LOCC <n1> <n2>)")
         if isinstance(parsed, CompoundStmt):
             for sub in parsed.parts:
-                self._exec_line(sub, qc, loop_stack, sorted_lines, ip, run_vars)
+                self._exec_line(sub, qc=qc, loop_stack=loop_stack,
+                                sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
             return ExecResult.ADVANCE
 
-        # 2. Control flow (legacy regex path for extended statements: DATA, SELECT CASE, DO/LOOP, SUB, etc.)
-        if not isinstance(parsed, RawStmt):
-            # Already handled above for known types — skip redundant regex dispatch
-            pass
+        # 2. Control flow (legacy regex path for extended statements)
         def _recurse(s, ls, sl, i, rv):
-            return self._exec_line(s, qc, ls, sl, i, rv)
+            return self._exec_line(s, qc=qc, loop_stack=ls, sorted_lines=sl, ip=i, run_vars=rv)
         handled, result = self._exec_control_flow(
             stmt, loop_stack, sorted_lines, ip, run_vars, _recurse)
         if handled:
@@ -1209,12 +1210,13 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
 
         # 3. Statement handlers
         if self._try_stmt_handlers(stmt, qc, run_vars):
-            return ExecResult.ADVANCE  # all statement handlers advance
+            return ExecResult.ADVANCE
 
         # 4. Colon-separated (legacy fallback for unparsed compound)
         if ':' in stmt:
             for sub in self._split_colon_stmts(stmt):
-                self._exec_line(sub, qc, loop_stack, sorted_lines, ip, run_vars)
+                self._exec_line(sub, qc=qc, loop_stack=loop_stack,
+                                sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
             return ExecResult.ADVANCE
 
         # 5. Gate application
