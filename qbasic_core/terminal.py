@@ -1112,7 +1112,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
 
         # 3. Statement handlers
         if self._try_stmt_handlers(stmt, qc, run_vars):
-            return ExecResult.ADVANCE
+            return ExecResult.ADVANCE  # all statement handlers advance
 
         # 4. Colon-separated (legacy fallback for unparsed compound)
         if ':' in stmt:
