@@ -50,6 +50,9 @@ from qbasic_core.subs import SubroutineMixin
 from qbasic_core.debug import DebugMixin
 from qbasic_core.program_mgmt import ProgramMgmtMixin
 from qbasic_core.profiler import ProfilerMixin
+from qbasic_core.errors import QBasicError
+from qbasic_core.io_protocol import StdIOPort
+from qbasic_core.parser import parse_stmt
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -79,6 +82,15 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
     # (numpy).  This dualism is necessary because Qiskit does not
     # natively support mid-circuit measurement with classical
     # feedforward in the way LOCC protocols require.
+    def _get_parsed(self, line_num: int):
+        """Get parsed statement for a line, lazily parsing if needed."""
+        p = self._parsed.get(line_num)
+        if p is None:
+            raw = self.program.get(line_num, '')
+            p = parse_stmt(raw)
+            self._parsed[line_num] = p
+        return p
+
     def _gate_info(self, name: str) -> tuple[int, int] | None:
         """Look up (n_params, n_qubits) for a gate name.
 
@@ -145,6 +157,9 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         # LOCC mode
         self.locc = None
         self.locc_mode = False
+        # I/O and parse cache
+        self.io = StdIOPort()
+        self._parsed = {}  # {line_num: Stmt}
         # Subsystem initialization
         self._start_time = time.time()
         self._init_memory()
@@ -201,22 +216,25 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
                 print("\nBYE")
                 break
 
-    def process(self, line: str) -> None:
+    def process(self, line: str, *, track_undo: bool = True) -> None:
         """Process a line of input (numbered line or immediate command)."""
         # Line number -> store in program
         m = RE_LINE_NUM.match(line)
         if m:
             num = int(m.group(1))
             content = m.group(2).strip()
-            # Save undo state
-            self._undo_stack.append(dict(self.program))
-            if len(self._undo_stack) > MAX_UNDO_STACK:
-                self._undo_stack.pop(0)
+            # Save undo state (skip during script/file loading)
+            if track_undo:
+                self._undo_stack.append(dict(self.program))
+                if len(self._undo_stack) > MAX_UNDO_STACK:
+                    self._undo_stack.pop(0)
             if content:
                 self.program[num] = content
+                self._parsed[num] = parse_stmt(content)
             else:
                 if num in self.program:
                     del self.program[num]
+                    self._parsed.pop(num, None)
                     print(f"DELETED {num}")
             return
         # Immediate command
@@ -286,6 +304,8 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
                     method()
             except EOFError:
                 raise
+            except QBasicError as e:
+                print(f"?{e.message}")
             except Exception as e:
                 print(f"?ERROR: {e}")
         else:
@@ -307,8 +327,9 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             return
         n = int(rest)
         if n < 1 or n > MAX_QUBITS:
-            print(f"?RANGE: 1-{MAX_QUBITS}")
-            return
+            from qbasic_core.errors import QBasicRangeError
+            raise QBasicRangeError(f"RANGE: 1-{MAX_QUBITS}")
+
         self.num_qubits = n
         self.registers.clear()
         est = _estimate_gb(n)
@@ -370,6 +391,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
     def cmd_new(self, *, silent: bool = False) -> None:
         """NEW — clear program, subroutines, registers, and variables."""
         self.program.clear()
+        self._parsed.clear()
         self.subroutines.clear()
         self.registers.clear()
         self.variables.clear()
@@ -390,11 +412,13 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             for k in list(self.program.keys()):
                 if a <= k <= b:
                     del self.program[k]
+                    self._parsed.pop(k, None)
             print(f"DELETED {a}-{b}")
         else:
             n = int(rest)
             if n in self.program:
                 del self.program[n]
+                self._parsed.pop(n, None)
                 print(f"DELETED {n}")
             else:
                 print(f"?LINE {n} NOT FOUND")
@@ -423,6 +447,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             stmt = RE_GOTO_GOSUB_TARGET.sub(replace_target, stmt)
             new_prog[line_map[old]] = stmt
         self.program = new_prog
+        self._parsed = {num: parse_stmt(s) for num, s in new_prog.items()}
         print(f"RENUMBERED {len(new_prog)} LINES (start={start}, step={step})")
 
     # cmd_save, cmd_load provided by FileIOMixin.
@@ -445,8 +470,8 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
         body = [s.strip() for s in m.group(3).split(':') if s.strip()]
         if name in GATE_TABLE:
-            print(f"?CANNOT REDEFINE BUILT-IN GATE {name}")
-            return
+            from qbasic_core.errors import QBasicSyntaxError
+            raise QBasicSyntaxError(f"CANNOT REDEFINE BUILT-IN GATE {name}")
         self.subroutines[name] = {'body': body, 'params': params}
         if params:
             print(f"DEF {name}({', '.join(params)}) ({len(body)} gates)")
@@ -462,8 +487,9 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         name = m.group(1).upper()
         params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
         if name in GATE_TABLE:
-            print(f"?CANNOT REDEFINE BUILT-IN GATE {name}")
-            return
+            from qbasic_core.errors import QBasicSyntaxError
+            raise QBasicSyntaxError(f"CANNOT REDEFINE BUILT-IN GATE {name}")
+
         body = []
         print(f"  DEF {name} (type gates, DEF END to finish)")
         while True:
@@ -491,8 +517,9 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         # Allocate starting after existing registers
         start = sum(s for _, s in self.registers.values())
         if start + size > self.num_qubits:
-            print(f"?NOT ENOUGH QUBITS (need {start+size}, have {self.num_qubits})")
-            return
+            from qbasic_core.errors import QBasicRangeError
+            raise QBasicRangeError(f"NOT ENOUGH QUBITS (need {start+size}, have {self.num_qubits})")
+
         self.registers[name] = (start, size)
         print(f"REG {name} = qubits {start}-{start+size-1}")
 
@@ -764,10 +791,10 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             qc.measure(qubit, cr[0])
             run_vars[var] = 0
             self.variables[var] = 0
-            print(f"  ?WARNING: MEAS {var} is always 0 in circuit mode — "
-                  f"IF/THEN branches conditioned on this variable will "
-                  f"always take the 0 path. Use LOCC mode with SEND for "
-                  f"classical feedforward.")
+            self.io.writeln(f"  ?WARNING: MEAS {var} is always 0 in circuit mode — "
+                          f"IF/THEN branches conditioned on this variable will "
+                          f"always take the 0 path. Use LOCC mode with SEND for "
+                          f"classical feedforward.")
         return True
 
     def _try_exec_reset(self, stmt: str, qc: 'QuantumCircuit', run_vars: dict) -> bool:
@@ -808,20 +835,92 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         self.arrays[m.group(1)] = [0.0] * int(m.group(2))
         return True
 
+    def _try_exec_redim(self, stmt: str) -> bool:
+        """Handle REDIM name(size) — resize an existing array."""
+        from qbasic_core.engine import RE_REDIM
+        m = RE_REDIM.match(stmt)
+        if not m:
+            return False
+        name = m.group(1)
+        new_size = int(m.group(2))
+        old = self.arrays.get(name, [])
+        if isinstance(old, list):
+            if new_size > len(old):
+                self.arrays[name] = old + [0.0] * (new_size - len(old))
+            else:
+                self.arrays[name] = old[:new_size]
+        else:
+            self.arrays[name] = [0.0] * new_size
+        return True
+
+    def _try_exec_erase(self, stmt: str) -> bool:
+        """Handle ERASE name — delete a specific array."""
+        from qbasic_core.engine import RE_ERASE
+        m = RE_ERASE.match(stmt)
+        if not m:
+            return False
+        name = m.group(1)
+        if name in self.arrays:
+            del self.arrays[name]
+        return True
+
+    def _try_exec_get(self, stmt: str, run_vars: dict) -> bool:
+        """Handle GET var — single keypress input without enter."""
+        from qbasic_core.engine import RE_GET
+        m = RE_GET.match(stmt)
+        if not m:
+            return False
+        var = m.group(1)
+        try:
+            import sys as _sys
+            if _sys.platform == 'win32':
+                import msvcrt
+                ch = msvcrt.getwch()
+            else:
+                import tty, termios
+                fd = _sys.stdin.fileno()
+                old = termios.tcgetattr(fd)
+                try:
+                    tty.setraw(fd)
+                    ch = _sys.stdin.read(1)
+                finally:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            if var.endswith('$'):
+                run_vars[var] = ch
+                self.variables[var] = ch
+            else:
+                run_vars[var] = float(ord(ch))
+                self.variables[var] = float(ord(ch))
+        except (EOFError, KeyboardInterrupt, OSError):
+            run_vars[var] = '' if var.endswith('$') else 0
+            self.variables[var] = run_vars[var]
+        return True
+
     def _try_exec_input(self, stmt: str, run_vars: dict) -> bool:
-        """Handle INPUT "prompt", var user input."""
+        """Handle INPUT "prompt", var user input with retry on bad input."""
         m = RE_INPUT.match(stmt)
         if not m:
             return False
         prompt = m.group(1) or m.group(2)
         var = m.group(2)
-        try:
-            val = input(f"{prompt}? ")
-            run_vars[var] = float(val) if '.' in val else int(val)
-            self.variables[var] = run_vars[var]
-        except (ValueError, EOFError, KeyboardInterrupt):
-            run_vars[var] = 0
-            self.variables[var] = 0
+        for _attempt in range(3):
+            try:
+                val = self.io.read_line(f"{prompt}? ")
+                if var.endswith('$'):
+                    run_vars[var] = val
+                    self.variables[var] = val
+                else:
+                    run_vars[var] = float(val) if '.' in val else int(val)
+                    self.variables[var] = run_vars[var]
+                return True
+            except (EOFError, KeyboardInterrupt):
+                run_vars[var] = 0
+                self.variables[var] = 0
+                return True
+            except ValueError:
+                self.io.writeln("?REDO FROM START")
+        run_vars[var] = 0
+        self.variables[var] = 0
         return True
 
     def _try_exec_measure_basis(self, stmt: str, qc: 'QuantumCircuit',
@@ -933,7 +1032,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
 
         # Shared control flow (LET, PRINT, GOTO, FOR/NEXT, WHILE/WEND, IF/THEN)
         def _recurse(s, ls, sl, i, rv):
-            self._exec_line(s, qc, ls, sl, i, rv)
+            return self._exec_line(s, qc, ls, sl, i, rv)
         handled, result = self._exec_control_flow(
             stmt, loop_stack, sorted_lines, ip, run_vars, _recurse)
         if handled:
@@ -983,6 +1082,9 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         lambda self, s, qc, rv: self._try_exec_syndrome(s, qc, rv),
         lambda self, s, _qc, _rv: self._try_exec_unitary(s),
         lambda self, s, _qc, _rv: self._try_exec_dim(s),
+        lambda self, s, _qc, _rv: self._try_exec_redim(s),
+        lambda self, s, _qc, _rv: self._try_exec_erase(s),
+        lambda self, s, _qc, rv: self._try_exec_get(s, rv),
         lambda self, s, _qc, rv: self._try_exec_input(s, rv),
         lambda self, s, _qc, rv: self._try_exec_poke(s, rv),
         lambda self, s, _qc, rv: self._try_exec_sys(s),
@@ -1019,7 +1121,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         prompt = m.group(1) or m.group(2)
         var = m.group(2)
         try:
-            val = input(f"{prompt}? ")
+            val = self.io.read_line(f"{prompt}? ")
             run_vars[var] = val
             self.variables[var] = val
         except (EOFError, KeyboardInterrupt):
@@ -1060,7 +1162,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
                 while end < len(result) and result[end] in '#.':
                     end += 1
                 result = result[:idx] + formatted.rjust(end - idx) + result[end:]
-        print(result)
+        self.io.writeln(result)
         return True
 
     def _try_exec_open_close(self, stmt: str) -> bool:
@@ -1081,35 +1183,22 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             return False
         name = m.group(1)
         dims = [int(d.strip()) for d in m.group(2).split(',')]
-        if len(dims) == 1:
-            self.arrays[name] = [0.0] * dims[0]
-        else:
-            # Multi-dimensional: store as dict with tuple keys
-            self.arrays[name] = {'_dims': dims}
+        total = 1
+        for d in dims:
+            total *= d
+        self.arrays[name] = [0.0] * total
+        # Store dimension metadata for multi-dim indexing
+        if len(dims) > 1:
+            if not hasattr(self, '_array_dims'):
+                self._array_dims = {}
+            self._array_dims[name] = dims
         return True
 
     @staticmethod
     def _split_colon_stmts(stmt: str) -> list[str]:
-        """Split colon-separated statements, inheriting @register prefixes.
-
-        Used by both Qiskit and LOCC execution paths. In non-LOCC programs
-        no @reg prefixes exist, so inheritance is a no-op.
-        """
-        parts = []
-        last_reg = None
-        for sub in stmt.split(':'):
-            sub = sub.strip()
-            if not sub:
-                continue
-            m_reg = RE_AT_REG.match(sub)
-            if m_reg:
-                last_reg = m_reg.group(1).upper()
-            elif last_reg and not sub.upper().startswith((
-                    'SEND', 'IF ', 'REM', 'FOR', 'NEXT',
-                    'SHARE', 'MEASURE', '@')):
-                sub = f"@{last_reg} {sub}"
-            parts.append(sub)
-        return parts
+        """Split colon-separated statements, inheriting @register prefixes."""
+        from qbasic_core.parser import _split_colon_stmts
+        return _split_colon_stmts(stmt)
 
     def _substitute_vars(self, stmt: str, run_vars: dict) -> str:
         """Replace variable names with their values in a statement.
@@ -1524,6 +1613,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             print("NOTHING TO UNDO")
             return
         self.program = self._undo_stack.pop()
+        self._parsed = {num: parse_stmt(s) for num, s in self.program.items()}
         print(f"UNDO ({len(self.program)} lines)")
 
     # LOCC execution (_locc_run, _locc_exec_line, etc.) provided by LOCCMixin.
@@ -1714,7 +1804,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         ╚██████╔╝██████╔╝██║  ██║███████║██║╚██████╗
          ╚══▀▀═╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝
 
-        Quantum BASIC v0.2.0
+        Quantum BASIC v0.3.0
         Python {platform.python_version()} | Qiskit {qver} | {ram_str}{gpu_str}
         {self.num_qubits} qubits | {self.shots} shots | max ~{max_q} qubits
         Type HELP for commands, DEMO LIST for demos.

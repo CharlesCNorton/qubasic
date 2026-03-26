@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 jobs:
   test:
@@ -20,4 +20,4 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[charts]"
       - name: Run tests
-        run: python -m pytest test_qbasic.py -v --tb=short
+        run: python -m pytest test_qbasic.py test_cures.py -v --tb=short

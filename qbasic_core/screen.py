@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 
 
@@ -85,10 +84,7 @@ class ScreenMixin:
 
     def cmd_cls(self) -> None:
         """CLS — clear screen."""
-        if os.name == 'nt':
-            os.system('cls')
-        else:
-            print('\033[2J\033[H', end='')
+        print('\033[2J\033[H', end='', flush=True)
 
     def cmd_locate(self, rest: str) -> None:
         """LOCATE row, col — position cursor."""

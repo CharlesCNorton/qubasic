@@ -97,7 +97,7 @@ class FileIOMixin:
                 for line in f:
                     line = line.rstrip('\n\r')
                     if line and not line.startswith('#'):
-                        self.process(line)
+                        self.process(line, track_undo=False)
             print(f"LOADED {path} ({len(self.program)} lines)")
         except Exception as e:
             print(f"?LOAD ERROR: {e}")
@@ -136,7 +136,7 @@ class FileIOMixin:
                     if first_word in ('SAVE', 'LOAD', 'EXPORT', 'CSV'):
                         print(f"  ?BLOCKED IN INCLUDE: {first_word}")
                         continue
-                    self.process(line)
+                    self.process(line, track_undo=False)
                     count += 1
         finally:
             self._include_depth -= 1
@@ -234,9 +234,11 @@ class FileIOMixin:
         except ValueError as e:
             print(f"?OPEN ERROR: {e}")
             return
-        mode_map = {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a'}
+        mode_map = {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a', 'RANDOM': 'r+'}
         mode = mode_map.get(mode_str, 'r')
         try:
+            if mode_str == 'RANDOM' and not os.path.isfile(path):
+                open(path, 'w', encoding='utf-8').close()
             self._file_handles[handle] = open(path, mode, encoding='utf-8')
             print(f"OPENED #{handle} ({path}, {mode_str})")
         except Exception as e:

@@ -157,8 +157,6 @@ class ClassicMixin:
                     if self._select_stack:
                         self._select_stack.pop()
                     return True, scan + 1
-            elif depth == 0:
-                break
             scan += 1
         return True, ExecResult.ADVANCE
 
@@ -216,6 +214,8 @@ class ClassicMixin:
             return None  # not a DO/LOOP keyword — let subroutine expansion handle it
         loop = loop_stack[-1]
         # Post-test condition on LOOP
+        kind = m.group(1)
+        cond = m.group(2)
         if kind and cond:
             result = self._eval_condition(cond, run_vars)
             if kind.upper() == 'UNTIL':

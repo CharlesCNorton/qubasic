@@ -73,6 +73,9 @@ RE_MEAS = re.compile(r'MEAS\s+(\S+)\s*->\s*(\w+)', re.IGNORECASE)
 RE_RESET = re.compile(r'RESET\s+(\S+)', re.IGNORECASE)
 RE_UNITARY = re.compile(r'UNITARY\s+(\w+)\s*=\s*(\[.+\])', re.IGNORECASE)
 RE_DIM = re.compile(r'DIM\s+(\w+)\((\d+)\)', re.IGNORECASE)
+RE_REDIM = re.compile(r'REDIM\s+(\w+)\((\d+)\)', re.IGNORECASE)
+RE_ERASE = re.compile(r'ERASE\s+(\w+)', re.IGNORECASE)
+RE_GET = re.compile(r'GET\s+(\w+\$?)', re.IGNORECASE)
 RE_INPUT = re.compile(r'INPUT\s+(?:"([^"]*)"\s*,\s*)?(\w+)', re.IGNORECASE)
 RE_CTRL = re.compile(r'CTRL\s+(\w+)\s+(.*)', re.IGNORECASE)
 RE_INV = re.compile(r'INV\s+(\w+)\s+(.*)', re.IGNORECASE)
@@ -120,7 +123,7 @@ RE_SWAP = re.compile(r'SWAP\s+(\w+\$?)\s*,\s*(\w+\$?)', re.IGNORECASE)
 RE_POKE = re.compile(r'POKE\s+(.+?)\s*,\s*(.+)', re.IGNORECASE)
 RE_SYS = re.compile(r'SYS\s+(.+)', re.IGNORECASE)
 RE_OPEN = re.compile(
-    r'OPEN\s+"?([^"]+)"?\s+FOR\s+(INPUT|OUTPUT|APPEND)\s+AS\s+#?(\d+)',
+    r'OPEN\s+"?([^"]+)"?\s+FOR\s+(INPUT|OUTPUT|APPEND|RANDOM)\s+AS\s+#?(\d+)',
     re.IGNORECASE)
 RE_CLOSE = re.compile(r'CLOSE\s+#?(\d+)', re.IGNORECASE)
 RE_PRINT_FILE = re.compile(r'PRINT\s+#(\d+)\s*,\s*(.*)', re.IGNORECASE)

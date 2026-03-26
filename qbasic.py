@@ -61,9 +61,9 @@ def run_script(path: str, terminal: 'QBasicTerminal') -> None:
                 # so all validation (e.g. built-in name rejection) applies.
                 body_str = ' : '.join(body)
                 param_str = f"({', '.join(params)})" if params else ""
-                terminal.process(f"DEF {name}{param_str} = {body_str}")
+                terminal.process(f"DEF {name}{param_str} = {body_str}", track_undo=False)
         else:
-            terminal.process(line)
+            terminal.process(line, track_undo=False)
         i += 1
 
     # Auto-run if the program has a MEASURE statement

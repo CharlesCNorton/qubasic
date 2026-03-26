@@ -52,15 +52,49 @@ class ControlFlowMixin:
         m = RE_PRINT.match(stmt)
         if not m:
             return None
-        text = self._substitute_vars(m.group(1).strip(), run_vars)
+        raw_expr = m.group(1)
+        text = self._substitute_vars(raw_expr.strip(), run_vars)
+        # Determine trailing separator: ; suppresses newline, , advances to tab
+        suppress_newline = raw_expr.rstrip().endswith(';')
+        tab_advance = raw_expr.rstrip().endswith(',')
+        if suppress_newline:
+            text = text.rstrip().removesuffix(';').rstrip()
+        elif tab_advance:
+            text = text.rstrip().removesuffix(',').rstrip()
+        # Evaluate SPC(n) and TAB(n) inline
+        import re as _re
+        def _replace_spc(m_spc):
+            try:
+                n = int(self._eval_with_vars(m_spc.group(1), run_vars))
+            except Exception:
+                n = 1
+            return ' ' * max(0, n)
+        def _replace_tab(m_tab):
+            try:
+                n = int(self._eval_with_vars(m_tab.group(1), run_vars))
+            except Exception:
+                n = 1
+            return ' ' * max(0, n)
+        text = _re.sub(r'\bSPC\s*\(([^)]+)\)', _replace_spc, text, flags=_re.IGNORECASE)
+        text = _re.sub(r'\bTAB\s*\(([^)]+)\)', _replace_tab, text, flags=_re.IGNORECASE)
+        # Evaluate the expression
         if (text.startswith('"') and text.endswith('"')) or \
            (text.startswith("'") and text.endswith("'")):
-            print(text[1:-1])
+            output = text[1:-1]
         else:
             try:
-                print(self._eval_with_vars(text, run_vars))
+                output = str(self._eval_with_vars(text, run_vars))
             except Exception:
-                print(text)
+                output = text
+        # Output with separator behavior
+        if suppress_newline:
+            self.io.write(output)
+        elif tab_advance:
+            col = len(output) % 14
+            padding = 14 - col if col > 0 else 14
+            self.io.write(output + ' ' * padding)
+        else:
+            self.io.writeln(output)
         return True, ExecResult.ADVANCE
 
     def _cf_goto(self, stmt: str, sorted_lines: list[int]) -> tuple[bool, int] | None:
@@ -163,7 +197,7 @@ class ControlFlowMixin:
             return True, self._find_matching_wend(sorted_lines, ip)
 
     def _cf_wend(self, run_vars: dict[str, Any], loop_stack: list[dict[str, Any]],
-                 sorted_lines: list[int] | None = None, ip: int | None = None) -> tuple[bool, ExecOutcome]:
+                 sorted_lines: list[int] | None = None, ip: int | None = None) -> tuple[bool, ExecOutcome] | None:
         if not loop_stack or loop_stack[-1].get('type') != 'while':
             ctx = f" at line {sorted_lines[ip]}" if sorted_lines and ip is not None else ""
             raise RuntimeError(f"WEND{ctx} without matching WHILE")
@@ -186,12 +220,17 @@ class ControlFlowMixin:
         cond_vars = run_vars
         if self.locc_mode and self.locc:
             cond_vars = {**run_vars, **self.locc.classical}
+        result = ExecResult.ADVANCE
         if self._eval_condition(cond_str, cond_vars):
             if then_clause:
-                exec_fn(then_clause, loop_stack, sorted_lines, ip, run_vars)
+                r = exec_fn(then_clause, loop_stack, sorted_lines, ip, run_vars)
+                if r is not None and r is not ExecResult.ADVANCE:
+                    result = r
         elif else_clause:
-            exec_fn(else_clause, loop_stack, sorted_lines, ip, run_vars)
-        return True, ExecResult.ADVANCE
+            r = exec_fn(else_clause, loop_stack, sorted_lines, ip, run_vars)
+            if r is not None and r is not ExecResult.ADVANCE:
+                result = r
+        return True, result
 
     def _exec_control_flow(
         self, stmt: str, loop_stack: list[dict[str, Any]],
@@ -214,63 +253,87 @@ class ControlFlowMixin:
         if upper == 'WEND':
             return self._cf_wend(run_vars, loop_stack, sorted_lines, ip)
 
-        for handler in [
-            lambda: self._cf_let_array(stmt, run_vars),
-            lambda: self._cf_let_var(stmt, run_vars),
-            lambda: self._cf_print(stmt, run_vars),
-            lambda: self._cf_goto(stmt, sorted_lines),
-            lambda: self._cf_gosub(stmt, sorted_lines, ip),
-            lambda: self._cf_for(stmt, run_vars, loop_stack, ip),
-            lambda: self._cf_next(stmt, run_vars, loop_stack),
-            lambda: self._cf_while(stmt, run_vars, loop_stack, sorted_lines, ip),
-            lambda: self._cf_if_then(stmt, run_vars, loop_stack, sorted_lines, ip, exec_fn),
-        ]:
-            result = handler()
-            if result is not None:
-                return result
+        # Core control flow — direct dispatch, short-circuit on match
+        r = self._cf_let_array(stmt, run_vars)
+        if r is not None: return r
+        r = self._cf_let_var(stmt, run_vars)
+        if r is not None: return r
+        r = self._cf_print(stmt, run_vars)
+        if r is not None: return r
+        r = self._cf_goto(stmt, sorted_lines)
+        if r is not None: return r
+        r = self._cf_gosub(stmt, sorted_lines, ip)
+        if r is not None: return r
+        r = self._cf_for(stmt, run_vars, loop_stack, ip)
+        if r is not None: return r
+        r = self._cf_next(stmt, run_vars, loop_stack)
+        if r is not None: return r
+        r = self._cf_while(stmt, run_vars, loop_stack, sorted_lines, ip)
+        if r is not None: return r
+        r = self._cf_if_then(stmt, run_vars, loop_stack, sorted_lines, ip, exec_fn)
+        if r is not None: return r
 
-        # Extended control flow (classic BASIC, SUB/FUNCTION, debug)
-        ext_handlers = []
+        # Extended control flow (classic BASIC)
         if hasattr(self, '_cf_data'):
-            ext_handlers.extend([
-                lambda: self._cf_data(stmt),
-                lambda: self._cf_read(stmt, run_vars),
-                lambda: self._cf_on_goto(stmt, run_vars, sorted_lines),
-                lambda: self._cf_on_gosub(stmt, run_vars, sorted_lines, ip),
-                lambda: self._cf_select_case(stmt, run_vars, sorted_lines, ip),
-                lambda: self._cf_case(stmt, sorted_lines, ip),
-                lambda: self._cf_end_select(stmt),
-                lambda: self._cf_do(stmt, run_vars, loop_stack, sorted_lines, ip),
-                lambda: self._cf_loop(stmt, run_vars, loop_stack, sorted_lines, ip),
-                lambda: self._cf_exit(stmt, loop_stack, sorted_lines, ip),
-                lambda: self._cf_swap(stmt, run_vars),
-                lambda: self._cf_def_fn(stmt, run_vars),
-                lambda: self._cf_option_base(stmt),
-            ])
+            r = self._cf_data(stmt)
+            if r is not None: return r
+            r = self._cf_read(stmt, run_vars)
+            if r is not None: return r
+            r = self._cf_on_goto(stmt, run_vars, sorted_lines)
+            if r is not None: return r
+            r = self._cf_on_gosub(stmt, run_vars, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_select_case(stmt, run_vars, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_case(stmt, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_end_select(stmt)
+            if r is not None: return r
+            r = self._cf_do(stmt, run_vars, loop_stack, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_loop(stmt, run_vars, loop_stack, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_exit(stmt, loop_stack, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_swap(stmt, run_vars)
+            if r is not None: return r
+            r = self._cf_def_fn(stmt, run_vars)
+            if r is not None: return r
+            r = self._cf_option_base(stmt)
+            if r is not None: return r
+        # SUB/FUNCTION
         if hasattr(self, '_cf_sub'):
-            ext_handlers.extend([
-                lambda: self._cf_sub(stmt, sorted_lines, ip),
-                lambda: self._cf_end_sub(stmt),
-                lambda: self._cf_function(stmt, sorted_lines, ip),
-                lambda: self._cf_end_function(stmt),
-                lambda: self._cf_call(stmt, run_vars, sorted_lines, ip),
-                lambda: self._cf_local(stmt, run_vars),
-                lambda: self._cf_static(stmt, run_vars),
-                lambda: self._cf_shared(stmt, run_vars),
-            ])
+            r = self._cf_sub(stmt, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_end_sub(stmt)
+            if r is not None: return r
+            r = self._cf_function(stmt, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_end_function(stmt)
+            if r is not None: return r
+            r = self._cf_call(stmt, run_vars, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_local(stmt, run_vars)
+            if r is not None: return r
+            r = self._cf_static(stmt, run_vars)
+            if r is not None: return r
+            r = self._cf_shared(stmt, run_vars)
+            if r is not None: return r
+        # Debug/error handling
         if hasattr(self, '_cf_on_error'):
-            ext_handlers.extend([
-                lambda: self._cf_on_error(stmt),
-                lambda: self._cf_resume(stmt, sorted_lines),
-                lambda: self._cf_error(stmt),
-                lambda: self._cf_assert(stmt, run_vars),
-                lambda: self._cf_stop(stmt, sorted_lines, ip),
-                lambda: self._cf_on_measure(stmt),
-                lambda: self._cf_on_timer(stmt),
-            ])
-        for handler in ext_handlers:
-            result = handler()
-            if result is not None:
-                return result
+            r = self._cf_on_error(stmt)
+            if r is not None: return r
+            r = self._cf_resume(stmt, sorted_lines)
+            if r is not None: return r
+            r = self._cf_error(stmt)
+            if r is not None: return r
+            r = self._cf_assert(stmt, run_vars)
+            if r is not None: return r
+            r = self._cf_stop(stmt, sorted_lines, ip)
+            if r is not None: return r
+            r = self._cf_on_measure(stmt)
+            if r is not None: return r
+            r = self._cf_on_timer(stmt)
+            if r is not None: return r
 
         return False, None

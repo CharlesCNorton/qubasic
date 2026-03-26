@@ -1,6 +1,6 @@
 """QBASIC — Quantum BASIC Interactive Terminal (package)."""
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 from qbasic_core.engine import (
     GATE_TABLE, GATE_ALIASES,
@@ -24,6 +24,16 @@ from qbasic_core.debug import DebugMixin
 from qbasic_core.program_mgmt import ProgramMgmtMixin
 from qbasic_core.profiler import ProfilerMixin
 from qbasic_core.protocol import TerminalProtocol
+from qbasic_core.errors import (
+    QBasicError, QBasicSyntaxError, QBasicRuntimeError,
+    QBasicBuildError, QBasicRangeError, QBasicIOError, QBasicUndefinedError,
+)
+from qbasic_core.io_protocol import IOPort, StdIOPort
+from qbasic_core.statements import Stmt, RawStmt
+from qbasic_core.parser import parse_stmt
+from qbasic_core.exec_context import ExecContext
+from qbasic_core.scope import Scope
+from qbasic_core.backend import QuantumBackend, QiskitBackend, LOCCRegBackend
 
 __all__ = [
     'QBasicTerminal', 'LOCCEngine', 'ExecResult', 'ExecOutcome',
@@ -32,6 +42,12 @@ __all__ = [
     'MemoryMixin', 'StringMixin', 'ScreenMixin', 'ClassicMixin',
     'SubroutineMixin', 'DebugMixin', 'ProgramMgmtMixin', 'ProfilerMixin',
     'TerminalProtocol',
+    'QBasicError', 'QBasicSyntaxError', 'QBasicRuntimeError',
+    'QBasicBuildError', 'QBasicRangeError', 'QBasicIOError', 'QBasicUndefinedError',
+    'IOPort', 'StdIOPort',
+    'Stmt', 'RawStmt', 'parse_stmt',
+    'ExecContext', 'Scope',
+    'QuantumBackend', 'QiskitBackend', 'LOCCRegBackend',
     'GATE_TABLE', 'GATE_ALIASES',
     '__version__',
 ]

@@ -322,7 +322,7 @@ class TestTerminalCommands(unittest.TestCase):
         self.assertIn('8 QUBITS', out)
 
     def test_qubits_range_check(self):
-        _, out = capture(self.t.cmd_qubits, '50')
+        _, out = capture(self.t.dispatch, 'QUBITS 50')
         self.assertIn('RANGE', out)
         self.assertNotEqual(self.t.num_qubits, 50)
 
@@ -349,7 +349,7 @@ class TestTerminalCommands(unittest.TestCase):
 
     def test_reg_overflow(self):
         self.t.num_qubits = 4
-        capture(self.t.cmd_reg, 'big 10')
+        capture(self.t.dispatch, 'REG big 10')
         self.assertNotIn('big', self.t.registers)
 
     def test_def_subroutine(self):
@@ -363,7 +363,7 @@ class TestTerminalCommands(unittest.TestCase):
         self.assertEqual(self.t.subroutines['ROT']['params'], ['angle', 'q'])
 
     def test_def_builtin_rejected(self):
-        _, out = capture(self.t.cmd_def, 'H = X 0')
+        _, out = capture(self.t.dispatch, 'DEF H = X 0')
         self.assertIn('CANNOT REDEFINE', out)
 
     def test_process_numbered_line(self):
@@ -2071,7 +2071,7 @@ class TestNewFixes(unittest.TestCase):
 
     def test_version_exists(self):
         from qbasic_core import __version__
-        self.assertEqual(__version__, '0.2.0')
+        self.assertEqual(__version__, '0.3.0')
 
     def test_save_rejects_absolute_path(self):
         t = QBasicTerminal()

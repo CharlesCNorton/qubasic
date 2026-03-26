@@ -238,7 +238,7 @@ class ProgramMgmtMixin:
             for line in f:
                 line = line.rstrip('\n\r')
                 if line and not line.startswith('#'):
-                    self.process(line)
+                    self.process(line, track_undo=False)
         self.variables.update(saved_vars)
         print(f"CHAINED {path}")
         if self.program:
@@ -266,6 +266,6 @@ class ProgramMgmtMixin:
             for line in f:
                 line = line.rstrip('\n\r')
                 if line and not line.startswith('#'):
-                    self.process(line)
+                    self.process(line, track_undo=False)
                     count += 1
         print(f"MERGED {path} ({count} lines)")

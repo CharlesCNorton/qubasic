@@ -200,7 +200,7 @@ class SubroutineMixin:
             return None
         for vname in m.group(1).split(','):
             vname = vname.strip()
-            if vname and vname in self._scope_stack[-1] if self._scope_stack else False:
+            if vname and self._scope_stack and vname in self._scope_stack[-1]:
                 run_vars[vname] = self._scope_stack[-1].get(vname, 0)
                 self.variables[vname] = run_vars[vname]
         return True, ExecResult.ADVANCE
