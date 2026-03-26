@@ -54,14 +54,15 @@ from qbasic_core.profiler import ProfilerMixin
 from qbasic_core.errors import QBasicError
 from qbasic_core.io_protocol import StdIOPort
 from qbasic_core.parser import parse_stmt
+from qbasic_core.engine_state import Engine
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # The Terminal
 # ═══════════════════════════════════════════════════════════════════════
 
-class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, ControlFlowMixin,
-                     FileIOMixin, AnalysisMixin, SweepMixin,
+class QBasicTerminal(Engine, ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin,
+                     ControlFlowMixin, FileIOMixin, AnalysisMixin, SweepMixin,
                      MemoryMixin, StringMixin, ScreenMixin, ClassicMixin,
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin):
     # Method organization uses the mixin pattern to reduce apparent class
@@ -83,14 +84,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
     # (numpy).  This dualism is necessary because Qiskit does not
     # natively support mid-circuit measurement with classical
     # feedforward in the way LOCC protocols require.
-    def _get_parsed(self, line_num: int):
-        """Get parsed statement for a line, lazily parsing if needed."""
-        p = self._parsed.get(line_num)
-        if p is None:
-            raw = self.program.get(line_num, '')
-            p = parse_stmt(raw)
-            self._parsed[line_num] = p
-        return p
+    # _get_parsed is inherited from Engine
 
     def _gate_info(self, name: str) -> tuple[int, int] | None:
         """Look up (n_params, n_qubits) for a gate name.
@@ -136,35 +130,8 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
 
     def __init__(self) -> None:
         """Initialize the QBASIC terminal with default configuration."""
-        self.program = {}           # {line_num: source_string}
-        self.num_qubits = DEFAULT_QUBITS
-        self.shots = DEFAULT_SHOTS
-        self.subroutines = {}       # {NAME: {body, params} or [strings]}
-        self.registers = OrderedDict()  # {name: (start_qubit, size)}
-        self.variables = {}         # {name: value}
-        self.arrays = {}            # {name: [values]}
-        self._undo_stack = []       # for UNDO
-        self._gosub_stack = []      # for GOSUB/RETURN
-        self._custom_gates = {}     # {NAME: np.array matrix}
-        self._noise_model = None    # qiskit noise model
-        self._max_iterations = MAX_LOOP_ITERATIONS
-        self._include_depth = 0     # guard against recursive INCLUDE
-        self.last_counts = None
-        self.last_sv = None
-        self.last_circuit = None
-        self.step_mode = False
-        self.sim_method = 'automatic'
-        self.sim_device = 'CPU'
-        # LOCC mode
-        self.locc = None
-        self.locc_mode = False
-        # I/O and parse cache
-        self.io = StdIOPort()
-        self._parsed = {}  # {line_num: Stmt}
-        self._circuit_cache_key = None
-        self._circuit_cache = None  # (qc_transpiled, backend)
-        # Subsystem initialization
-        self._start_time = time.time()
+        Engine.__init__(self)
+        # Subsystem initialization (mixin state)
         self._init_memory()
         self._init_screen()
         self._init_classic()
@@ -393,19 +360,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
 
     def cmd_new(self, *, silent: bool = False) -> None:
         """NEW — clear program, subroutines, registers, and variables."""
-        self.program.clear()
-        self._parsed.clear()
-        self.subroutines.clear()
-        self.registers.clear()
-        self.variables.clear()
-        self.arrays.clear()
-        if hasattr(self, '_array_dims'):
-            self._array_dims.clear()
-        self.last_counts = None
-        self.last_sv = None
-        self.last_circuit = None
-        self._circuit_cache_key = None
-        self._circuit_cache = None
+        self.clear()
         if not silent:
             self.io.writeln("READY")
 
@@ -1134,7 +1089,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         Returns: int (jump target ip), ExecResult.ADVANCE, or ExecResult.END.
         """
         if ctx is not None:
-            qc = ctx.qc
+            qc = ctx.backend.qc if ctx.backend and hasattr(ctx.backend, 'qc') else ctx.qc
             loop_stack = ctx.loop_stack
             sorted_lines = ctx.sorted_lines
             ip = ctx.ip
@@ -1292,13 +1247,53 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
                                 sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
             return ExecResult.ADVANCE
 
-        # 2. Control flow (legacy regex path for extended statements)
-        def _recurse(s, ls, sl, i, rv):
-            return self._exec_line(s, qc=qc, loop_stack=ls, sorted_lines=sl, ip=i, run_vars=rv)
-        handled, result = self._exec_control_flow(
-            stmt, loop_stack, sorted_lines, ip, run_vars, _recurse)
-        if handled:
-            return result
+        # 2. Extended typed dispatch — delegates to _cf_* with raw string
+        from qbasic_core.statements import (
+            DataStmt, ReadStmt, OnGotoStmt, OnGosubStmt,
+            SelectCaseStmt, CaseStmt, EndSelectStmt,
+            DoStmt, LoopStmt, ExitStmt,
+            SwapStmt, DefFnStmt, OptionBaseStmt, RestoreStmt,
+            SubStmt, EndSubStmt, FunctionStmt, EndFunctionStmt,
+            CallStmt, LocalStmt, StaticStmt, SharedStmt,
+            OnErrorStmt, ResumeStmt, ErrorStmt, AssertStmt,
+            StopStmt, OnMeasureStmt, OnTimerStmt,
+        )
+        _cf_map = {
+            DataStmt: lambda: self._cf_data(stmt),
+            ReadStmt: lambda: self._cf_read(stmt, run_vars),
+            OnGotoStmt: lambda: self._cf_on_goto(stmt, run_vars, sorted_lines),
+            OnGosubStmt: lambda: self._cf_on_gosub(stmt, run_vars, sorted_lines, ip),
+            SelectCaseStmt: lambda: self._cf_select_case(stmt, run_vars, sorted_lines, ip),
+            CaseStmt: lambda: self._cf_case(stmt, sorted_lines, ip),
+            EndSelectStmt: lambda: self._cf_end_select(stmt),
+            DoStmt: lambda: self._cf_do(stmt, run_vars, loop_stack, sorted_lines, ip),
+            LoopStmt: lambda: self._cf_loop(stmt, run_vars, loop_stack, sorted_lines, ip),
+            ExitStmt: lambda: self._cf_exit(stmt, loop_stack, sorted_lines, ip),
+            SwapStmt: lambda: self._cf_swap(stmt, run_vars),
+            DefFnStmt: lambda: self._cf_def_fn(stmt, run_vars),
+            OptionBaseStmt: lambda: self._cf_option_base(stmt),
+            RestoreStmt: lambda: (True, ExecResult.ADVANCE),
+            SubStmt: lambda: self._cf_sub(stmt, sorted_lines, ip),
+            EndSubStmt: lambda: self._cf_end_sub(stmt),
+            FunctionStmt: lambda: self._cf_function(stmt, sorted_lines, ip),
+            EndFunctionStmt: lambda: self._cf_end_function(stmt),
+            CallStmt: lambda: self._cf_call(stmt, run_vars, sorted_lines, ip),
+            LocalStmt: lambda: self._cf_local(stmt, run_vars),
+            StaticStmt: lambda: self._cf_static(stmt, run_vars),
+            SharedStmt: lambda: self._cf_shared(stmt, run_vars),
+            OnErrorStmt: lambda: self._cf_on_error(stmt),
+            ResumeStmt: lambda: self._cf_resume(stmt, sorted_lines),
+            ErrorStmt: lambda: self._cf_error(stmt),
+            AssertStmt: lambda: self._cf_assert(stmt, run_vars),
+            StopStmt: lambda: self._cf_stop(stmt, sorted_lines, ip),
+            OnMeasureStmt: lambda: self._cf_on_measure(stmt),
+            OnTimerStmt: lambda: self._cf_on_timer(stmt),
+        }
+        handler = _cf_map.get(type(parsed))
+        if handler is not None:
+            r = handler()
+            if r is not None:
+                return r[1]
 
         # 3. Statement handlers
         _backend = ctx.backend if ctx else None

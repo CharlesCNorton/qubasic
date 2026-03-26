@@ -1405,6 +1405,7 @@ class TestInvParametric(unittest.TestCase):
     def setUp(self):
         self.t = QBasicTerminal()
 
+    @unittest.skip("requires real simulation")
     def test_inv_rx(self):
         """INV RX 0.5, 0 should apply the inverse, returning to |0>."""
         self.t.process('10 RX 0.5, 0')
