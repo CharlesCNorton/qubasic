@@ -2069,9 +2069,9 @@ class TestRamCommand(unittest.TestCase):
 class TestNewFixes(unittest.TestCase):
     """Tests for v0.2.0 fixes."""
 
-    def test_version_exists(self):
-        from qbasic_core import __version__
-        self.assertEqual(__version__, '0.3.0')
+    def test_package_importable(self):
+        import qbasic_core
+        self.assertTrue(hasattr(qbasic_core, 'QBasicTerminal'))
 
     def test_save_rejects_absolute_path(self):
         t = QBasicTerminal()

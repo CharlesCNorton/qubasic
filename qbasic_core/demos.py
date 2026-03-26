@@ -25,14 +25,14 @@ class DemoMixin:
         }
         name = name.upper().strip()
         if not name or name == 'LIST':
-            print("  Available demos:")
+            self.io.writeln("  Available demos:")
             for d in demos:
                 prefix = "  (LOCC)" if d.startswith('LOCC') else ""
-                print(f"    DEMO {d}{prefix}")
+                self.io.writeln(f"    DEMO {d}{prefix}")
             return
         if name not in demos:
-            print(f"?UNKNOWN DEMO: {name}")
-            print(f"  Try: DEMO LIST")
+            self.io.writeln(f"?UNKNOWN DEMO: {name}")
+            self.io.writeln(f"  Try: DEMO LIST")
             return
         demos[name]()
 
@@ -46,7 +46,7 @@ class DemoMixin:
             40: "CX 0,1",
             50: "MEASURE",
         }
-        print("LOADED: Bell State (2 qubits)")
+        self.io.writeln("LOADED: Bell State (2 qubits)")
         self.cmd_list()
         self.cmd_run()
 
@@ -66,7 +66,7 @@ class DemoMixin:
             self.program[line] = f"CX 0,{i}"
             line += 10
         self.program[line] = "MEASURE"
-        print(f"LOADED: GHZ State ({n} qubits)")
+        self.io.writeln(f"LOADED: GHZ State ({n} qubits)")
         self.cmd_list()
         self.cmd_run()
 
@@ -92,9 +92,9 @@ class DemoMixin:
             160: "H 0",
             170: "MEASURE",
         }
-        print("LOADED: Quantum Teleportation — circuit stage (3 qubits)")
-        print("  Without correction: uniform over all 8 outcomes.")
-        print("  For full protocol with correction: DEMO LOCC-TELEPORT")
+        self.io.writeln("LOADED: Quantum Teleportation — circuit stage (3 qubits)")
+        self.io.writeln("  Without correction: uniform over all 8 outcomes.")
+        self.io.writeln("  For full protocol with correction: DEMO LOCC-TELEPORT")
         self.cmd_list()
         self.cmd_run()
 
@@ -135,7 +135,7 @@ class DemoMixin:
             300: "REM",
             310: "MEASURE",
         }
-        print("LOADED: Grover's Search (3 qubits, target=|101>)")
+        self.io.writeln("LOADED: Grover's Search (3 qubits, target=|101>)")
         self.cmd_list()
         self.cmd_run()
 
@@ -167,7 +167,7 @@ class DemoMixin:
             220: "SWAP 1,2",
             230: "MEASURE",
         }
-        print("LOADED: QFT on |0101> (4 qubits)")
+        self.io.writeln("LOADED: QFT on |0101> (4 qubits)")
         self.cmd_list()
         self.cmd_run()
 
@@ -189,8 +189,8 @@ class DemoMixin:
             120: "H 0",
             130: "MEASURE",
         }
-        print("LOADED: Deutsch-Jozsa (2 qubits, balanced oracle)")
-        print("  Expect: qubit 0 = 1 (balanced)")
+        self.io.writeln("LOADED: Deutsch-Jozsa (2 qubits, balanced oracle)")
+        self.io.writeln("  Expect: qubit 0 = 1 (balanced)")
         self.cmd_list()
         self.cmd_run()
 
@@ -214,8 +214,8 @@ class DemoMixin:
             140: "H 0 : H 1 : H 2 : H 3",
             150: "MEASURE",
         }
-        print("LOADED: Bernstein-Vazirani (5 qubits, secret=1011)")
-        print("  Expect: measurement shows ...1011 (q3q2q1q0)")
+        self.io.writeln("LOADED: Bernstein-Vazirani (5 qubits, secret=1011)")
+        self.io.writeln("  Expect: measurement shows ...1011 (q3q2q1q0)")
         self.cmd_list()
         self.cmd_run()
 
@@ -238,8 +238,8 @@ class DemoMixin:
             130: "H 0",
             140: "MEASURE",
         }
-        print("LOADED: Superdense Coding (message='11')")
-        print("  Expect: |11> with high probability")
+        self.io.writeln("LOADED: Superdense Coding (message='11')")
+        self.io.writeln("  Expect: |11> with high probability")
         self.cmd_list()
         self.cmd_run()
 
@@ -258,7 +258,7 @@ class DemoMixin:
             self.program[line] = f"H {i}"
             line += 10
         self.program[line] = "MEASURE"
-        print(f"LOADED: Quantum RNG ({n} bits)")
+        self.io.writeln(f"LOADED: Quantum RNG ({n} bits)")
         self.cmd_list()
         self.cmd_run()
         self.shots = 1024
@@ -286,7 +286,7 @@ class DemoMixin:
             self.program[line] = f"CX {i},{i+1}"
             line += 10
         self.program[line] = "MEASURE"
-        print(f"LOADED: {n}-Qubit Stress Test")
+        self.io.writeln(f"LOADED: {n}-Qubit Stress Test")
         self.cmd_run()
 
     def _demo_locc_teleport(self):
@@ -317,8 +317,8 @@ class DemoMixin:
             200: "REM Bob's qubit 0 now holds Alice's original state",
             210: "MEASURE",
         }
-        print("LOADED: LOCC Teleportation (JOINT 3+3)")
-        print("  Alice sends |+> to Bob. Expect Bob's qubit ~ 50/50.")
+        self.io.writeln("LOADED: LOCC Teleportation (JOINT 3+3)")
+        self.io.writeln("  Alice sends |+> to Bob. Expect Bob's qubit ~ 50/50.")
         self.cmd_list()
         self.cmd_run()
 
@@ -348,8 +348,8 @@ class DemoMixin:
             180: "@B CX 2,3",
             190: "MEASURE",
         }
-        print("LOADED: LOCC Classical Coordination (SPLIT 4+4)")
-        print("  Alice and Bob share a random key, then prepare matching states.")
+        self.io.writeln("LOADED: LOCC Classical Coordination (SPLIT 4+4)")
+        self.io.writeln("  Alice and Bob share a random key, then prepare matching states.")
         self.cmd_list()
         self.cmd_run()
 

@@ -27,17 +27,17 @@ class SweepMixin:
         """
         parts = rest.split()
         if len(parts) < 3:
-            print("?USAGE: SWEEP <var> <start> <end> [steps]")
+            self.io.writeln("?USAGE: SWEEP <var> <start> <end> [steps]")
             return
         var = parts[0]
         start = self.eval_expr(parts[1])
         end = self.eval_expr(parts[2])
         steps = int(parts[3]) if len(parts) > 3 else 10
         if steps < 1:
-            print("?SWEEP needs at least 1 step")
+            self.io.writeln("?SWEEP needs at least 1 step")
             return
 
-        print(f"\nSWEEP {var} from {start} to {end} in {steps} steps:")
+        self.io.writeln(f"\nSWEEP {var} from {start} to {end} in {steps} steps:")
         if steps == 1:
             values = [start]
         else:
@@ -68,15 +68,15 @@ class SweepMixin:
                 sweep_xs.append(val)
                 sweep_ys.append(top[1] / self.shots)
             except Exception as e:
-                print(f"  {var}={val:8.4f}  ERROR: {e}")
+                self.io.writeln(f"  {var}={val:8.4f}  ERROR: {e}")
 
         # Plotille chart of P(top state) vs variable
         if _plotille is not None and len(sweep_xs) >= 2:
-            print()
+            self.io.writeln('')
             print(_plotille.plot(
                 sweep_xs, sweep_ys,
                 width=60, height=15,
                 X_label=var,
                 Y_label='P(top)',
                 lc='cyan'))
-        print()
+        self.io.writeln('')

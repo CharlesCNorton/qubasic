@@ -25,16 +25,16 @@ class ScreenMixin:
         if not rest.strip():
             names = {0: 'text', 1: 'histogram', 2: 'statevector',
                      3: 'Bloch', 4: 'density', 5: 'circuit'}
-            print(f"SCREEN = {self._screen_mode} ({names.get(self._screen_mode, '?')})")
+            self.io.writeln(f"SCREEN = {self._screen_mode} ({names.get(self._screen_mode, '?')})")
             return
         mode = int(rest.strip())
         if mode < 0 or mode > 5:
-            print("?SCREEN 0-5")
+            self.io.writeln("?SCREEN 0-5")
             return
         self._screen_mode = mode
         names = {0: 'text', 1: 'histogram', 2: 'statevector',
                  3: 'Bloch', 4: 'density', 5: 'circuit'}
-        print(f"SCREEN {mode} ({names[mode]})")
+        self.io.writeln(f"SCREEN {mode} ({names[mode]})")
 
     def _auto_display(self) -> None:
         """Display results using current SCREEN mode after RUN."""
@@ -49,7 +49,7 @@ class ScreenMixin:
                 from qbasic_core.engine import MAX_BLOCH_DISPLAY
                 for q in range(min(self.num_qubits, MAX_BLOCH_DISPLAY)):
                     self._print_bloch_single(self.last_sv, q)
-                    print()
+                    self.io.writeln('')
         elif mode == 4:
             if hasattr(self, 'cmd_density'):
                 self.cmd_density()
@@ -62,7 +62,7 @@ class ScreenMixin:
         from qbasic_core.engine import RE_COLOR
         m = RE_COLOR.match(f"COLOR {rest}")
         if not m:
-            print("?USAGE: COLOR <fg>[, <bg>]")
+            self.io.writeln("?USAGE: COLOR <fg>[, <bg>]")
             return
         self._color_fg = m.group(1).lower()
         self._color_bg = m.group(2).lower() if m.group(2) else ''
@@ -74,24 +74,24 @@ class ScreenMixin:
         fg_code = colors.get(self._color_fg, 37)
         if self._color_bg:
             bg_code = colors.get(self._color_bg, 40) + 10
-            print(f"\033[{fg_code};{bg_code}m", end='')
+            self.io.write(f"\033[{fg_code};{bg_code}m")
         else:
-            print(f"\033[{fg_code}m", end='')
-        print(f"COLOR {self._color_fg}" + (f", {self._color_bg}" if self._color_bg else ""))
+            self.io.write(f"\033[{fg_code}m")
+        self.io.writeln(f"COLOR {self._color_fg}" + (f", {self._color_bg}" if self._color_bg else ""))
 
     def cmd_cls(self) -> None:
         """CLS — clear screen."""
-        print('\033[2J\033[H', end='', flush=True)
+        self.io.write('\033[2J\033[H')
 
     def cmd_locate(self, rest: str) -> None:
         """LOCATE row, col — position cursor."""
         from qbasic_core.engine import RE_LOCATE
         m = RE_LOCATE.match(f"LOCATE {rest}")
         if not m:
-            print("?USAGE: LOCATE <row>, <col>")
+            self.io.writeln("?USAGE: LOCATE <row>, <col>")
             return
         row, col = int(m.group(1)), int(m.group(2))
-        print(f"\033[{row};{col}H", end='', flush=True)
+        self.io.write(f"\033[{row};{col}H")
 
     def cmd_play(self, rest: str = '') -> None:
         """PLAY — terminal bell/beep."""
@@ -102,16 +102,16 @@ class ScreenMixin:
             except ValueError:
                 pass
         for _ in range(count):
-            print('\a', end='', flush=True)
+            self.io.write('\a')
 
     def cmd_prompt(self, rest: str) -> None:
         """PROMPT <string> — set the REPL prompt."""
         if not rest.strip():
-            print(f"PROMPT = {self._prompt!r}")
+            self.io.writeln(f"PROMPT = {self._prompt!r}")
             return
         text = rest.strip()
         if (text.startswith('"') and text.endswith('"')) or \
            (text.startswith("'") and text.endswith("'")):
             text = text[1:-1]
         self._prompt = text
-        print(f"PROMPT = {self._prompt!r}")
+        self.io.writeln(f"PROMPT = {self._prompt!r}")

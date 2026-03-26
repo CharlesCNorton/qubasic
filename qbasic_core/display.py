@@ -69,9 +69,9 @@ class DisplayMixin:
                                total: int) -> None:
         """Plain-text histogram (fallback when rich is not available)."""
         if len(sorted_counts) > MAX_HISTOGRAM_STATES:
-            print(f"\n  Showing top {MAX_HISTOGRAM_STATES} of {len(sorted_counts)} outcomes:\n")
+            self.io.writeln(f"\n  Showing top {MAX_HISTOGRAM_STATES} of {len(sorted_counts)} outcomes:\n")
         else:
-            print()
+            self.io.writeln('')
 
         max_count = max(c for _, c in display) if display else 1
         max_label = max(len(k) for k, _ in display) if display else 1
@@ -81,13 +81,13 @@ class DisplayMixin:
             bar_len = int(HISTOGRAM_BAR_WIDTH * count / max_count)
             bar = '\u2588' * bar_len
             ket = f"|{state}\u27E9"
-            print(f"  {ket:>{max_label+3}}  {count:>6}  ({pct:5.1f}%)  {bar}")
+            self.io.writeln(f"  {ket:>{max_label+3}}  {count:>6}  ({pct:5.1f}%)  {bar}")
 
         if len(sorted_counts) > MAX_HISTOGRAM_STATES:
             rest_count = sum(c for _, c in sorted_counts[MAX_HISTOGRAM_STATES:])
             print(f"  {'...':>{max_label+3}}  {rest_count:>6}  "
                   f"({100*rest_count/total:5.1f}%)  (remaining)")
-        print()
+        self.io.writeln('')
 
     def _print_statevector(self, sv, n_qubits=None):
         """Print non-zero amplitudes of the statevector."""
@@ -121,7 +121,7 @@ class DisplayMixin:
             _console.print()
             return
 
-        print(f"\n  Statevector ({n} qubits):")
+        self.io.writeln(f"\n  Statevector ({n} qubits):")
         count = 0
         for i, amp in enumerate(sv):
             if abs(amp) > AMPLITUDE_THRESHOLD:
@@ -133,9 +133,9 @@ class DisplayMixin:
                 if count >= MAX_DISPLAY_AMPLITUDES:
                     remaining = sum(1 for a in sv[i+1:] if abs(a) > AMPLITUDE_THRESHOLD)
                     if remaining:
-                        print(f"  ... and {remaining} more non-zero amplitudes")
+                        self.io.writeln(f"  ... and {remaining} more non-zero amplitudes")
                     break
-        print()
+        self.io.writeln('')
 
     def _print_sv_compact(self, sv):
         """Compact statevector display for step mode."""
@@ -151,7 +151,7 @@ class DisplayMixin:
                 if len(parts) >= 8:
                     parts.append("...")
                     break
-        print(f"   |\u03C8\u27E9 = {' '.join(parts)}")
+        self.io.writeln(f"   |\u03C8\u27E9 = {' '.join(parts)}")
 
     def _print_probs(self, sv):
         """Print probability distribution with histogram."""
@@ -166,17 +166,17 @@ class DisplayMixin:
         probs.sort(key=lambda x: -x[1])
         display = probs[:MAX_HISTOGRAM_STATES]
 
-        print(f"\n  Probability distribution ({len(probs)} non-zero):\n")
+        self.io.writeln(f"\n  Probability distribution ({len(probs)} non-zero):\n")
         max_p = max(p for _, p in display) if display else 1
 
         for state, p in display:
             bar_len = int(HISTOGRAM_BAR_WIDTH * p / max_p)
             bar = '\u2588' * bar_len
-            print(f"  |{state}\u27E9  {p*100:6.2f}%  {bar}")
+            self.io.writeln(f"  |{state}\u27E9  {p*100:6.2f}%  {bar}")
 
         if len(probs) > MAX_HISTOGRAM_STATES:
-            print(f"  ... and {len(probs)-MAX_HISTOGRAM_STATES} more states")
-        print()
+            self.io.writeln(f"  ... and {len(probs)-MAX_HISTOGRAM_STATES} more states")
+        self.io.writeln('')
 
     def _print_bloch_single(self, sv, qubit, n_qubits=None):
         """ASCII Bloch sphere for a single qubit."""
@@ -232,11 +232,11 @@ class DisplayMixin:
             grid[pz][px] = '\u25CF'
 
         # Labels on the sphere
-        print(f"  Qubit {qubit}  ({x:.3f}, {y:.3f}, {z:.3f})  {label}")
-        print(f"{'|0\u27E9':^{W+4}}")
+        self.io.writeln(f"  Qubit {qubit}  ({x:.3f}, {y:.3f}, {z:.3f})  {label}")
+        self.io.writeln(f"{'|0\u27E9':^{W+4}}")
         for row in grid:
-            print(f"  {''.join(row)}")
-        print(f"{'|1\u27E9':^{W+4}}")
+            self.io.writeln(f"  {''.join(row)}")
+        self.io.writeln(f"{'|1\u27E9':^{W+4}}")
 
     def _bloch_vector(self, sv, qubit, n_qubits=None):
         """Compute the Bloch vector for a single qubit from the statevector."""

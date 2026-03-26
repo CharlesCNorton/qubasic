@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qbasic"
-version = "0.3.0"
+version = "0.0.0"
 description = "Quantum BASIC Interactive Terminal"
 requires-python = ">=3.10"
 license = {text = "MIT"}

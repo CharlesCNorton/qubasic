@@ -48,9 +48,14 @@ class TerminalProtocol(Protocol):
     _noise_model: Any | None
     _max_iterations: int
     _include_depth: int
+    _parsed: dict[int, Any]
+    _circuit_cache_key: Any | None
+    _circuit_cache: Any | None
+    io: Any  # IOPort
 
     # ── Methods mixins call on the host ────────────────────────────────
 
+    def _get_parsed(self, line_num: int) -> Any: ...
     def eval_expr(self, expr: str) -> float: ...
     def _safe_eval(self, expr: str, extra_ns: dict[str, Any] | None = None) -> Any: ...
     def _eval_with_vars(self, expr: str, run_vars: dict[str, Any]) -> float: ...

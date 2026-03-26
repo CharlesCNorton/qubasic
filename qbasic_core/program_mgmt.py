@@ -34,7 +34,7 @@ class ProgramMgmtMixin:
         if len(parts) > 1:
             self._auto_step = int(parts[1])
         self._auto_mode = True
-        print(f"AUTO {self._auto_line}, {self._auto_step} — type . to stop")
+        self.io.writeln(f"AUTO {self._auto_line}, {self._auto_step} — type . to stop")
         while self._auto_mode:
             try:
                 line = input(f'{self._auto_line} ').rstrip()
@@ -46,7 +46,7 @@ class ProgramMgmtMixin:
                 self._auto_line += self._auto_step
             except (KeyboardInterrupt, EOFError):
                 self._auto_mode = False
-                print()
+                self.io.writeln('')
                 break
 
     # ── EDIT ───────────────────────────────────────────────────────────
@@ -54,23 +54,23 @@ class ProgramMgmtMixin:
     def cmd_edit(self, rest: str) -> None:
         """EDIT <line> — edit a specific line."""
         if not rest.strip():
-            print("?USAGE: EDIT <line>")
+            self.io.writeln("?USAGE: EDIT <line>")
             return
         num = int(rest.strip())
         if num not in self.program:
-            print(f"?LINE {num} NOT FOUND")
+            self.io.writeln(f"?LINE {num} NOT FOUND")
             return
         current = self.program[num]
-        print(f"  {num} {current}")
+        self.io.writeln(f"  {num} {current}")
         try:
             new_content = input(f'{num} ').rstrip()
             if new_content:
                 self.program[num] = new_content
-                print(f"  UPDATED {num}")
+                self.io.writeln(f"  UPDATED {num}")
             else:
-                print("  (unchanged)")
+                self.io.writeln("  (unchanged)")
         except (KeyboardInterrupt, EOFError):
-            print("\n  (cancelled)")
+            self.io.writeln("\n  (cancelled)")
 
     # ── LIST enhancements ──────────────────────────────────────────────
 
@@ -80,44 +80,44 @@ class ProgramMgmtMixin:
         for ln in sorted(self.program.keys()):
             stmt = self.program[ln].strip().upper()
             if stmt.startswith('SUB ') or stmt.startswith('FUNCTION '):
-                print(f"  {ln:5d}  {self.program[ln]}")
+                self.io.writeln(f"  {ln:5d}  {self.program[ln]}")
                 found = True
         if self.subroutines:
             for name, sub in self.subroutines.items():
                 if isinstance(sub, dict):
                     params = f"({', '.join(sub['params'])})" if sub['params'] else ""
-                    print(f"  DEF  {name}{params} ({len(sub['body'])} gates)")
+                    self.io.writeln(f"  DEF  {name}{params} ({len(sub['body'])} gates)")
                 found = True
         if not found:
-            print("  No subroutines defined")
+            self.io.writeln("  No subroutines defined")
 
     def cmd_list_vars(self) -> None:
         """LIST VARS — alias for VARS with types."""
         if not self.variables:
-            print("  No variables")
+            self.io.writeln("  No variables")
             return
         for name, val in sorted(self.variables.items()):
             typ = type(val).__name__
-            print(f"  {name} = {val}  ({typ})")
+            self.io.writeln(f"  {name} = {val}  ({typ})")
 
     def cmd_list_arrays(self) -> None:
         """LIST ARRAYS — list all arrays with sizes."""
         if not self.arrays:
-            print("  No arrays")
+            self.io.writeln("  No arrays")
             return
         for name, data in sorted(self.arrays.items()):
             if isinstance(data, list):
-                print(f"  {name}({len(data)}) = {data[:5]}{'...' if len(data) > 5 else ''}")
+                self.io.writeln(f"  {name}({len(data)}) = {data[:5]}{'...' if len(data) > 5 else ''}")
             elif isinstance(data, dict):
-                print(f"  {name}({len(data)} dims)")
+                self.io.writeln(f"  {name}({len(data)} dims)")
 
     # ── Program slots (BANK) ──────────────────────────────────────────
 
     def cmd_bank(self, rest: str) -> None:
         """BANK <n> — switch to program slot n."""
         if not rest.strip():
-            print(f"  Current slot: {self._current_slot}")
-            print(f"  Slots in use: {sorted(self._program_slots.keys())}")
+            self.io.writeln(f"  Current slot: {self._current_slot}")
+            self.io.writeln(f"  Slots in use: {sorted(self._program_slots.keys())}")
             return
         slot = int(rest.strip())
         # Save current
@@ -126,10 +126,10 @@ class ProgramMgmtMixin:
         self._current_slot = slot
         if slot in self._program_slots:
             self.program = dict(self._program_slots[slot])
-            print(f"BANK {slot} ({len(self.program)} lines)")
+            self.io.writeln(f"BANK {slot} ({len(self.program)} lines)")
         else:
             self.program = {}
-            print(f"BANK {slot} (empty)")
+            self.io.writeln(f"BANK {slot} (empty)")
 
     # ── COPY / MOVE ────────────────────────────────────────────────────
 
@@ -137,20 +137,20 @@ class ProgramMgmtMixin:
         """COPY <start>-<end> TO <dest> — copy line range."""
         m = self._parse_range_to(rest)
         if not m:
-            print("?USAGE: COPY <start>-<end> TO <dest>")
+            self.io.writeln("?USAGE: COPY <start>-<end> TO <dest>")
             return
         start, end, dest = m
         offset = dest - start
         for ln in sorted(self.program.keys()):
             if start <= ln <= end:
                 self.program[ln + offset] = self.program[ln]
-        print(f"COPIED {start}-{end} TO {dest}-{end + offset}")
+        self.io.writeln(f"COPIED {start}-{end} TO {dest}-{end + offset}")
 
     def cmd_move(self, rest: str) -> None:
         """MOVE <start>-<end> TO <dest> — move line range."""
         m = self._parse_range_to(rest)
         if not m:
-            print("?USAGE: MOVE <start>-<end> TO <dest>")
+            self.io.writeln("?USAGE: MOVE <start>-<end> TO <dest>")
             return
         start, end, dest = m
         offset = dest - start
@@ -160,7 +160,7 @@ class ProgramMgmtMixin:
             del self.program[ln]
         for ln, stmt in lines.items():
             self.program[ln + offset] = stmt
-        print(f"MOVED {start}-{end} TO {dest}-{end + offset}")
+        self.io.writeln(f"MOVED {start}-{end} TO {dest}-{end + offset}")
 
     @staticmethod
     def _parse_range_to(rest: str) -> tuple[int, int, int] | None:
@@ -176,42 +176,42 @@ class ProgramMgmtMixin:
         """FIND "text" — search program lines."""
         text = rest.strip().strip('"').strip("'")
         if not text:
-            print("?USAGE: FIND \"text\"")
+            self.io.writeln("?USAGE: FIND \"text\"")
             return
         found = 0
         for ln in sorted(self.program.keys()):
             if text.upper() in self.program[ln].upper():
-                print(f"  {ln:5d}  {self.program[ln]}")
+                self.io.writeln(f"  {ln:5d}  {self.program[ln]}")
                 found += 1
-        print(f"  {found} match(es)")
+        self.io.writeln(f"  {found} match(es)")
 
     def cmd_replace(self, rest: str) -> None:
         """REPLACE "old" WITH "new" — find and replace in program."""
         import re
         m = re.match(r'"([^"]+)"\s+WITH\s+"([^"]*)"', rest, re.IGNORECASE)
         if not m:
-            print('?USAGE: REPLACE "old" WITH "new"')
+            self.io.writeln('?USAGE: REPLACE "old" WITH "new"')
             return
         old, new = m.group(1), m.group(2)
         count = 0
         for ln in sorted(self.program.keys()):
             if old in self.program[ln]:
                 self.program[ln] = self.program[ln].replace(old, new)
-                print(f"  {ln:5d}  {self.program[ln]}")
+                self.io.writeln(f"  {ln:5d}  {self.program[ln]}")
                 count += 1
-        print(f"  {count} replacement(s)")
+        self.io.writeln(f"  {count} replacement(s)")
 
     # ── CHECKSUM ───────────────────────────────────────────────────────
 
     def cmd_checksum(self) -> None:
         """CHECKSUM — hash of program listing for verification."""
         if not self.program:
-            print("?EMPTY PROGRAM")
+            self.io.writeln("?EMPTY PROGRAM")
             return
         content = '\n'.join(f'{ln} {self.program[ln]}'
                            for ln in sorted(self.program.keys()))
         h = hashlib.md5(content.encode()).hexdigest()[:8].upper()
-        print(f"CHECKSUM: {h} ({len(self.program)} lines)")
+        self.io.writeln(f"CHECKSUM: {h} ({len(self.program)} lines)")
 
     # ── CHAIN / MERGE ──────────────────────────────────────────────────
 
@@ -219,18 +219,18 @@ class ProgramMgmtMixin:
         """CHAIN "file" — load and run a program, preserving variables."""
         m = RE_CHAIN.match(f"CHAIN {rest}")
         if not m:
-            print('?USAGE: CHAIN "filename"')
+            self.io.writeln('?USAGE: CHAIN "filename"')
             return
         path = m.group(1).strip()
         try:
             path = self._sanitize_path(path)
         except ValueError as e:
-            print(f"?CHAIN ERROR: {e}")
+            self.io.writeln(f"?CHAIN ERROR: {e}")
             return
         if not path.endswith('.qb'):
             path += '.qb'
         if not os.path.isfile(path):
-            print(f"?FILE NOT FOUND: {path}")
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
         saved_vars = dict(self.variables)
         self.program.clear()
@@ -240,7 +240,7 @@ class ProgramMgmtMixin:
                 if line and not line.startswith('#'):
                     self.process(line, track_undo=False)
         self.variables.update(saved_vars)
-        print(f"CHAINED {path}")
+        self.io.writeln(f"CHAINED {path}")
         if self.program:
             self.cmd_run()
 
@@ -248,18 +248,18 @@ class ProgramMgmtMixin:
         """MERGE "file" — merge lines from another file without clearing."""
         m = RE_MERGE.match(f"MERGE {rest}")
         if not m:
-            print('?USAGE: MERGE "filename"')
+            self.io.writeln('?USAGE: MERGE "filename"')
             return
         path = m.group(1).strip()
         try:
             path = self._sanitize_path(path)
         except ValueError as e:
-            print(f"?MERGE ERROR: {e}")
+            self.io.writeln(f"?MERGE ERROR: {e}")
             return
         if not path.endswith('.qb'):
             path += '.qb'
         if not os.path.isfile(path):
-            print(f"?FILE NOT FOUND: {path}")
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
         count = 0
         with open(path, 'r', encoding='utf-8') as f:
@@ -268,4 +268,4 @@ class ProgramMgmtMixin:
                 if line and not line.startswith('#'):
                     self.process(line, track_undo=False)
                     count += 1
-        print(f"MERGED {path} ({count} lines)")
+        self.io.writeln(f"MERGED {path} ({count} lines)")

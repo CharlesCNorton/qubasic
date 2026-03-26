@@ -136,9 +136,9 @@ class MemoryMixin:
         if a in writers:
             writers[a]()
         elif 0xD010 <= a <= 0xD01F:
-            print(f"?READ-ONLY: ${a:04X}")
+            self.io.writeln(f"?READ-ONLY: ${a:04X}")
         elif 0x0100 <= a <= 0x01FF:
-            print("?USE GATES TO MODIFY QUBIT STATE")
+            self.io.writeln("?USE GATES TO MODIFY QUBIT STATE")
 
     # ── Commands ───────────────────────────────────────────────────────
 
@@ -147,7 +147,7 @@ class MemoryMixin:
         from qbasic_core.engine import RE_POKE
         m = RE_POKE.match(f"POKE {rest}")
         if not m:
-            print("?USAGE: POKE <addr>, <value>")
+            self.io.writeln("?USAGE: POKE <addr>, <value>")
             return
         addr = self.eval_expr(m.group(1))
         val = self.eval_expr(m.group(2))
@@ -159,15 +159,15 @@ class MemoryMixin:
         if rest.startswith('INSTALL'):
             parts = rest[7:].strip().split(',', 1)
             if len(parts) != 2:
-                print("?USAGE: SYS INSTALL <addr>, <subroutine_name>")
+                self.io.writeln("?USAGE: SYS INSTALL <addr>, <subroutine_name>")
                 return
             addr = int(self.eval_expr(parts[0].strip()))
             name = parts[1].strip()
             if not (0xF000 <= addr <= 0xFFFF):
-                print(f"?USER SYS RANGE: $F000-$FFFF (got ${addr:04X})")
+                self.io.writeln(f"?USER SYS RANGE: $F000-$FFFF (got ${addr:04X})")
                 return
             self._user_sys[addr] = name
-            print(f"INSTALLED {name} AT ${addr:04X}")
+            self.io.writeln(f"INSTALLED {name} AT ${addr:04X}")
             return
         addr = int(self.eval_expr(rest))
         if addr in SYS_ROUTINES:
@@ -180,9 +180,9 @@ class MemoryMixin:
                 for stmt in body:
                     self.process(stmt)
             else:
-                print(f"?UNDEFINED ROUTINE: {name}")
+                self.io.writeln(f"?UNDEFINED ROUTINE: {name}")
         else:
-            print(f"?NO ROUTINE AT ${addr:04X}")
+            self.io.writeln(f"?NO ROUTINE AT ${addr:04X}")
 
     def _usr_fn(self, addr: float) -> float:
         """USR(addr) — execute routine, return last measurement result."""
@@ -205,7 +205,7 @@ class MemoryMixin:
         """WAIT addr, mask[, value] — block until (PEEK(addr) AND mask) == value."""
         parts = [p.strip() for p in rest.split(',')]
         if len(parts) < 2:
-            print("?USAGE: WAIT <addr>, <mask>[, <value>]")
+            self.io.writeln("?USAGE: WAIT <addr>, <mask>[, <value>]")
             return
         addr = int(self.eval_expr(parts[0]))
         mask = int(self.eval_expr(parts[1]))
@@ -217,66 +217,66 @@ class MemoryMixin:
             if (val & mask) == target:
                 return
             time.sleep(0.01)
-        print("?WAIT TIMEOUT")
+        self.io.writeln("?WAIT TIMEOUT")
 
     def cmd_catalog(self) -> None:
         """CATALOG — list all SYS routines with addresses."""
-        print("\n  Built-in SYS Routines:")
+        self.io.writeln("\n  Built-in SYS Routines:")
         for addr, name in sorted(SYS_ROUTINES.items()):
-            print(f"    ${addr:04X}  {name}")
+            self.io.writeln(f"    ${addr:04X}  {name}")
         if self._user_sys:
-            print("\n  User SYS Routines:")
+            self.io.writeln("\n  User SYS Routines:")
             for addr, name in sorted(self._user_sys.items()):
-                print(f"    ${addr:04X}  {name}")
-        print()
+                self.io.writeln(f"    ${addr:04X}  {name}")
+        self.io.writeln('')
 
     def cmd_dump(self, rest: str = '') -> None:
         """DUMP [start] [end] — hex dump of memory map."""
         parts = rest.split()
         start = int(self.eval_expr(parts[0])) if parts else 0x0000
         end = int(self.eval_expr(parts[1])) if len(parts) > 1 else start + 0x3F
-        print()
+        self.io.writeln('')
         for row_start in range(start, end + 1, 16):
             vals = [self._peek(row_start + i) for i in range(16) if row_start + i <= end]
             hex_part = ' '.join(f'{int(v) & 0xFF:02X}' if abs(v) < 256 else f'{v:4.1f}'[:4]
                                for v in vals)
-            print(f"  ${row_start:04X}: {hex_part}")
-        print()
+            self.io.writeln(f"  ${row_start:04X}: {hex_part}")
+        self.io.writeln('')
 
     def cmd_map(self) -> None:
         """MAP — print the full memory map with current values."""
-        print("\n  Memory Map:")
-        print(f"  $0000-$003F  Zero Page        (64 slots)")
+        self.io.writeln("\n  Memory Map:")
+        self.io.writeln(f"  $0000-$003F  Zero Page        (64 slots)")
         nz = sum(1 for v in self._zero_page if v != 0)
-        print(f"               {nz} non-zero values")
-        print(f"  $0100-$01FF  Qubit State      ({self.num_qubits} qubits, 8 addr/qubit)")
+        self.io.writeln(f"               {nz} non-zero values")
+        self.io.writeln(f"  $0100-$01FF  Qubit State      ({self.num_qubits} qubits, 8 addr/qubit)")
         if self.last_sv is not None:
             for q in range(min(self.num_qubits, 4)):
                 p1 = self._peek(0x0100 + q * 8)
                 bz = self._peek(0x0100 + q * 8 + 3)
-                print(f"               q{q}: P(1)={p1:.3f} Bz={bz:.3f}")
+                self.io.writeln(f"               q{q}: P(1)={p1:.3f} Bz={bz:.3f}")
             if self.num_qubits > 4:
-                print(f"               ... ({self.num_qubits - 4} more)")
-        print(f"  $D000-$D007  QPU Config")
+                self.io.writeln(f"               ... ({self.num_qubits - 4} more)")
+        self.io.writeln(f"  $D000-$D007  QPU Config")
         for addr, name in sorted(CFG_NAMES.items()):
             val = self._peek_config(addr)
-            print(f"               ${addr:04X} {name:16s} = {val}")
-        print(f"  $D010-$D014  QPU Status (read-only)")
+            self.io.writeln(f"               ${addr:04X} {name:16s} = {val}")
+        self.io.writeln(f"  $D010-$D014  QPU Status (read-only)")
         for addr, name in sorted(STS_NAMES.items()):
             val = self._status.get(addr, 0.0)
-            print(f"               ${addr:04X} {name:20s} = {val}")
-        print(f"  $E000-$E0B0  SYS Routines     ({len(SYS_ROUTINES)} built-in)")
-        print(f"  $F000-$FFFF  User SYS         ({len(self._user_sys)} installed)")
-        print()
+            self.io.writeln(f"               ${addr:04X} {name:20s} = {val}")
+        self.io.writeln(f"  $E000-$E0B0  SYS Routines     ({len(SYS_ROUTINES)} built-in)")
+        self.io.writeln(f"  $F000-$FFFF  User SYS         ({len(self._user_sys)} installed)")
+        self.io.writeln('')
 
     def cmd_monitor(self) -> None:
         """MONITOR — interactive hex monitor for PEEK/POKE."""
-        print("MONITOR — type address to PEEK, addr=val to POKE, Q to quit")
+        self.io.writeln("MONITOR — type address to PEEK, addr=val to POKE, Q to quit")
         while True:
             try:
                 line = input('* ').strip()
             except (KeyboardInterrupt, EOFError):
-                print()
+                self.io.writeln('')
                 break
             if not line or line.upper() == 'Q':
                 break
@@ -286,14 +286,14 @@ class MemoryMixin:
                     addr = int(self.eval_expr(parts[0].strip()))
                     val = self.eval_expr(parts[1].strip())
                     self._poke(addr, val)
-                    print(f"  ${addr:04X} <- {val}")
+                    self.io.writeln(f"  ${addr:04X} <- {val}")
                 except Exception as e:
-                    print(f"?{e}")
+                    self.io.writeln(f"?{e}")
             else:
                 try:
                     addr = int(self.eval_expr(line))
                     val = self._peek(addr)
-                    print(f"  ${addr:04X} = {val}")
+                    self.io.writeln(f"  ${addr:04X} = {val}")
                 except Exception as e:
-                    print(f"?{e}")
-        print("MONITOR OFF")
+                    self.io.writeln(f"?{e}")
+        self.io.writeln("MONITOR OFF")

@@ -114,17 +114,17 @@ class DebugMixin:
     def cmd_tron(self) -> None:
         """TRON — trace on, print each line number during execution."""
         self._trace_mode = True
-        print("TRACE ON")
+        self.io.writeln("TRACE ON")
 
     def cmd_troff(self) -> None:
         """TROFF — trace off."""
         self._trace_mode = False
-        print("TRACE OFF")
+        self.io.writeln("TRACE OFF")
 
     def _trace_line(self, line_num: int) -> None:
         """Print trace output if trace mode is on."""
         if self._trace_mode:
-            print(f"[{line_num}]", end=' ', flush=True)
+            self.io.write(f"[{line_num}]" + ' ')
 
     # ── STOP / CONT ────────────────────────────────────────────────────
 
@@ -132,7 +132,7 @@ class DebugMixin:
         if stmt.strip().upper() != 'STOP':
             return None
         line_num = sorted_lines[ip]
-        print(f"STOPPED AT LINE {line_num}")
+        self.io.writeln(f"STOPPED AT LINE {line_num}")
         self._stopped_ip = ip
         self._print_watches()
         return True, ExecResult.END
@@ -140,9 +140,9 @@ class DebugMixin:
     def cmd_cont(self) -> None:
         """CONT — continue execution after STOP."""
         if self._stopped_ip is None:
-            print("?CANNOT CONTINUE")
+            self.io.writeln("?CANNOT CONTINUE")
             return
-        print("CONTINUING...")
+        self.io.writeln("CONTINUING...")
         # Re-run from stopped position (simplified: re-run from start)
         self._stopped_ip = None
         self.cmd_run()
@@ -153,30 +153,30 @@ class DebugMixin:
         """BREAK <line> — set/clear/list breakpoints."""
         if not rest.strip():
             if self._breakpoints:
-                print(f"  Breakpoints: {sorted(self._breakpoints)}")
+                self.io.writeln(f"  Breakpoints: {sorted(self._breakpoints)}")
             else:
-                print("  No breakpoints set")
+                self.io.writeln("  No breakpoints set")
             return
         rest = rest.strip().upper()
         if rest == 'CLEAR':
             self._breakpoints.clear()
-            print("BREAKPOINTS CLEARED")
+            self.io.writeln("BREAKPOINTS CLEARED")
             return
         try:
             line = int(rest)
             if line in self._breakpoints:
                 self._breakpoints.discard(line)
-                print(f"BREAKPOINT REMOVED: {line}")
+                self.io.writeln(f"BREAKPOINT REMOVED: {line}")
             else:
                 self._breakpoints.add(line)
-                print(f"BREAKPOINT SET: {line}")
+                self.io.writeln(f"BREAKPOINT SET: {line}")
         except ValueError:
-            print("?USAGE: BREAK <line> | BREAK CLEAR")
+            self.io.writeln("?USAGE: BREAK <line> | BREAK CLEAR")
 
     def _check_breakpoint(self, line_num: int, sorted_lines: list[int], ip: int) -> bool:
         """Check if we should break at this line. Returns True to stop."""
         if line_num in self._breakpoints:
-            print(f"BREAKPOINT AT LINE {line_num}")
+            self.io.writeln(f"BREAKPOINT AT LINE {line_num}")
             self._stopped_ip = ip
             self._print_watches()
             return True
@@ -188,31 +188,31 @@ class DebugMixin:
         """WATCH <expr> — add/remove/list watch expressions."""
         if not rest.strip():
             if self._watches:
-                print("  Watch expressions:")
+                self.io.writeln("  Watch expressions:")
                 for w in self._watches:
-                    print(f"    {w}")
+                    self.io.writeln(f"    {w}")
             else:
-                print("  No watches set")
+                self.io.writeln("  No watches set")
             return
         rest = rest.strip()
         if rest.upper() == 'CLEAR':
             self._watches.clear()
-            print("WATCHES CLEARED")
+            self.io.writeln("WATCHES CLEARED")
             return
         if rest in self._watches:
             self._watches.remove(rest)
-            print(f"WATCH REMOVED: {rest}")
+            self.io.writeln(f"WATCH REMOVED: {rest}")
         else:
             self._watches.append(rest)
-            print(f"WATCHING: {rest}")
+            self.io.writeln(f"WATCHING: {rest}")
 
     def _print_watches(self) -> None:
         for w in self._watches:
             try:
                 val = self._safe_eval(w)
-                print(f"  {w} = {val}")
+                self.io.writeln(f"  {w} = {val}")
             except Exception:
-                print(f"  {w} = ?")
+                self.io.writeln(f"  {w} = ?")
 
     # ── Callbacks ──────────────────────────────────────────────────────
 

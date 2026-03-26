@@ -27,12 +27,12 @@ class FileIOMixin:
     def cmd_save(self, rest: str) -> None:
         """SAVE <filename> — write program, config, and definitions to a .qb file."""
         if not rest:
-            print("?USAGE: SAVE <filename>")
+            self.io.writeln("?USAGE: SAVE <filename>")
             return
         try:
             path = self._sanitize_path(rest)
         except ValueError as e:
-            print(f"?SAVE ERROR: {e}")
+            self.io.writeln(f"?SAVE ERROR: {e}")
             return
         if not path.endswith('.qb'):
             path += '.qb'
@@ -69,27 +69,27 @@ class FileIOMixin:
                 # Save program
                 for num in sorted(self.program.keys()):
                     f.write(f"{num} {self.program[num]}\n")
-            print(f"SAVED {len(self.program)} lines to {path}")
+            self.io.writeln(f"SAVED {len(self.program)} lines to {path}")
         except Exception as e:
-            print(f"?SAVE ERROR: {e}")
+            self.io.writeln(f"?SAVE ERROR: {e}")
 
     def cmd_load(self, rest: str) -> None:
         """LOAD <filename> — clear state and load a .qb program file."""
         if not rest:
-            print("?USAGE: LOAD <filename>")
+            self.io.writeln("?USAGE: LOAD <filename>")
             return
         try:
             path = self._sanitize_path(rest)
         except ValueError as e:
-            print(f"?LOAD ERROR: {e}")
+            self.io.writeln(f"?LOAD ERROR: {e}")
             return
         if os.path.isdir(path):
-            print(f"?{path} is a directory, not a file")
+            self.io.writeln(f"?{path} is a directory, not a file")
             return
         if not path.endswith('.qb') and not os.path.isfile(path):
             path += '.qb'
         if not os.path.isfile(path):
-            print(f"?FILE NOT FOUND: {path}")
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
         try:
             self.cmd_new(silent=True)
@@ -98,9 +98,9 @@ class FileIOMixin:
                     line = line.rstrip('\n\r')
                     if line and not line.startswith('#'):
                         self.process(line, track_undo=False)
-            print(f"LOADED {path} ({len(self.program)} lines)")
+            self.io.writeln(f"LOADED {path} ({len(self.program)} lines)")
         except Exception as e:
-            print(f"?LOAD ERROR: {e}")
+            self.io.writeln(f"?LOAD ERROR: {e}")
 
     def cmd_include(self, rest: str) -> None:
         """INCLUDE file.qb — merge another program's lines into current.
@@ -111,17 +111,17 @@ class FileIOMixin:
         without the user's direct interaction.
         """
         if self._include_depth >= MAX_INCLUDE_DEPTH:
-            print(f"?INCLUDE DEPTH LIMIT ({MAX_INCLUDE_DEPTH}) — possible recursion")
+            self.io.writeln(f"?INCLUDE DEPTH LIMIT ({MAX_INCLUDE_DEPTH}) — possible recursion")
             return
         try:
             path = self._sanitize_path(rest)
         except ValueError as e:
-            print(f"?INCLUDE ERROR: {e}")
+            self.io.writeln(f"?INCLUDE ERROR: {e}")
             return
         if not path.endswith('.qb') and not os.path.isfile(path):
             path += '.qb'
         if not os.path.isfile(path):
-            print(f"?FILE NOT FOUND: {path}")
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
         count = 0
         self._include_depth += 1
@@ -134,13 +134,13 @@ class FileIOMixin:
                     # Block file-writing commands inside includes
                     first_word = line.split(None, 1)[0].upper() if line.strip() else ''
                     if first_word in ('SAVE', 'LOAD', 'EXPORT', 'CSV'):
-                        print(f"  ?BLOCKED IN INCLUDE: {first_word}")
+                        self.io.writeln(f"  ?BLOCKED IN INCLUDE: {first_word}")
                         continue
                     self.process(line, track_undo=False)
                     count += 1
         finally:
             self._include_depth -= 1
-        print(f"INCLUDED {path} ({count} lines)")
+        self.io.writeln(f"INCLUDED {path} ({count} lines)")
 
     def cmd_dir(self, rest: str = '') -> None:
         """List .qb files in current or specified directory."""
@@ -153,16 +153,16 @@ class FileIOMixin:
             if files:
                 for f in sorted(files):
                     size = os.path.getsize(os.path.join(path, f))
-                    print(f"  {f:<30} {size:>6} bytes")
+                    self.io.writeln(f"  {f:<30} {size:>6} bytes")
             else:
-                print("  No .qb files found")
+                self.io.writeln("  No .qb files found")
         except Exception as e:
-            print(f"?DIR ERROR: {e}")
+            self.io.writeln(f"?DIR ERROR: {e}")
 
     def cmd_export(self, rest: str) -> None:
         """EXPORT [filename] — export circuit as OpenQASM 3.0."""
         if self.last_circuit is None:
-            print("?NO CIRCUIT — RUN first")
+            self.io.writeln("?NO CIRCUIT — RUN first")
             return
         qasm = None
         errors = []
@@ -172,28 +172,28 @@ class FileIOMixin:
         except Exception as e:
             errors.append(str(e))
         if qasm is None:
-            print("?EXPORT: OpenQASM export not available.")
+            self.io.writeln("?EXPORT: OpenQASM export not available.")
             for err in errors:
-                print(f"  {err}")
+                self.io.writeln(f"  {err}")
             return
         if rest.strip():
             try:
                 path = self._sanitize_path(rest)
             except ValueError as e:
-                print(f"?EXPORT ERROR: {e}")
+                self.io.writeln(f"?EXPORT ERROR: {e}")
                 return
             if os.path.exists(path):
-                print(f"  (overwriting {path})")
+                self.io.writeln(f"  (overwriting {path})")
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(qasm)
-            print(f"EXPORTED to {path} (OpenQASM 3.0)")
+            self.io.writeln(f"EXPORTED to {path} (OpenQASM 3.0)")
         else:
-            print(qasm)
+            self.io.writeln(qasm)
 
     def cmd_csv(self, rest: str) -> None:
         """CSV [filename] — export last results to CSV."""
         if self.last_counts is None:
-            print("?NO RESULTS — RUN first")
+            self.io.writeln("?NO RESULTS — RUN first")
             return
         total = sum(self.last_counts.values())
         lines = ["state,count,probability"]
@@ -203,18 +203,18 @@ class FileIOMixin:
             try:
                 path = self._sanitize_path(rest)
             except ValueError as e:
-                print(f"?CSV ERROR: {e}")
+                self.io.writeln(f"?CSV ERROR: {e}")
                 return
             if os.path.exists(path):
-                print(f"  (overwriting {path})")
+                self.io.writeln(f"  (overwriting {path})")
             with open(path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
-            print(f"EXPORTED {len(self.last_counts)} states to {path}")
+            self.io.writeln(f"EXPORTED {len(self.last_counts)} states to {path}")
         else:
             for line in lines[:20]:
-                print(f"  {line}")
+                self.io.writeln(f"  {line}")
             if len(lines) > 20:
-                print(f"  ... ({len(lines)-20} more)")
+                self.io.writeln(f"  ... ({len(lines)-20} more)")
 
     # ── File handles: OPEN, CLOSE, PRINT#, INPUT#, EOF, LPRINT ────────
 
@@ -226,13 +226,13 @@ class FileIOMixin:
         """OPEN file FOR INPUT|OUTPUT|APPEND AS #n"""
         m = RE_OPEN.match(f"OPEN {rest}")
         if not m:
-            print("?USAGE: OPEN \"file\" FOR INPUT|OUTPUT|APPEND AS #n")
+            self.io.writeln("?USAGE: OPEN \"file\" FOR INPUT|OUTPUT|APPEND AS #n")
             return
         path, mode_str, handle = m.group(1).strip(), m.group(2).upper(), int(m.group(3))
         try:
             path = self._sanitize_path(path)
         except ValueError as e:
-            print(f"?OPEN ERROR: {e}")
+            self.io.writeln(f"?OPEN ERROR: {e}")
             return
         mode_map = {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a', 'RANDOM': 'r+'}
         mode = mode_map.get(mode_str, 'r')
@@ -240,23 +240,23 @@ class FileIOMixin:
             if mode_str == 'RANDOM' and not os.path.isfile(path):
                 open(path, 'w', encoding='utf-8').close()
             self._file_handles[handle] = open(path, mode, encoding='utf-8')
-            print(f"OPENED #{handle} ({path}, {mode_str})")
+            self.io.writeln(f"OPENED #{handle} ({path}, {mode_str})")
         except Exception as e:
-            print(f"?OPEN ERROR: {e}")
+            self.io.writeln(f"?OPEN ERROR: {e}")
 
     def cmd_close(self, rest: str) -> None:
         """CLOSE #n — close a file handle."""
         m = RE_CLOSE.match(f"CLOSE {rest}")
         if not m:
-            print("?USAGE: CLOSE #n")
+            self.io.writeln("?USAGE: CLOSE #n")
             return
         handle = int(m.group(1))
         if handle in self._file_handles:
             self._file_handles[handle].close()
             del self._file_handles[handle]
-            print(f"CLOSED #{handle}")
+            self.io.writeln(f"CLOSED #{handle}")
         else:
-            print(f"?HANDLE #{handle} NOT OPEN")
+            self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
 
     def _exec_print_file(self, stmt: str, run_vars: dict[str, Any]) -> bool:
         """Handle PRINT #n, data during execution."""
@@ -266,7 +266,7 @@ class FileIOMixin:
         handle = int(m.group(1))
         data = m.group(2).strip()
         if handle not in self._file_handles:
-            print(f"?HANDLE #{handle} NOT OPEN")
+            self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
             return True
         f = self._file_handles[handle]
         # Evaluate data
@@ -289,7 +289,7 @@ class FileIOMixin:
         handle = int(m.group(1))
         var = m.group(2)
         if handle not in self._file_handles:
-            print(f"?HANDLE #{handle} NOT OPEN")
+            self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
             return True
         f = self._file_handles[handle]
         line = f.readline()

@@ -104,4 +104,4 @@ class StringMixin:
         """Assign a string value to a string variable."""
         val = self._eval_string_expr(expr)
         self.variables[name] = val
-        print(f"{name} = {val!r}" if isinstance(val, str) else f"{name} = {val}")
+        self.io.writeln(f"{name} = {val!r}" if isinstance(val, str) else f"{name} = {val}")

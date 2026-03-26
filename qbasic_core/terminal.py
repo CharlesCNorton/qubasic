@@ -33,6 +33,7 @@ from qbasic_core.engine import (
     RE_SWAP, RE_DEF_FN, RE_OPTION_BASE,
     RE_PRINT_USING, RE_COLOR, RE_LOCATE, RE_SCREEN, RE_LPRINT,
     RE_ON_MEASURE, RE_ON_TIMER, RE_CHAIN, RE_MERGE,
+    RE_REDIM, RE_ERASE, RE_GET,
 )
 from qbasic_core.expression import ExpressionMixin
 from qbasic_core.display import DisplayMixin
@@ -783,6 +784,12 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
                 do_depth += 1
             elif isinstance(parsed, LoopStmt):
                 do_depth -= 1
+        if for_depth > 0:
+            raise RuntimeError(f"Unmatched FOR: {for_depth} FOR without NEXT")
+        if while_depth > 0:
+            raise RuntimeError(f"Unmatched WHILE: {while_depth} WHILE without WEND")
+        if do_depth > 0:
+            raise RuntimeError(f"Unmatched DO: {do_depth} DO without LOOP")
 
     # ── Circuit Building ──────────────────────────────────────────────
 
@@ -897,7 +904,6 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
 
     def _try_exec_redim(self, stmt: str) -> bool:
         """Handle REDIM name(size) — resize an existing array."""
-        from qbasic_core.engine import RE_REDIM
         m = RE_REDIM.match(stmt)
         if not m:
             return False
@@ -915,7 +921,6 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
 
     def _try_exec_erase(self, stmt: str) -> bool:
         """Handle ERASE name — delete a specific array."""
-        from qbasic_core.engine import RE_ERASE
         m = RE_ERASE.match(stmt)
         if not m:
             return False
@@ -930,7 +935,6 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         Falls back to reading one character from self.io.read_line
         when not running in a terminal (batch mode, tests, etc.).
         """
-        from qbasic_core.engine import RE_GET
         m = RE_GET.match(stmt)
         if not m:
             return False

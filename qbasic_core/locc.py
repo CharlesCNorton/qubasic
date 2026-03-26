@@ -349,32 +349,33 @@ class LOCCMixin:
     def _locc_execute_program(self, sorted_lines):
         """Execute all LOCC program lines using numpy engine."""
         from qbasic_core.scope import Scope
+        from qbasic_core.exec_context import ExecContext
         from qbasic_core.statements import MeasureStmt
-        loop_stack = []
         run_vars = Scope(self.variables)
-        # Pre-cache parsed statements and stripped strings for tight loop
+        ctx = ExecContext(
+            sorted_lines=sorted_lines, ip=0, run_vars=run_vars,
+            max_iterations=self._max_iterations, locc_engine=self.locc,
+        )
         _parsed = [self._get_parsed(ln) for ln in sorted_lines]
         _stmts = [self.program[ln].strip() for ln in sorted_lines]
-        ip = 0
-        _iters = 0
         n_lines = len(sorted_lines)
-        while ip < n_lines:
-            _iters += 1
-            if _iters > self._max_iterations:
-                raise RuntimeError(f"LOOP LIMIT ({self._max_iterations}) — possible infinite loop")
-            if isinstance(_parsed[ip], MeasureStmt):
-                ip += 1
+        while ctx.ip < n_lines:
+            ctx.iteration_count += 1
+            if ctx.iteration_count > ctx.max_iterations:
+                raise RuntimeError(f"LOOP LIMIT ({ctx.max_iterations}) — possible infinite loop")
+            if isinstance(_parsed[ctx.ip], MeasureStmt):
+                ctx.ip += 1
                 continue
             try:
-                result = self._locc_exec_line(_stmts[ip], loop_stack, sorted_lines, ip, run_vars)
+                result = self._locc_exec_line(_stmts[ctx.ip], ctx.loop_stack, sorted_lines, ctx.ip, run_vars)
             except Exception as e:
-                raise RuntimeError(f"LINE {sorted_lines[ip]}: {e}") from None
+                raise RuntimeError(f"LINE {sorted_lines[ctx.ip]}: {e}") from None
             if result is ExecResult.END:
                 break
             elif isinstance(result, int):
-                ip = result
+                ctx.ip = result
             else:
-                ip += 1
+                ctx.ip += 1
 
     def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars):
         """Execute one line in LOCC mode."""
@@ -426,34 +427,6 @@ class LOCCMixin:
         if ':' in stmt:
             for sub in self._split_colon_stmts(stmt):
                 self._locc_exec_line(sub, loop_stack, sorted_lines, ip, run_vars)
-            return ExecResult.ADVANCE
-
-        # Legacy regex fallback
-        m = RE_SEND.match(stmt)
-        if m:
-            reg = m.group(1).upper()
-            qubit = int(self.eval_expr(m.group(2)))
-            var = m.group(3)
-            outcome = self.locc.send(reg, qubit)
-            run_vars[var] = outcome
-            self.variables[var] = outcome
-            self.locc.classical[var] = outcome
-            return ExecResult.ADVANCE
-
-        m = RE_SHARE.match(stmt)
-        if m:
-            reg1, q1 = m.group(1).upper(), int(m.group(2))
-            reg2, q2 = m.group(3).upper(), int(m.group(4))
-            self.locc.share(reg1, q1, reg2, q2)
-            return ExecResult.ADVANCE
-
-        m = RE_AT_REG_LINE.match(stmt)
-        if m:
-            reg = m.group(1).upper()
-            gate_stmt = m.group(2).strip()
-            if self._locc_try_special(reg, gate_stmt, run_vars):
-                return ExecResult.ADVANCE
-            self._locc_apply_gate(reg, gate_stmt)
             return ExecResult.ADVANCE
 
         raise ValueError(f"LOCC mode requires @A/@B prefix, SEND, SHARE, or IF: {stmt}")

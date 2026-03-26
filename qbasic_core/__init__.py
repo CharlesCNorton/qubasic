@@ -1,7 +1,5 @@
 """QBASIC — Quantum BASIC Interactive Terminal (package)."""
 
-__version__ = '0.3.0'
-
 from qbasic_core.engine import (
     GATE_TABLE, GATE_ALIASES,
     LOCCEngine, ExecResult, ExecOutcome,
@@ -49,5 +47,4 @@ __all__ = [
     'ExecContext', 'Scope',
     'QuantumBackend', 'QiskitBackend', 'LOCCRegBackend',
     'GATE_TABLE', 'GATE_ALIASES',
-    '__version__',
 ]

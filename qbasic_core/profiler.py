@@ -30,14 +30,14 @@ class ProfilerMixin:
         if arg == 'ON':
             self._profile_mode = True
             self._profile_data.clear()
-            print("PROFILE ON")
+            self.io.writeln("PROFILE ON")
         elif arg == 'OFF':
             self._profile_mode = False
-            print("PROFILE OFF")
+            self.io.writeln("PROFILE OFF")
         elif arg == 'SHOW' or not arg:
             self._show_profile()
         else:
-            print("?USAGE: PROFILE [ON|OFF|SHOW]")
+            self.io.writeln("?USAGE: PROFILE [ON|OFF|SHOW]")
 
     def _profile_line_start(self, line_num: int) -> None:
         if self._profile_mode:
@@ -55,18 +55,18 @@ class ProfilerMixin:
 
     def _show_profile(self) -> None:
         if not self._profile_data:
-            print("  No profile data (PROFILE ON, then RUN)")
+            self.io.writeln("  No profile data (PROFILE ON, then RUN)")
             return
-        print("\n  Profile Results:")
-        print(f"  {'Line':>6}  {'Time(ms)':>10}  {'Calls':>6}  {'Gates':>6}  Source")
+        self.io.writeln("\n  Profile Results:")
+        self.io.writeln(f"  {'Line':>6}  {'Time(ms)':>10}  {'Calls':>6}  {'Gates':>6}  Source")
         total_time = sum(d['time_ms'] for d in self._profile_data.values())
         for ln in sorted(self._profile_data.keys()):
             d = self._profile_data[ln]
             src = self.program.get(ln, '')[:40]
             pct = 100 * d['time_ms'] / total_time if total_time > 0 else 0
-            print(f"  {ln:>6}  {d['time_ms']:>9.2f}  {d['calls']:>6}  {d['gates']:>6}  {src}")
-        print(f"\n  Total: {total_time:.2f} ms")
-        print()
+            self.io.writeln(f"  {ln:>6}  {d['time_ms']:>9.2f}  {d['calls']:>6}  {d['gates']:>6}  {src}")
+        self.io.writeln(f"\n  Total: {total_time:.2f} ms")
+        self.io.writeln('')
 
     # ── Gate/depth tracking ────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ class ProfilerMixin:
         arg = rest.strip().upper()
         if arg == 'CLEAR':
             self._stats_runs.clear()
-            print("STATS CLEARED")
+            self.io.writeln("STATS CLEARED")
             return
         if arg == 'SHOW' or not arg:
             self._show_stats()
@@ -92,12 +92,12 @@ class ProfilerMixin:
         try:
             n = int(arg)
         except ValueError:
-            print("?USAGE: STATS [N|SHOW|CLEAR]")
+            self.io.writeln("?USAGE: STATS [N|SHOW|CLEAR]")
             return
         if n < 1:
-            print("?STATS needs at least 1 run")
+            self.io.writeln("?STATS needs at least 1 run")
             return
-        print(f"\nRunning {n} trials...")
+        self.io.writeln(f"\nRunning {n} trials...")
         import io, sys
         for trial in range(n):
             buf = io.StringIO()
@@ -110,14 +110,14 @@ class ProfilerMixin:
             if self.last_counts:
                 self._stats_runs.append(dict(self.last_counts))
             if n > 10 and (trial + 1) % (n // 10) == 0:
-                print(f"  {100 * (trial + 1) // n}%...", end='\r', flush=True)
+                self.io.write(f"  {100 * (trial + 1) // n}%..." + '\r')
         if n > 10:
-            print(" " * 30, end='\r')
-        print(f"Collected {len(self._stats_runs)} runs ({n} trials)")
+            self.io.write(" " * 30 + '\r')
+        self.io.writeln(f"Collected {len(self._stats_runs)} runs ({n} trials)")
 
     def _show_stats(self) -> None:
         if not self._stats_runs:
-            print("  No statistics collected (STATS N to run N trials)")
+            self.io.writeln("  No statistics collected (STATS N to run N trials)")
             return
         n = len(self._stats_runs)
         # Aggregate: count how often each state appears across runs
@@ -136,12 +136,12 @@ class ProfilerMixin:
         for state in state_totals:
             while len(state_totals[state]) < n:
                 state_totals[state].append(0)
-        print(f"\n  Statistics over {n} runs:")
-        print(f"  {'State':>10}  {'Mean':>8}  {'StdDev':>8}  {'Min':>6}  {'Max':>6}")
+        self.io.writeln(f"\n  Statistics over {n} runs:")
+        self.io.writeln(f"  {'State':>10}  {'Mean':>8}  {'StdDev':>8}  {'Min':>6}  {'Max':>6}")
         for state in sorted(state_totals.keys()):
             vals = state_totals[state]
             mean = sum(vals) / len(vals)
             variance = sum((v - mean) ** 2 for v in vals) / len(vals)
             std = math.sqrt(variance)
-            print(f"  |{state}\u27E9  {mean:>8.1f}  {std:>8.2f}  {min(vals):>6}  {max(vals):>6}")
-        print()
+            self.io.writeln(f"  |{state}\u27E9  {mean:>8.1f}  {std:>8.2f}  {min(vals):>6}  {max(vals):>6}")
+        self.io.writeln('')
