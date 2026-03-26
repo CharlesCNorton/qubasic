@@ -580,6 +580,7 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         self._collect_data()
         sorted_lines = sorted(self.program.keys())
         self._scan_subs(sorted_lines)
+        self._validate_program(sorted_lines)
 
         # Build circuit
         try:
@@ -743,6 +744,17 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         self.last_sv = sv
         self.last_circuit = qc
         self._print_sv_compact(sv)
+
+    def _validate_program(self, sorted_lines: list[int]) -> None:
+        """Pre-execution validation. Catches structural errors before running."""
+        from qbasic_core.statements import GotoStmt, GosubStmt
+        line_set = set(sorted_lines)
+        for ln in sorted_lines:
+            parsed = self._get_parsed(ln)
+            if isinstance(parsed, GotoStmt) and parsed.target not in line_set:
+                raise RuntimeError(f"LINE {ln}: GOTO {parsed.target} — target line not found")
+            if isinstance(parsed, GosubStmt) and parsed.target not in line_set:
+                raise RuntimeError(f"LINE {ln}: GOSUB {parsed.target} — target line not found")
 
     # ── Circuit Building ──────────────────────────────────────────────
 
@@ -1052,11 +1064,11 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
         Returns: int (jump target ip), ExecResult.ADVANCE, or ExecResult.END.
         """
         from qbasic_core.statements import (
-            BarrierStmt, RemStmt, MeasureStmt, EndStmt,
-            CompoundStmt, AtRegStmt,
+            BarrierStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt,
+            CompoundStmt, AtRegStmt, GotoStmt, GosubStmt,
         )
 
-        # 1. Typed fast-path
+        # 1. Typed fast-path (no regex, no string manipulation)
         if parsed is None:
             from qbasic_core.parser import parse_stmt
             parsed = parse_stmt(stmt)
@@ -1068,6 +1080,21 @@ class QBasicTerminal(ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin, Contro
             return ExecResult.ADVANCE
         if isinstance(parsed, EndStmt):
             return ExecResult.END
+        if isinstance(parsed, ReturnStmt):
+            if not self._gosub_stack:
+                raise RuntimeError("RETURN WITHOUT GOSUB")
+            return self._gosub_stack.pop()
+        if isinstance(parsed, GotoStmt):
+            for idx, ln in enumerate(sorted_lines):
+                if ln == parsed.target:
+                    return idx
+            raise RuntimeError(f"GOTO {parsed.target}: LINE NOT FOUND")
+        if isinstance(parsed, GosubStmt):
+            self._gosub_stack.append(ip + 1)
+            for idx, ln in enumerate(sorted_lines):
+                if ln == parsed.target:
+                    return idx
+            raise RuntimeError(f"GOSUB {parsed.target}: LINE NOT FOUND")
         if isinstance(parsed, AtRegStmt) and not self.locc_mode:
             raise ValueError("@register syntax requires LOCC mode (try: LOCC <n1> <n2>)")
         if isinstance(parsed, CompoundStmt):
