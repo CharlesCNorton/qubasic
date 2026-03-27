@@ -226,7 +226,15 @@ class ClassicMixin:
             return None
         # Only handle as DO/LOOP keyword if we're inside a DO block
         if not loop_stack or loop_stack[-1].get('type') != 'do':
-            return None  # not a DO/LOOP keyword — let subroutine expansion handle it
+            # Bare "LOOP" (no WHILE/UNTIL) that matches a SUB name should
+            # be handed off to subroutine expansion, not treated as a keyword.
+            is_bare = m.group(1) is None  # no WHILE/UNTIL suffix
+            if is_bare and hasattr(self, '_sub_defs') and 'LOOP' in self._sub_defs:
+                return None  # let subroutine expansion handle it
+            # Otherwise it's either bare LOOP with no sub, or LOOP WHILE/UNTIL
+            # without a DO — both are errors or no-ops.  Return None so the
+            # caller can decide (gate dispatch will surface an error if needed).
+            return None
         loop = loop_stack[-1]
         # Post-test condition on LOOP
         kind = m.group(1)

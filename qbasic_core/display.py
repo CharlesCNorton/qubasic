@@ -71,8 +71,11 @@ class DisplayMixin:
                 "...", str(rest_count),
                 f"{100*rest_count/total:5.1f}%", "[dim](remaining)[/dim]")
 
-        _get_console().print(table)
-        _get_console().print()
+        try:
+            _get_console().print(table)
+            _get_console().print()
+        except UnicodeEncodeError:
+            self._print_histogram_plain(display, sorted_counts, total)
 
     def _print_histogram_plain(self, display: list, sorted_counts: list,
                                total: int) -> None:
@@ -94,8 +97,8 @@ class DisplayMixin:
 
         if len(sorted_counts) > MAX_HISTOGRAM_STATES:
             rest_count = sum(c for _, c in sorted_counts[MAX_HISTOGRAM_STATES:])
-            print(f"  {'...':>{max_label+3}}  {rest_count:>6}  "
-                  f"({100*rest_count/total:5.1f}%)  (remaining)")
+            self.io.writeln(f"  {'...':>{max_label+3}}  {rest_count:>6}  "
+                            f"({100*rest_count/total:5.1f}%)  (remaining)")
         self.io.writeln('')
 
     def _print_statevector(self, sv, n_qubits=None):
@@ -126,9 +129,12 @@ class DisplayMixin:
                         if remaining:
                             table.add_row("...", "", f"+{remaining} more")
                         break
-            _get_console().print(table)
-            _get_console().print()
-            return
+            try:
+                _get_console().print(table)
+                _get_console().print()
+                return
+            except UnicodeEncodeError:
+                pass  # fall through to plain-text path below
 
         self.io.writeln(f"\n  Statevector ({n} qubits):")
         count = 0
@@ -136,8 +142,8 @@ class DisplayMixin:
             if abs(amp) > AMPLITUDE_THRESHOLD:
                 state = format(i, f'0{n}b')
                 prob = abs(amp)**2
-                print(f"  |{state}\u27E9  {amp.real:+.4f}{amp.imag:+.4f}j  "
-                      f"(P={prob:.4f})")
+                self.io.writeln(f"  |{state}\u27E9  {amp.real:+.4f}{amp.imag:+.4f}j  "
+                               f"(P={prob:.4f})")
                 count += 1
                 if count >= MAX_DISPLAY_AMPLITUDES:
                     remaining = sum(1 for a in sv[i+1:] if abs(a) > AMPLITUDE_THRESHOLD)

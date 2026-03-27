@@ -13,6 +13,20 @@ from qbasic_core.engine import (
     RE_LET_ARRAY, RE_LET_VAR, RE_PRINT,
     RE_GOTO, RE_GOSUB, RE_FOR, RE_NEXT, RE_WHILE, RE_IF_THEN,
 )
+from qbasic_core.parser import parse_stmt
+from qbasic_core.statements import (
+    RawStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt, WendStmt,
+    LetArrayStmt, LetStmt, PrintStmt, GotoStmt, GosubStmt,
+    ForStmt, NextStmt, WhileStmt, IfThenStmt,
+    DataStmt, ReadStmt, OnGotoStmt, OnGosubStmt,
+    SelectCaseStmt, CaseStmt, EndSelectStmt,
+    DoStmt, LoopStmt, ExitStmt,
+    SwapStmt, DefFnStmt, OptionBaseStmt,
+    SubStmt, EndSubStmt, FunctionStmt, EndFunctionStmt, CallStmt,
+    LocalStmt, StaticStmt, SharedStmt,
+    OnErrorStmt, ResumeStmt, ErrorStmt, AssertStmt, StopStmt,
+    OnMeasureStmt, OnTimerStmt,
+)
 
 
 class ControlFlowMixin:
@@ -228,6 +242,263 @@ class ControlFlowMixin:
                 result = r
         return True, result
 
+    # ── Type-based dispatch table ────────────────────────────────────
+    # Maps parsed Stmt types to handler functions.  Each handler
+    # receives (self, stmt, loop_stack, sorted_lines, ip, run_vars,
+    # exec_fn) and returns (handled: bool, result).  Built once as a
+    # class variable so the dict lookup cost is paid per-call, not
+    # per-class.
+
+    @staticmethod
+    def _d_rem(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        return True, ExecResult.ADVANCE
+
+    _d_measure = _d_rem  # same behavior
+
+    @staticmethod
+    def _d_end(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        return True, ExecResult.END
+
+    @staticmethod
+    def _d_return(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        if not self._gosub_stack:
+            raise RuntimeError("RETURN WITHOUT GOSUB")
+        return True, self._gosub_stack.pop()
+
+    @staticmethod
+    def _d_wend(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        return self._cf_wend(run_vars, loop_stack, sorted_lines, ip)
+
+    @staticmethod
+    def _d_let_array(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_let_array(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_let_var(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_let_var(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_print(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_print(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_goto(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_goto(stmt, sorted_lines)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_gosub(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_gosub(stmt, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_for(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_for(stmt, run_vars, loop_stack, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_next(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_next(stmt, run_vars, loop_stack)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_while(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_while(stmt, run_vars, loop_stack, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_if_then(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_if_then(stmt, run_vars, loop_stack, sorted_lines, ip, exec_fn)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_data(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_data(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_read(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_read(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_on_goto(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_on_goto(stmt, run_vars, sorted_lines)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_on_gosub(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_on_gosub(stmt, run_vars, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_select_case(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_select_case(stmt, run_vars, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_case(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_case(stmt, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_end_select(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_end_select(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_do(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_do(stmt, run_vars, loop_stack, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_loop(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_loop(stmt, run_vars, loop_stack, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_exit(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_exit(stmt, loop_stack, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_swap(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_swap(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_def_fn(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_def_fn(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_option_base(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_option_base(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_sub(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_sub(stmt, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_end_sub(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_end_sub(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_function(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_function(stmt, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_end_function(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_end_function(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_call(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_call(stmt, run_vars, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_local(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_local(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_static(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_static(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_shared(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_shared(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_on_error(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_on_error(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_resume(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_resume(stmt, sorted_lines)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_error(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_error(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_assert(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_assert(stmt, run_vars)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_stop(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_stop(stmt, sorted_lines, ip)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_on_measure(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_on_measure(stmt)
+        return r if r is not None else (False, None)
+
+    @staticmethod
+    def _d_on_timer(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn):
+        r = self._cf_on_timer(stmt)
+        return r if r is not None else (False, None)
+
+    _CF_DISPATCH: dict[type, Callable] = {
+        RemStmt:         _d_rem,
+        MeasureStmt:     _d_measure,
+        EndStmt:         _d_end,
+        ReturnStmt:      _d_return,
+        WendStmt:        _d_wend,
+        LetArrayStmt:    _d_let_array,
+        LetStmt:         _d_let_var,
+        PrintStmt:       _d_print,
+        GotoStmt:        _d_goto,
+        GosubStmt:       _d_gosub,
+        ForStmt:         _d_for,
+        NextStmt:        _d_next,
+        WhileStmt:       _d_while,
+        IfThenStmt:      _d_if_then,
+        DataStmt:        _d_data,
+        ReadStmt:        _d_read,
+        OnGotoStmt:      _d_on_goto,
+        OnGosubStmt:     _d_on_gosub,
+        SelectCaseStmt:  _d_select_case,
+        CaseStmt:        _d_case,
+        EndSelectStmt:   _d_end_select,
+        DoStmt:          _d_do,
+        LoopStmt:        _d_loop,
+        ExitStmt:        _d_exit,
+        SwapStmt:        _d_swap,
+        DefFnStmt:       _d_def_fn,
+        OptionBaseStmt:  _d_option_base,
+        SubStmt:         _d_sub,
+        EndSubStmt:      _d_end_sub,
+        FunctionStmt:    _d_function,
+        EndFunctionStmt: _d_end_function,
+        CallStmt:        _d_call,
+        LocalStmt:       _d_local,
+        StaticStmt:      _d_static,
+        SharedStmt:      _d_shared,
+        OnErrorStmt:     _d_on_error,
+        ResumeStmt:      _d_resume,
+        ErrorStmt:       _d_error,
+        AssertStmt:      _d_assert,
+        StopStmt:        _d_stop,
+        OnMeasureStmt:   _d_on_measure,
+        OnTimerStmt:     _d_on_timer,
+    }
+
     def _exec_control_flow(
         self, stmt: str, loop_stack: list[dict[str, Any]],
         sorted_lines: list[int], ip: int, run_vars: dict[str, Any],
@@ -235,98 +506,15 @@ class ControlFlowMixin:
     ) -> tuple[bool, ExecOutcome | None]:
         """Shared control flow for both Qiskit and LOCC execution paths.
         Returns (handled, result) — if handled is True, result is the return value.
-        exec_fn is the recursive line executor for IF/multi-statement dispatch."""
-        upper = stmt.upper().strip()
+        exec_fn is the recursive line executor for IF/multi-statement dispatch.
 
-        if upper.startswith('REM') or upper.startswith("'") or upper == 'MEASURE':
-            return True, ExecResult.ADVANCE
-        if upper == 'END':
-            return True, ExecResult.END
-        if upper == 'RETURN':
-            if not self._gosub_stack:
-                raise RuntimeError("RETURN WITHOUT GOSUB")
-            return True, self._gosub_stack.pop()
-        if upper == 'WEND':
-            return self._cf_wend(run_vars, loop_stack, sorted_lines, ip)
+        Dispatches via dict lookup on the parsed Stmt type (O(1)) instead
+        of a linear chain of regex-matching _cf_* calls.
+        """
+        parsed = parse_stmt(stmt)
+        handler = self._CF_DISPATCH.get(type(parsed))
+        if handler is not None:
+            return handler(self, stmt, loop_stack, sorted_lines, ip, run_vars, exec_fn)
 
-        # Core control flow — direct dispatch, short-circuit on match
-        r = self._cf_let_array(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_let_var(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_print(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_goto(stmt, sorted_lines)
-        if r is not None: return r
-        r = self._cf_gosub(stmt, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_for(stmt, run_vars, loop_stack, ip)
-        if r is not None: return r
-        r = self._cf_next(stmt, run_vars, loop_stack)
-        if r is not None: return r
-        r = self._cf_while(stmt, run_vars, loop_stack, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_if_then(stmt, run_vars, loop_stack, sorted_lines, ip, exec_fn)
-        if r is not None: return r
-
-        # Extended control flow (classic BASIC)
-        r = self._cf_data(stmt)
-        if r is not None: return r
-        r = self._cf_read(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_on_goto(stmt, run_vars, sorted_lines)
-        if r is not None: return r
-        r = self._cf_on_gosub(stmt, run_vars, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_select_case(stmt, run_vars, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_case(stmt, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_end_select(stmt)
-        if r is not None: return r
-        r = self._cf_do(stmt, run_vars, loop_stack, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_loop(stmt, run_vars, loop_stack, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_exit(stmt, loop_stack, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_swap(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_def_fn(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_option_base(stmt)
-        if r is not None: return r
-        # SUB/FUNCTION
-        r = self._cf_sub(stmt, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_end_sub(stmt)
-        if r is not None: return r
-        r = self._cf_function(stmt, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_end_function(stmt)
-        if r is not None: return r
-        r = self._cf_call(stmt, run_vars, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_local(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_static(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_shared(stmt, run_vars)
-        if r is not None: return r
-        # Debug/error handling
-        r = self._cf_on_error(stmt)
-        if r is not None: return r
-        r = self._cf_resume(stmt, sorted_lines)
-        if r is not None: return r
-        r = self._cf_error(stmt)
-        if r is not None: return r
-        r = self._cf_assert(stmt, run_vars)
-        if r is not None: return r
-        r = self._cf_stop(stmt, sorted_lines, ip)
-        if r is not None: return r
-        r = self._cf_on_measure(stmt)
-        if r is not None: return r
-        r = self._cf_on_timer(stmt)
-        if r is not None: return r
-
+        # RawStmt or unmapped type — not handled by control flow
         return False, None

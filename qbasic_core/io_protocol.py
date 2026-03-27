@@ -18,10 +18,16 @@ class StdIOPort:
     """Default I/O: stdout/stdin."""
 
     def write(self, text: str) -> None:
-        print(text, end='', flush=True)
+        try:
+            print(text, end='', flush=True)
+        except UnicodeEncodeError:
+            print(text.encode('ascii', 'replace').decode('ascii'), end='', flush=True)
 
     def writeln(self, text: str) -> None:
-        print(text)
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            print(text.encode('ascii', 'replace').decode('ascii'))
 
     def read_line(self, prompt: str) -> str:
         return input(prompt)

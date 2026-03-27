@@ -74,7 +74,7 @@ class SubroutineMixin:
             return None
         if self._call_stack:
             frame = self._call_stack.pop()
-            self._pop_scope()
+            self._pop_scope(frame)
             return True, frame['return_ip']
         return True, ExecResult.ADVANCE
 
@@ -95,7 +95,7 @@ class SubroutineMixin:
             frame = self._call_stack.pop()
             func_name = frame.get('func_name', '')
             ret_val = self.variables.get(func_name, 0) if func_name else 0
-            self._pop_scope()
+            self._pop_scope(frame)
             if func_name:
                 self.variables['_FUNC_RETURN'] = ret_val
             return True, frame['return_ip']
@@ -215,10 +215,13 @@ class SubroutineMixin:
     def _push_scope(self) -> None:
         self._scope_stack.append(dict(self.variables))
 
-    def _pop_scope(self) -> None:
-        # Save STATIC vars for the current frame before restoring outer scope
-        if self._call_stack:
+    def _pop_scope(self, frame: dict[str, Any] | None = None) -> None:
+        # Save STATIC vars for the current frame before restoring outer scope.
+        # *frame* should be the already-popped call frame; if not provided,
+        # fall back to peeking at the call stack (legacy callers).
+        if frame is None and self._call_stack:
             frame = self._call_stack[-1]
+        if frame is not None:
             sub_name = frame.get('sub_name') or frame.get('func_name') or ''
             if sub_name in self._static_vars:
                 for vname in list(self._static_vars[sub_name]):

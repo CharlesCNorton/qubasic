@@ -77,6 +77,7 @@ def run_script(path: str, terminal: 'QBasicTerminal') -> None:
 
 def main():
     import json as _json
+    os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 
     args = sys.argv[1:]
     quiet = '--quiet' in args or '-q' in args

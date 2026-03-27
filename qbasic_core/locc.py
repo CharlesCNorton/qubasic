@@ -40,38 +40,38 @@ class LOCCMixin:
                 mode = "JOINT" if self.locc.joint else "SPLIT"
                 reg_desc = '  '.join(f"{n}={s}q" for n, s in
                                      zip(self.locc.names, self.locc.sizes))
-                print(f"LOCC {mode}: {reg_desc}")
+                self.io.writeln(f"LOCC {mode}: {reg_desc}")
                 tot, peak = self.locc.mem_gb()
-                print(f"  RAM per instance: {tot:.1f} GB (with overhead)")
+                self.io.writeln(f"  RAM per instance: {tot:.1f} GB (with overhead)")
                 if self.locc.classical:
-                    print(f"  Classical: {self.locc.classical}")
+                    self.io.writeln(f"  Classical: {self.locc.classical}")
             else:
-                print("LOCC OFF. Usage: LOCC [JOINT] <n1> <n2> [n3 ...]")
+                self.io.writeln("LOCC OFF. Usage: LOCC [JOINT] <n1> <n2> [n3 ...]")
             return
 
         if args[0] == 'OFF':
             self.locc = None
             self.locc_mode = False
-            print("LOCC OFF — back to normal Aer mode")
+            self.io.writeln("LOCC OFF — back to normal Aer mode")
             return
 
         if args[0] == 'STATUS':
             if not self.locc_mode:
-                print("NOT IN LOCC MODE")
+                self.io.writeln("NOT IN LOCC MODE")
                 return
             mode = "JOINT" if self.locc.joint else "SPLIT"
             reg_desc = '  '.join(f"{n}={s}q" for n, s in
                                  zip(self.locc.names, self.locc.sizes))
-            print(f"LOCC {mode}: {reg_desc}")
+            self.io.writeln(f"LOCC {mode}: {reg_desc}")
             tot, peak = self.locc.mem_gb()
-            print(f"  RAM per instance: {tot:.1f} GB (with overhead)")
+            self.io.writeln(f"  RAM per instance: {tot:.1f} GB (with overhead)")
             ram = _get_ram_gb()
             if ram:
                 budget = ram[0] * RAM_BUDGET_FRACTION
                 max_par = int(budget / tot) if tot > 0 else 0
                 if max_par > 0:
-                    print(f"  Max parallel in 80% budget: ~{max_par}")
-            print(f"  Classical vars: {self.locc.classical if self.locc.classical else '(none)'}")
+                    self.io.writeln(f"  Max parallel in 80% budget: ~{max_par}")
+            self.io.writeln(f"  Classical vars: {self.locc.classical if self.locc.classical else '(none)'}")
             return
 
         joint = False
@@ -83,19 +83,19 @@ class LOCCMixin:
             nums = args[1:]
 
         if len(nums) < 2:
-            print("?USAGE: LOCC [JOINT|SPLIT] <n1> <n2> [n3 ...]")
+            self.io.writeln("?USAGE: LOCC [JOINT|SPLIT] <n1> <n2> [n3 ...]")
             return
         if len(nums) > LOCC_MAX_REGISTERS:
-            print(f"?MAX {LOCC_MAX_REGISTERS} registers (A-Z)")
+            self.io.writeln(f"?MAX {LOCC_MAX_REGISTERS} registers (A-Z)")
             return
 
         sizes = [int(n) for n in nums]
         total = sum(sizes)
         if joint and total > LOCC_MAX_JOINT_QUBITS:
-            print(f"?JOINT mode limited to {LOCC_MAX_JOINT_QUBITS} total qubits (requested {total})")
+            self.io.writeln(f"?JOINT mode limited to {LOCC_MAX_JOINT_QUBITS} total qubits (requested {total})")
             return
         if not joint and max(sizes) > LOCC_MAX_SPLIT_QUBITS:
-            print(f"?Each register limited to {LOCC_MAX_SPLIT_QUBITS} qubits")
+            self.io.writeln(f"?Each register limited to {LOCC_MAX_SPLIT_QUBITS} qubits")
             return
 
         # Pre-check RAM before allocating
@@ -104,73 +104,73 @@ class LOCCMixin:
         tot, peak = temp_eng.mem_gb()
         ram = _get_ram_gb()
         if ram and tot > ram[1]:
-            print(f"?BLOCKED: LOCC {mode} needs ~{tot:.1f} GB but only "
-                  f"{ram[1]:.1f} GB available. Reduce register sizes.")
+            self.io.writeln(f"?BLOCKED: LOCC {mode} needs ~{tot:.1f} GB but only "
+                           f"{ram[1]:.1f} GB available. Reduce register sizes.")
             return
 
         self.locc = temp_eng
         self.locc_mode = True
         reg_desc = '  '.join(f"{n}={s}q" for n, s in
                              zip(self.locc.names, sizes))
-        print(f"LOCC {mode}: {reg_desc}  ({total} total)")
-        print(f"  RAM per instance: {tot:.1f} GB (with overhead)")
+        self.io.writeln(f"LOCC {mode}: {reg_desc}  ({total} total)")
+        self.io.writeln(f"  RAM per instance: {tot:.1f} GB (with overhead)")
         if ram:
             sys_total, avail = ram
             budget = sys_total * RAM_BUDGET_FRACTION
             if tot > 0:
                 max_par = int(budget / tot)
                 if max_par > 0:
-                    print(f"  Max parallel instances in 80% budget: ~{max_par}")
+                    self.io.writeln(f"  Max parallel instances in 80% budget: ~{max_par}")
         if not joint:
-            print(f"  Registers are INDEPENDENT — no cross-register entanglement")
-            print(f"  Use SEND/IF for classical coordination")
+            self.io.writeln(f"  Registers are INDEPENDENT — no cross-register entanglement")
+            self.io.writeln(f"  Use SEND/IF for classical coordination")
         else:
-            print(f"  Joint statevector — use SHARE for pre-shared entanglement")
+            self.io.writeln(f"  Joint statevector — use SHARE for pre-shared entanglement")
         if peak > 30:
-            print(f"  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
+            self.io.writeln(f"  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
 
     def cmd_send(self, rest):
         if not self.locc_mode:
-            print("?SEND requires LOCC mode")
+            self.io.writeln("?SEND requires LOCC mode")
             return
         m = re.match(r'([A-Z])\s+(\S+)\s*->\s*(\w+)', rest, re.IGNORECASE)
         if not m:
-            print("?USAGE: SEND <reg> <qubit> -> <var>")
+            self.io.writeln("?USAGE: SEND <reg> <qubit> -> <var>")
             return
         reg = m.group(1).upper()
         if reg not in self.locc.names:
-            print(f"?UNKNOWN REGISTER: {reg} (have {', '.join(self.locc.names)})")
+            self.io.writeln(f"?UNKNOWN REGISTER: {reg} (have {', '.join(self.locc.names)})")
             return
         qubit = int(self.eval_expr(m.group(2)))
         var = m.group(3)
         n_reg = self.locc.get_size(reg)
         if qubit < 0 or qubit >= n_reg:
-            print(f"?QUBIT {qubit} OUT OF RANGE for register {reg} (0-{n_reg-1})")
+            self.io.writeln(f"?QUBIT {qubit} OUT OF RANGE for register {reg} (0-{n_reg-1})")
             return
         outcome = self.locc.send(reg, qubit)
         self.variables[var] = outcome
         self.locc.classical[var] = outcome
-        print(f"  {reg}[{qubit}] -> {var} = {outcome}")
+        self.io.writeln(f"  {reg}[{qubit}] -> {var} = {outcome}")
 
     def cmd_share(self, rest):
         if not self.locc_mode:
-            print("?SHARE requires LOCC mode")
+            self.io.writeln("?SHARE requires LOCC mode")
             return
         m = re.match(r'([A-Z])\s+(\d+)\s*,?\s*([A-Z])\s+(\d+)', rest, re.IGNORECASE)
         if not m:
-            print("?USAGE: SHARE <reg1> <qubit> <reg2> <qubit>")
+            self.io.writeln("?USAGE: SHARE <reg1> <qubit> <reg2> <qubit>")
             return
         reg1, q1 = m.group(1).upper(), int(m.group(2))
         reg2, q2 = m.group(3).upper(), int(m.group(4))
         for r in (reg1, reg2):
             if r not in self.locc.names:
-                print(f"?UNKNOWN REGISTER: {r}")
+                self.io.writeln(f"?UNKNOWN REGISTER: {r}")
                 return
         try:
             self.locc.share(reg1, q1, reg2, q2)
-            print(f"  Bell pair |Phi+> created: {reg1}[{q1}] <-> {reg2}[{q2}]")
+            self.io.writeln(f"  Bell pair |Phi+> created: {reg1}[{q1}] <-> {reg2}[{q2}]")
         except RuntimeError as e:
-            print(f"?{e}")
+            self.io.writeln(f"?{e}")
 
     def cmd_connect(self, rest: str) -> None:
         """CONNECT "host:port" AS <reg> — attach a remote quantum register.
@@ -209,22 +209,22 @@ class LOCCMixin:
             self.io.writeln("?NOT IN LOCC MODE")
             return
         mode = "JOINT" if self.locc.joint else "SPLIT"
-        print(f"\n  LOCC Protocol Metrics ({mode})")
+        self.io.writeln(f"\n  LOCC Protocol Metrics ({mode})")
         reg_desc = '  '.join(f"{n}={s}q" for n, s in
                              zip(self.locc.names, self.locc.sizes))
-        print(f"  Registers: {reg_desc}  ({self.locc.n_regs} parties)")
+        self.io.writeln(f"  Registers: {reg_desc}  ({self.locc.n_regs} parties)")
         n_classical = len(self.locc.classical)
-        print(f"  Classical bits exchanged: {n_classical}")
+        self.io.writeln(f"  Classical bits exchanged: {n_classical}")
         if self.locc.classical:
             for k, v in self.locc.classical.items():
-                print(f"    {k} = {v}")
+                self.io.writeln(f"    {k} = {v}")
         n_sends = sum(1 for l in self.program.values()
                       if re.search(r'\bSEND\b', l, re.IGNORECASE))
-        print(f"  SEND operations: {n_sends}")
-        print(f"  Communication rounds: ~{n_sends}")
+        self.io.writeln(f"  SEND operations: {n_sends}")
+        self.io.writeln(f"  Communication rounds: ~{n_sends}")
         tot, peak = self.locc.mem_gb()
-        print(f"  Memory: {tot:.1f} GB")
-        print()
+        self.io.writeln(f"  Memory: {tot:.1f} GB")
+        self.io.writeln('')
 
     # ── LOCC Display ──────────────────────────────────────────────────
 
@@ -233,13 +233,13 @@ class LOCCMixin:
         if self.locc.joint:
             if not reg or reg in self.locc.names:
                 sizes = '+'.join(str(s) for s in self.locc.sizes)
-                print(f"\n  Joint statevector ({sizes} qubits):")
+                self.io.writeln(f"\n  Joint statevector ({sizes} qubits):")
                 self._print_statevector(self.locc.sv, self.locc.n_total)
         else:
             show = [reg] if reg and reg in self.locc.names else self.locc.names
             for name in show:
                 size = self.locc.get_size(name)
-                print(f"\n  Register {name} ({size} qubits):")
+                self.io.writeln(f"\n  Register {name} ({size} qubits):")
                 self._print_statevector(self.locc.svs[name], size)
 
     def _locc_bloch(self, rest):
@@ -247,7 +247,7 @@ class LOCCMixin:
         if m and m.group(1):
             reg = m.group(1).upper()
             if reg not in self.locc.names:
-                print(f"?UNKNOWN REGISTER: {reg}")
+                self.io.writeln(f"?UNKNOWN REGISTER: {reg}")
                 return
             sv = self.locc.get_sv(reg)
             n = self.locc.get_n(reg)
@@ -255,17 +255,17 @@ class LOCCMixin:
             if m.group(2):
                 q = int(m.group(2))
                 actual_q = q if not self.locc.joint else q + self.locc.offsets[idx]
-                print(f"  [Register {reg}, qubit {q}]")
+                self.io.writeln(f"  [Register {reg}, qubit {q}]")
                 self._print_bloch_single(sv, actual_q, n)
             else:
                 n_show = self.locc.get_size(reg)
                 for q in range(min(n_show, 4)):
                     actual_q = q if not self.locc.joint else q + self.locc.offsets[idx]
-                    print(f"  [Register {reg}, qubit {q}]")
+                    self.io.writeln(f"  [Register {reg}, qubit {q}]")
                     self._print_bloch_single(sv, actual_q, n)
-                    print()
+                    self.io.writeln('')
         else:
-            print(f"?USAGE: BLOCH <reg> [qubit]  (registers: {', '.join(self.locc.names)})")
+            self.io.writeln(f"?USAGE: BLOCH <reg> [qubit]  (registers: {', '.join(self.locc.names)})")
 
     # ── LOCC Execution ────────────────────────────────────────────────
 
@@ -273,7 +273,7 @@ class LOCCMixin:
         """Execute program in LOCC mode (N registers)."""
         sorted_lines = sorted(self.program.keys())
         if not sorted_lines:
-            print("NOTHING TO RUN")
+            self.io.writeln("NOTHING TO RUN")
             return
         has_measure = any(self.program[l].strip().upper() == 'MEASURE'
                          for l in sorted_lines)
@@ -392,33 +392,33 @@ class LOCCMixin:
         try:
             self._locc_execute_program(sorted_lines)
         except (RuntimeError, ValueError) as e:
-            print(f"?RUNTIME ERROR: {e}")
+            self.io.writeln(f"?RUNTIME ERROR: {e}")
             return
 
         if has_measure:
             per_reg, cj = self.locc.sample_joint(self.shots)
             dt = time.time() - t0
-            print(f"\nRAN {len(self.program)} lines, LOCC {mode} "
-                  f"{sizes_str}q, {self.shots} shots in {dt:.2f}s")
+            self.io.writeln(f"\nRAN {len(self.program)} lines, LOCC {mode} "
+                            f"{sizes_str}q, {self.shots} shots in {dt:.2f}s")
             self._locc_display_results(per_reg, cj)
             if not cj:
-                print(f"\n  (SPLIT mode, no SEND — registers are independent)")
+                self.io.writeln(f"\n  (SPLIT mode, no SEND — registers are independent)")
             self.last_counts = cj if cj else per_reg.get('A', {})
         else:
             dt = time.time() - t0
-            print(f"\nRAN {len(self.program)} lines, LOCC in {dt:.2f}s")
+            self.io.writeln(f"\nRAN {len(self.program)} lines, LOCC in {dt:.2f}s")
             regs = ', '.join(self.locc.names)
-            print(f"(no MEASURE — use STATE {regs} to inspect)")
+            self.io.writeln(f"(no MEASURE — use STATE {regs} to inspect)")
 
     def _locc_display_results(self, per_reg, counts_joint):
         """Display per-register and joint histograms."""
         for name in self.locc.names:
             size = self.locc.get_size(name)
-            print(f"\n  Register {name} ({size}q):")
+            self.io.writeln(f"\n  Register {name} ({size}q):")
             self.print_histogram(per_reg[name])
         if counts_joint and self.locc.n_regs <= 4:
             jlabel = '|'.join(self.locc.names)
-            print(f"\n  Joint ({jlabel}):")
+            self.io.writeln(f"\n  Joint ({jlabel}):")
             self.print_histogram(counts_joint)
 
     def _locc_execute_program(self, sorted_lines, *, start_ip: int = 0,

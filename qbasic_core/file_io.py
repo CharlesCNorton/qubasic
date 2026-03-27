@@ -34,6 +34,10 @@ class FileIOMixin:
         except ValueError as e:
             self.io.writeln(f"?SAVE ERROR: {e}")
             return
+        checked = self._check_agent_path(path, "SAVE")
+        if checked is None:
+            return
+        path = checked
         if not path.endswith('.qb'):
             path += '.qb'
         try:
@@ -106,6 +110,7 @@ class FileIOMixin:
         """INCLUDE file.qb — merge another program's lines into current.
 
         Depth-limited to MAX_INCLUDE_DEPTH to prevent infinite recursion.
+        Cycle detection via _include_stack prevents A->B->A loops.
         SAVE, LOAD, and INCLUDE are blocked inside included files so that
         an included script cannot write arbitrary files or recurse further
         without the user's direct interaction.
@@ -123,8 +128,13 @@ class FileIOMixin:
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
+        resolved = os.path.realpath(path)
+        if resolved in self._include_stack:
+            self.io.writeln(f"?INCLUDE CYCLE: {path} already in include chain")
+            return
         count = 0
         self._include_depth += 1
+        self._include_stack.append(resolved)
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -139,6 +149,7 @@ class FileIOMixin:
                     self.process(line, track_undo=False)
                     count += 1
         finally:
+            self._include_stack.pop()
             self._include_depth -= 1
         self.io.writeln(f"INCLUDED {path} ({count} lines)")
 
@@ -227,6 +238,10 @@ class FileIOMixin:
             except ValueError as e:
                 self.io.writeln(f"?EXPORT ERROR: {e}")
                 return
+            checked = self._check_agent_path(path, "EXPORT")
+            if checked is None:
+                return
+            path = checked
             if os.path.exists(path):
                 self.io.writeln(f"  (overwriting {path})")
             with open(path, 'w', encoding='utf-8') as f:
@@ -250,6 +265,10 @@ class FileIOMixin:
             except ValueError as e:
                 self.io.writeln(f"?CSV ERROR: {e}")
                 return
+            checked = self._check_agent_path(path, "CSV")
+            if checked is None:
+                return
+            path = checked
             if os.path.exists(path):
                 self.io.writeln(f"  (overwriting {path})")
             with open(path, 'w', encoding='utf-8') as f:
@@ -267,6 +286,17 @@ class FileIOMixin:
         self._file_handles: dict[int, Any] = {}
         self._lprint_path: str | None = None
 
+    def _check_agent_path(self, path: str, cmd: str) -> str | None:
+        """In agent mode, restrict paths to cwd. Returns resolved path or None on error."""
+        if not self.agent_mode:
+            return path
+        resolved = os.path.realpath(os.path.join(os.getcwd(), path))
+        cwd_real = os.path.realpath(os.getcwd())
+        if not resolved.startswith(cwd_real + os.sep) and resolved != cwd_real:
+            self.io.writeln(f"?{cmd} BLOCKED: path escapes working directory in agent mode")
+            return None
+        return resolved
+
     def cmd_open(self, rest: str) -> None:
         """OPEN file FOR INPUT|OUTPUT|APPEND AS #n"""
         m = RE_OPEN.match(f"OPEN {rest}")
@@ -279,6 +309,10 @@ class FileIOMixin:
         except ValueError as e:
             self.io.writeln(f"?OPEN ERROR: {e}")
             return
+        checked = self._check_agent_path(path, "OPEN")
+        if checked is None:
+            return
+        path = checked
         mode_map = {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a', 'RANDOM': 'r+'}
         mode = mode_map.get(mode_str, 'r')
         try:

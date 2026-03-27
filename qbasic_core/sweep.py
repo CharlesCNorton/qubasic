@@ -63,8 +63,8 @@ class SweepMixin:
                 bar_len = int(30 * top[1] / self.shots)
                 top2 = f" |{ranked[1][0]}\u27E9={ranked[1][1]}" if len(ranked) > 1 else ""
                 n_unique = len(ranked)
-                print(f"  {var}={val:8.4f}  |{top[0]}\u27E9 {top[1]:>5}/{self.shots} "
-                      f"{'\u2588' * bar_len}{top2}  ({n_unique} states)")
+                self.io.writeln(f"  {var}={val:8.4f}  |{top[0]}\u27E9 {top[1]:>5}/{self.shots} "
+                               f"{'\u2588' * bar_len}{top2}  ({n_unique} states)")
                 sweep_xs.append(val)
                 sweep_ys.append(top[1] / self.shots)
             except Exception as e:
@@ -73,7 +73,7 @@ class SweepMixin:
         # Plotille chart of P(top state) vs variable
         if _plotille is not None and len(sweep_xs) >= 2:
             self.io.writeln('')
-            print(_plotille.plot(
+            self.io.writeln(_plotille.plot(
                 sweep_xs, sweep_ys,
                 width=60, height=15,
                 X_label=var,

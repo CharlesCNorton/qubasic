@@ -26,6 +26,7 @@ class DebugMixin:
         self._in_error_handler: bool = False
         self._trace_mode: bool = False
         self._stopped_ip: int | None = None
+        self._cont_skip_stop_ip: int | None = None
         self._breakpoints: set[int] = set()
         self._watches: list[str] = []
         self._on_measure_target: int | None = None
@@ -178,6 +179,10 @@ class DebugMixin:
     def _cf_stop(self, stmt: str, sorted_lines: list[int], ip: int) -> tuple[bool, ExecOutcome] | None:
         if stmt.strip().upper() != 'STOP':
             return None
+        # CONT sets _cont_skip_stop_ip to replay past this STOP
+        if self._cont_skip_stop_ip is not None and self._cont_skip_stop_ip == ip:
+            self._cont_skip_stop_ip = None
+            return True, ExecResult.ADVANCE
         line_num = sorted_lines[ip]
         self.io.writeln(f"STOPPED AT LINE {line_num}")
         self._stopped_ip = ip
@@ -185,12 +190,17 @@ class DebugMixin:
         return True, ExecResult.END
 
     def cmd_cont(self) -> None:
-        """CONT — continue execution after STOP."""
+        """CONT — continue execution after STOP, resuming from the next line.
+
+        Re-executes the program from the top but skips the STOP that fired,
+        so lines after STOP are reached. Variable state is rebuilt by
+        replaying all lines before the STOP.
+        """
         if self._stopped_ip is None:
             self.io.writeln("?CANNOT CONTINUE")
             return
         self.io.writeln("CONTINUING...")
-        # Re-run from stopped position (simplified: re-run from start)
+        self._cont_skip_stop_ip = self._stopped_ip
         self._stopped_ip = None
         self.cmd_run()
 

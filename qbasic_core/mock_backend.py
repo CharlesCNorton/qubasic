@@ -37,6 +37,10 @@ class MockResult:
         sv[0] = 1.0
         return sv
 
+    def data(self) -> dict:
+        """Return empty dict — no save instructions in mock."""
+        return {}
+
 
 class MockAerSimulator:
     """Drop-in replacement for AerSimulator that skips simulation."""

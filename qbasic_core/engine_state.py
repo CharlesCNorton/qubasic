@@ -70,6 +70,10 @@ class Engine:
         # I/O
         self.io: IOPort = io or StdIOPort()
 
+        # Security
+        self.agent_mode: bool = False
+        self._include_stack: list[str] = []
+
         # Timing
         self._start_time: float = time.time()
 
