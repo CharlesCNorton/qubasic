@@ -58,6 +58,34 @@ from qbasic_core.engine_state import Engine
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Named quantum states for SET_STATE
+# ═══════════════════════════════════════════════════════════════════════
+
+def _resolve_named_state(name: str, n_qubits: int) -> np.ndarray:
+    dim = 2 ** n_qubits
+    sv = np.zeros(dim, dtype=complex)
+    if name == '|0>':
+        sv[0] = 1.0
+    elif name == '|1>':
+        sv[min(1, dim - 1)] = 1.0
+    elif name == '|+>':
+        sv[0] = 1.0 / np.sqrt(2)
+        sv[min(1, dim - 1)] = 1.0 / np.sqrt(2)
+    elif name == '|->':
+        sv[0] = 1.0 / np.sqrt(2)
+        sv[min(1, dim - 1)] = -1.0 / np.sqrt(2)
+    elif name == '|BELL>':
+        sv[0] = 1.0 / np.sqrt(2)
+        sv[dim - 1] = 1.0 / np.sqrt(2)
+    elif name == '|GHZ>':
+        sv[0] = 1.0 / np.sqrt(2)
+        sv[dim - 1] = 1.0 / np.sqrt(2)
+    else:
+        sv[0] = 1.0
+    return sv
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # The Terminal
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -635,7 +663,13 @@ class QBasicTerminal(Engine, ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin
         # Copy before adding measurements (for statevector extraction)
         qc_sv = qc.copy()
 
-        if has_measure:
+        # Unitary/superop methods need save instructions, not measurements
+        if self.sim_method in ('unitary', 'superop'):
+            if self.sim_method == 'unitary':
+                qc.save_unitary(label='unitary')
+            else:
+                qc.save_superop(label='superop')
+        elif has_measure:
             qc.measure_all()
 
         self.last_circuit = qc
@@ -666,6 +700,10 @@ class QBasicTerminal(Engine, ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin
                 tuple(sorted(self.program.items())),
                 self.num_qubits, method, self.sim_device,
                 id(self._noise_model),
+                getattr(self, '_fusion_enable', None),
+                getattr(self, '_mps_truncation', None),
+                getattr(self, '_sv_parallel_threshold', None),
+                getattr(self, '_es_approx_error', None),
             )
             if self._circuit_cache_key == cache_key and self._circuit_cache is not None:
                 qc_t, backend = self._circuit_cache
@@ -675,18 +713,55 @@ class QBasicTerminal(Engine, ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin
                 self._circuit_cache_key = cache_key
                 self._circuit_cache = (qc_t, backend)
             result = backend.run(qc_t, shots=self.shots).result()
-            self.last_counts = dict(result.get_counts())
+            # Extract results based on method
+            if method in ('unitary', 'superop'):
+                self.last_counts = None
+                data = result.data()
+                label = 'unitary' if method == 'unitary' else 'superop'
+                mat = data.get(label)
+                if mat is not None:
+                    mat_np = np.asarray(mat)
+                    self.variables[label] = mat_np
+                    dim = mat_np.shape[0]
+                    self.io.writeln(f"\n  {label.upper()} ({dim}x{dim}):")
+                    if dim <= 16:
+                        for i in range(dim):
+                            row = '  '.join(f"{v.real:+.3f}{v.imag:+.3f}j" for v in mat_np[i])
+                            self.io.writeln(f"    {row}")
+                    else:
+                        self.io.writeln(f"    (too large to display — stored in variable '{label}')")
+            else:
+                self.last_counts = dict(result.get_counts())
+            # Extract save instruction results into BASIC variables
+            data = result.data()
+            for key, val in data.items():
+                if key.startswith('exp_'):
+                    var = key[4:]
+                    self.variables[var] = float(np.real(val))
+                elif key.startswith('prob_'):
+                    var = key[5:]
+                    self.variables[var] = val
+                    if isinstance(val, np.ndarray):
+                        self.arrays[var] = val.tolist()
+                elif key.startswith('amp_'):
+                    var = key[4:]
+                    if isinstance(val, np.ndarray):
+                        self.arrays[var] = [complex(v) for v in val]
+                    self.variables[var] = val
         except Exception as e:
             self.io.writeln(f"?RUNTIME ERROR: {e}")
             return
 
         # Get statevector from the measurement-free copy
-        try:
-            qc_sv.save_statevector()
-            sv_backend = AerSimulator(method='statevector')
-            sv_result = sv_backend.run(transpile(qc_sv, sv_backend)).result()
-            self.last_sv = np.array(sv_result.get_statevector())
-        except Exception:
+        if method not in ('unitary', 'superop'):
+            try:
+                qc_sv.save_statevector()
+                sv_backend = AerSimulator(method='statevector')
+                sv_result = sv_backend.run(transpile(qc_sv, sv_backend)).result()
+                self.last_sv = np.array(sv_result.get_statevector())
+            except Exception:
+                self.last_sv = None
+        else:
             self.last_sv = None
 
         dt = time.time() - t0
@@ -698,9 +773,11 @@ class QBasicTerminal(Engine, ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin
                            run_time_ms=dt * 1000)
 
         # Display results
-        print(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits, "
-              f"{self.shots} shots in {dt:.2f}s  [depth={depth}, gates={n_gates}]")
-        if has_measure:
+        self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits, "
+                        f"{self.shots} shots in {dt:.2f}s  [depth={depth}, gates={n_gates}]")
+        if method in ('unitary', 'superop'):
+            pass  # matrix already displayed above
+        elif has_measure and self.last_counts:
             self.print_histogram(self.last_counts)
             self._auto_display()
         else:
@@ -714,15 +791,35 @@ class QBasicTerminal(Engine, ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin
         shots = int(rest.strip()) if rest.strip() else self.shots
         try:
             qc, has_measure = self.build_circuit()
-            if has_measure:
+            if not has_measure:
                 qc.measure_all()
             from qiskit_aer.primitives import SamplerV2
             sampler = SamplerV2()
             result = sampler.run([qc], shots=shots).result()
-            counts = result[0].data.meas.get_counts() if hasattr(result[0].data, 'meas') else {}
-            self.last_counts = dict(counts)
+            # Extract counts — try multiple access paths for Qiskit version compat
+            pub_result = result[0]
+            counts = {}
+            try:
+                # V2 path: data has named classical registers
+                for attr_name in dir(pub_result.data):
+                    if attr_name.startswith('_'):
+                        continue
+                    obj = getattr(pub_result.data, attr_name, None)
+                    if obj is not None and hasattr(obj, 'get_counts'):
+                        counts = dict(obj.get_counts())
+                        break
+            except Exception:
+                pass
+            if not counts:
+                # Fallback: try legacy get_counts
+                try:
+                    counts = dict(pub_result.data.get_counts())
+                except Exception:
+                    pass
+            self.last_counts = counts
             self.io.writeln(f"SAMPLED {shots} shots ({len(counts)} unique outcomes)")
-            self.print_histogram(counts)
+            if counts:
+                self.print_histogram(counts)
         except Exception as e:
             self.io.writeln(f"?SAMPLE ERROR: {e}")
 
@@ -1641,16 +1738,44 @@ class QBasicTerminal(Engine, ExpressionMixin, DisplayMixin, DemoMixin, LOCCMixin
             self.io.writeln(f"?SAVE_AMPS ERROR: {e}")
         return True
 
+    # Named quantum states for SET_STATE Dirac notation
+    _NAMED_STATES = {
+        '|0>': lambda n: _named_sv(n, 0),
+        '|1>': lambda n: _named_sv(n, 1),
+        '|+>': lambda n: _named_sv_plus(n),
+        '|->': lambda n: _named_sv_minus(n),
+        '|BELL>': lambda n: _named_sv_bell(n),
+        '|GHZ>': lambda n: _named_sv_ghz(n),
+    }
+
     def _try_exec_set_state(self, stmt: str, qc) -> bool:
-        """SET_STATE <statevector_expr> — inject custom statevector mid-circuit."""
+        """SET_STATE <statevector> — inject custom statevector mid-circuit.
+
+        Accepts:
+          SET_STATE [0.707, 0, 0, 0.707]    — explicit amplitudes
+          SET_STATE |+>                       — named state
+          SET_STATE |BELL>                    — named entangled state
+          SET_STATE |GHZ>                     — GHZ state
+        """
         from qbasic_core.engine import RE_SET_STATE
         m = RE_SET_STATE.match(stmt)
         if not m:
             return False
         try:
             sv_expr = m.group(1).strip()
-            sv_list = self._parse_matrix(sv_expr)
-            sv_flat = np.array(sv_list, dtype=complex).ravel()
+            dim = 2 ** self.num_qubits
+            # Try named states first
+            if sv_expr.upper() in ('|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>'):
+                sv_flat = _resolve_named_state(sv_expr.upper(), self.num_qubits)
+            else:
+                sv_list = self._parse_matrix(sv_expr)
+                sv_flat = np.array(sv_list, dtype=complex).ravel()
+            if len(sv_flat) != dim:
+                raise ValueError(f"State vector length {len(sv_flat)} != 2^{self.num_qubits} = {dim}")
+            norm = float(np.sum(np.abs(sv_flat) ** 2))
+            if abs(norm - 1.0) > 1e-6:
+                sv_flat = sv_flat / np.sqrt(norm)
+                self.io.writeln(f"  (normalized: ||sv||={norm:.6f} -> 1.0)")
             from qiskit.quantum_info import Statevector
             sv_obj = Statevector(sv_flat)
             from qiskit_aer.library import SetStatevector
