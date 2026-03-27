@@ -196,7 +196,7 @@ class LOCCExecutionMixin:
             if stop_before_send and isinstance(_parsed[ctx.ip], SendStmt):
                 return ctx.ip
             try:
-                result = self._locc_exec_line(_stmts[ctx.ip], ctx.loop_stack, sorted_lines, ctx.ip, run_vars)
+                result = self._locc_exec_line(_stmts[ctx.ip], ctx.loop_stack, sorted_lines, ctx.ip, run_vars, parsed=_parsed[ctx.ip])
             except Exception as e:
                 raise RuntimeError(f"LINE {sorted_lines[ctx.ip]}: {e}") from None
             if result is ExecResult.END:
@@ -207,14 +207,15 @@ class LOCCExecutionMixin:
                 ctx.ip += 1
         return ctx.ip
 
-    def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars):
+    def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars, *, parsed=None):
         """Execute one line in LOCC mode."""
         from qbasic_core.parser import parse_stmt
         from qbasic_core.statements import (
             SendStmt, ShareStmt, AtRegStmt, CompoundStmt,
             RemStmt, MeasureStmt, EndStmt, BarrierStmt, ReturnStmt,
         )
-        parsed = parse_stmt(stmt)
+        if parsed is None:
+            parsed = parse_stmt(stmt)
 
         # Fast-path for terminals
         if isinstance(parsed, (RemStmt, MeasureStmt, BarrierStmt)):
@@ -250,7 +251,8 @@ class LOCCExecutionMixin:
         # Control flow
         handled, result = self._exec_control_flow(
             stmt, loop_stack, sorted_lines, ip, run_vars,
-            lambda s, ls, sl, i, rv: self._locc_exec_line(s, ls, sl, i, rv))
+            lambda s, ls, sl, i, rv: self._locc_exec_line(s, ls, sl, i, rv),
+            parsed=parsed)
         if handled:
             return result
 

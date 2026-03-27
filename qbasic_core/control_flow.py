@@ -38,6 +38,15 @@ class ControlFlowMixin:
     """
 
     # ── Control flow helpers (decomposed from _exec_control_flow) ────
+    #
+    # Each _cf_* method accepts (self, stmt: str, ..., *, parsed=None).
+    # When parsed is provided the method uses the typed fields directly;
+    # when it is None the method falls back to regex matching on the raw
+    # string.  The raw-string path is retained for backward compatibility
+    # but is no longer exercised by the main execution pipeline (callers
+    # now always supply a parsed Stmt via _exec_control_flow).
+    # Deferred cleanup: the raw-string fallback can be removed once all
+    # external call sites are confirmed to pass parsed objects.
 
     def _cf_let_array(self, stmt: str, run_vars: dict[str, Any],
                       *, parsed: LetArrayStmt | None = None) -> tuple[bool, ExecOutcome] | None:
@@ -543,6 +552,7 @@ class ControlFlowMixin:
         self, stmt: str, loop_stack: list[dict[str, Any]],
         sorted_lines: list[int], ip: int, run_vars: dict[str, Any],
         exec_fn: Callable[..., Any],
+        *, parsed=None,
     ) -> tuple[bool, ExecOutcome | None]:
         """Shared control flow for both Qiskit and LOCC execution paths.
         Returns (handled, result) — if handled is True, result is the return value.
@@ -550,8 +560,12 @@ class ControlFlowMixin:
 
         Dispatches via dict lookup on the parsed Stmt type (O(1)) instead
         of a linear chain of regex-matching _cf_* calls.
+
+        If *parsed* is provided, the parse_stmt call is skipped (avoids
+        redundant parsing when the caller has already parsed the statement).
         """
-        parsed = parse_stmt(stmt)
+        if parsed is None:
+            parsed = parse_stmt(stmt)
         handler = self._CF_DISPATCH.get(type(parsed))
         if handler is not None:
             return handler(self, stmt, parsed, loop_stack, sorted_lines, ip, run_vars, exec_fn)

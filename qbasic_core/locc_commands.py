@@ -164,8 +164,7 @@ class LOCCCommandsMixin:
         Creates a local register that can be used with LOCC commands.
         The connection info is stored for future network-backed execution.
         """
-        import re as _re
-        m = _re.match(r'"?([^"]+)"?\s+AS\s+([A-Z])', rest, _re.IGNORECASE)
+        m = re.match(r'"?([^"]+)"?\s+AS\s+([A-Z])', rest, re.IGNORECASE)
         if not m:
             self.io.writeln('?USAGE: CONNECT "host:port" AS <reg>')
             return
@@ -177,8 +176,8 @@ class LOCCCommandsMixin:
         # If not in LOCC mode, auto-enter with a default local register + the remote
         if not self.locc_mode:
             self.cmd_locc(f'3 3')
-        self.io.writeln(f"CONNECTED {reg} -> {endpoint} (local simulation)")
-        self.io.writeln("  (stub: local simulation, no network transport)")
+        self.io.writeln(f"CONNECTED {reg} -> {endpoint} (experimental stub — no real network transport)")
+        self.io.writeln("  (local simulation only)")
 
     def cmd_disconnect(self, rest: str) -> None:
         """DISCONNECT <reg> — detach a remote register.

@@ -9,7 +9,6 @@ Usage:
 
 import sys
 import os
-import re
 
 # Force UTF-8 output on Windows
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -23,8 +22,8 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
     except Exception:
         pass
 
-from qbasic_core.engine import RE_DEF_BEGIN
 from qbasic_core.terminal import QBasicTerminal
+from qbasic_core.program_mgmt import ProgramMgmtMixin
 
 
 def run_script(path: str, terminal: 'QBasicTerminal') -> None:
@@ -35,36 +34,8 @@ def run_script(path: str, terminal: 'QBasicTerminal') -> None:
     """
     with open(path, 'r') as f:
         lines = [l.rstrip('\n\r') for l in f.readlines()]
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line or line.startswith('#'):
-            i += 1
-            continue
-        # Handle multi-line DEF BEGIN in scripts by collecting
-        # the body lines and routing through cmd_def's data path.
-        if re.match(r'DEF\s+BEGIN\s+', line, re.IGNORECASE):
-            m = RE_DEF_BEGIN.match(line)
-            if m:
-                name = m.group(1).upper()
-                params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
-                body = []
-                i += 1
-                while i < len(lines):
-                    bl = lines[i].strip()
-                    if bl.upper() in ('DEF END', 'END'):
-                        break
-                    if bl and not bl.startswith('#'):
-                        body.append(bl)
-                    i += 1
-                # Build a single-line DEF command and route through process()
-                # so all validation (e.g. built-in name rejection) applies.
-                body_str = ' : '.join(body)
-                param_str = f"({', '.join(params)})" if params else ""
-                terminal.process(f"DEF {name}{param_str} = {body_str}", track_undo=False)
-        else:
-            terminal.process(line, track_undo=False)
-        i += 1
+    ProgramMgmtMixin._load_lines_with_defs(
+        lines, lambda line: terminal.process(line, track_undo=False))
 
     # Auto-run if the program has a MEASURE statement
     has_measure = any(

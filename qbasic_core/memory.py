@@ -237,6 +237,10 @@ class MemoryMixin:
         else:
             self.io.writeln(f"?NO ROUTINE AT ${addr:04X}")
 
+    # File-writing commands blocked from USR execution to prevent
+    # user-defined routines from performing uncontrolled I/O.
+    _USR_BLOCKED_CMDS = frozenset({'SAVE', 'EXPORT', 'CSV', 'OPEN'})
+
     def _usr_fn(self, addr: float) -> float:
         """USR(addr) — execute routine, return last measurement result."""
         a = int(addr)
@@ -248,6 +252,10 @@ class MemoryMixin:
                 sub = self.subroutines[name]
                 body = sub['body'] if isinstance(sub, dict) else sub
                 for stmt in body:
+                    first_word = stmt.split(None, 1)[0].upper() if stmt.strip() else ''
+                    if first_word in self._USR_BLOCKED_CMDS:
+                        self.io.writeln(f"  ?BLOCKED IN USR: {first_word}")
+                        continue
                     self.process(stmt)
         if self.last_counts:
             top = max(self.last_counts, key=self.last_counts.get)
@@ -255,21 +263,21 @@ class MemoryMixin:
         return 0.0
 
     def cmd_wait(self, rest: str) -> None:
-        """WAIT addr, mask[, value] — block until (PEEK(addr) AND mask) == value."""
+        """WAIT addr, mask[, value[, timeout]] — block until (PEEK(addr) AND mask) == value."""
         parts = [p.strip() for p in rest.split(',')]
         if len(parts) < 2:
-            self.io.writeln("?USAGE: WAIT <addr>, <mask>[, <value>]")
+            self.io.writeln("?USAGE: WAIT <addr>, <mask>[, <value>[, <timeout>]]")
             return
         addr = int(self.eval_expr(parts[0]))
         mask = int(self.eval_expr(parts[1]))
         target = int(self.eval_expr(parts[2])) if len(parts) > 2 else mask
-        timeout = 30.0
+        timeout = float(self.eval_expr(parts[3])) if len(parts) > 3 else 30.0
         t0 = time.time()
         while time.time() - t0 < timeout:
             val = int(self._peek(addr))
             if (val & mask) == target:
                 return
-            time.sleep(0.01)
+            time.sleep(0.05)
         self.io.writeln("?WAIT TIMEOUT")
 
     def cmd_catalog(self) -> None:

@@ -96,6 +96,8 @@ class FileIOMixin:
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
         try:
+            prev_qubits = self.num_qubits
+            prev_shots = self.shots
             self.cmd_new(silent=True)
             with open(path, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -103,6 +105,10 @@ class FileIOMixin:
                     if line and not line.startswith('#'):
                         self.process(line, track_undo=False)
             self.io.writeln(f"LOADED {path} ({len(self.program)} lines)")
+            if self.num_qubits != prev_qubits:
+                self.io.writeln(f"  (QUBITS changed: {prev_qubits} -> {self.num_qubits})")
+            if self.shots != prev_shots:
+                self.io.writeln(f"  (SHOTS changed: {prev_shots} -> {self.shots})")
         except Exception as e:
             self.io.writeln(f"?LOAD ERROR: {e}")
 
@@ -287,15 +293,21 @@ class FileIOMixin:
         self._lprint_path: str | None = None
 
     def _check_agent_path(self, path: str, cmd: str) -> str | None:
-        """In agent mode, restrict paths to cwd. Returns resolved path or None on error."""
+        """In agent mode, restrict paths to cwd. Returns resolved path or None on error.
+
+        Uses pathlib is_relative_to for safe containment check instead of
+        string prefix matching, which can be bypassed via symlinks or
+        crafted path components that share a common prefix string.
+        """
         if not self.agent_mode:
             return path
-        resolved = os.path.realpath(os.path.join(os.getcwd(), path))
-        cwd_real = os.path.realpath(os.getcwd())
-        if not resolved.startswith(cwd_real + os.sep) and resolved != cwd_real:
+        from pathlib import Path
+        resolved = Path(os.path.realpath(os.path.join(os.getcwd(), path)))
+        cwd_real = Path(os.path.realpath(os.getcwd()))
+        if not resolved.is_relative_to(cwd_real):
             self.io.writeln(f"?{cmd} BLOCKED: path escapes working directory in agent mode")
             return None
-        return resolved
+        return str(resolved)
 
     def cmd_open(self, rest: str) -> None:
         """OPEN file FOR INPUT|OUTPUT|APPEND AS #n [ENCODING "enc"]"""
@@ -321,10 +333,14 @@ class FileIOMixin:
                 bin_mode = mode + 'b'
                 if mode_str == 'RANDOM' and not os.path.isfile(path):
                     open(path, 'wb').close()
+                if mode_str == 'RANDOM' and os.path.isfile(path):
+                    self.io.writeln(f"  (opening existing file {path} for random access)")
                 self._file_handles[handle] = open(path, bin_mode)
             else:
                 if mode_str == 'RANDOM' and not os.path.isfile(path):
                     open(path, 'w', encoding=encoding).close()
+                if mode_str == 'RANDOM' and os.path.isfile(path):
+                    self.io.writeln(f"  (opening existing file {path} for random access)")
                 self._file_handles[handle] = open(path, mode, encoding=encoding)
             self.io.writeln(f"OPENED #{handle} ({path}, {mode_str})")
         except Exception as e:
@@ -355,6 +371,10 @@ class FileIOMixin:
             self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
             return True
         f = self._file_handles[handle]
+        fmode = getattr(f, 'mode', '')
+        if fmode.startswith('r') and '+' not in fmode:
+            self.io.writeln(f"?HANDLE #{handle} NOT OPEN FOR WRITING")
+            return True
         # Evaluate data
         if (data.startswith('"') and data.endswith('"')):
             f.write(data[1:-1] + '\n')
@@ -378,6 +398,10 @@ class FileIOMixin:
             self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
             return True
         f = self._file_handles[handle]
+        fmode = getattr(f, 'mode', '')
+        if fmode.startswith(('w', 'a')) and '+' not in fmode:
+            self.io.writeln(f"?HANDLE #{handle} NOT OPEN FOR READING")
+            return True
         line = f.readline()
         if not line:
             run_vars[var] = 0
@@ -423,8 +447,11 @@ class FileIOMixin:
             return 1.0
         f = self._file_handles[h]
         pos = f.tell()
-        ch = f.read(1)
-        if not ch:
+        try:
+            ch = f.read(1)
+            if not ch:
+                return 1.0
+            f.seek(pos)
+        except (UnicodeDecodeError, Exception):
             return 1.0
-        f.seek(pos)
         return 0.0

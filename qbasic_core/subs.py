@@ -166,6 +166,9 @@ class SubroutineMixin:
             stmt = self.program[sorted_lines[ctx.ip]].strip()
             if RE_END_FUNCTION.match(stmt):
                 break
+            # Pre-parse once, pass to both the main call and the recurse callback
+            from qbasic_core.parser import parse_stmt
+            stmt_parsed = parse_stmt(stmt)
             # Use full control-flow dispatch for all statement types
             def _fn_recurse(s, ls, sl, i, rv):
                 handled, result = self._exec_control_flow(s, ls, sl, i, rv, _fn_recurse)
@@ -173,7 +176,8 @@ class SubroutineMixin:
                     return result
                 return None
             handled, result = self._exec_control_flow(
-                stmt, ctx.loop_stack, sorted_lines, ctx.ip, ctx.run_vars, _fn_recurse)
+                stmt, ctx.loop_stack, sorted_lines, ctx.ip, ctx.run_vars, _fn_recurse,
+                parsed=stmt_parsed)
             if handled:
                 if isinstance(result, int):
                     ctx.ip = result

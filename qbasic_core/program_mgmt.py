@@ -214,6 +214,47 @@ class ProgramMgmtMixin:
 
     # ── CHAIN / MERGE ──────────────────────────────────────────────────
 
+    @staticmethod
+    def _load_lines_with_defs(lines: list[str], process_fn) -> int:
+        """Iterate stripped lines, handling DEF BEGIN...DEF END blocks.
+
+        Skips blank lines and # comments. For each DEF BEGIN block, collects
+        the body lines and calls process_fn with a synthesized single-line DEF
+        command. For all other lines, calls process_fn directly.
+
+        Returns the count of logical lines/blocks processed (excluding skips).
+        """
+        count = 0
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line or line.startswith('#'):
+                i += 1
+                continue
+            if re.match(r'DEF\s+BEGIN\s+', line, re.IGNORECASE):
+                dm = RE_DEF_BEGIN.match(line)
+                if dm:
+                    name = dm.group(1).upper()
+                    params = [p.strip() for p in dm.group(2).split(',')] if dm.group(2) else []
+                    body = []
+                    i += 1
+                    while i < len(lines):
+                        bl = lines[i].strip()
+                        if bl.upper() in ('DEF END', 'END'):
+                            break
+                        if bl and not bl.startswith('#'):
+                            body.append(bl)
+                        i += 1
+                    body_str = ' : '.join(body)
+                    param_str = f"({', '.join(params)})" if params else ""
+                    process_fn(f"DEF {name}{param_str} = {body_str}")
+                    count += 1
+            else:
+                process_fn(line)
+                count += 1
+            i += 1
+        return count
+
     def cmd_chain(self, rest: str) -> None:
         """CHAIN "file" — load and run a program, preserving variables."""
         m = RE_CHAIN.match(f"CHAIN {rest}")
@@ -235,32 +276,8 @@ class ProgramMgmtMixin:
         self.program.clear()
         with open(path, 'r', encoding='utf-8') as f:
             lines = [l.rstrip('\n\r') for l in f.readlines()]
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            if not line or line.startswith('#'):
-                i += 1
-                continue
-            if re.match(r'DEF\s+BEGIN\s+', line, re.IGNORECASE):
-                m = RE_DEF_BEGIN.match(line)
-                if m:
-                    name = m.group(1).upper()
-                    params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
-                    body = []
-                    i += 1
-                    while i < len(lines):
-                        bl = lines[i].strip()
-                        if bl.upper() in ('DEF END', 'END'):
-                            break
-                        if bl and not bl.startswith('#'):
-                            body.append(bl)
-                        i += 1
-                    body_str = ' : '.join(body)
-                    param_str = f"({', '.join(params)})" if params else ""
-                    self.process(f"DEF {name}{param_str} = {body_str}", track_undo=False)
-            else:
-                self.process(line, track_undo=False)
-            i += 1
+        self._load_lines_with_defs(
+            lines, lambda line: self.process(line, track_undo=False))
         self.variables.update(saved_vars)
         self.io.writeln(f"CHAINED {path}")
         if self.program:
@@ -283,37 +300,10 @@ class ProgramMgmtMixin:
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
-        count = 0
         with open(path, 'r', encoding='utf-8') as f:
             lines = [l.rstrip('\n\r') for l in f.readlines()]
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            if not line or line.startswith('#'):
-                i += 1
-                continue
-            if re.match(r'DEF\s+BEGIN\s+', line, re.IGNORECASE):
-                m = RE_DEF_BEGIN.match(line)
-                if m:
-                    name = m.group(1).upper()
-                    params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
-                    body = []
-                    i += 1
-                    while i < len(lines):
-                        bl = lines[i].strip()
-                        if bl.upper() in ('DEF END', 'END'):
-                            break
-                        if bl and not bl.startswith('#'):
-                            body.append(bl)
-                        i += 1
-                    body_str = ' : '.join(body)
-                    param_str = f"({', '.join(params)})" if params else ""
-                    self.process(f"DEF {name}{param_str} = {body_str}", track_undo=False)
-                    count += 1
-            else:
-                self.process(line, track_undo=False)
-                count += 1
-            i += 1
+        count = self._load_lines_with_defs(
+            lines, lambda line: self.process(line, track_undo=False))
         self.io.writeln(f"MERGED {path} ({count} lines)")
 
     # ── Introspection ─────────────────────────────────────────────────

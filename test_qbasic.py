@@ -1053,20 +1053,18 @@ class TestMeasurement(unittest.TestCase):
                 self.assertIn(var_prefix, t.variables)
 
     def test_meas(self):
+        # MEAS without LOCC mode should raise a build error
         t = QBasicTerminal(); t.num_qubits = 2
         t.program = {10: 'X 0', 20: 'MEAS 0 -> result', 30: 'MEASURE'}
-        capture(t.cmd_run)
-        self.assertIn('result', t.variables)
-        # |0> always 0
-        t2 = QBasicTerminal(); t2.num_qubits = 1
-        for _ in range(20):
-            t2.program = {10: 'MEAS 0 -> m', 20: 'MEASURE'}
-            capture(t2.cmd_run)
-        self.assertIn('m', t2.variables)
-        # invalid qubit doesn't crash
-        t3 = QBasicTerminal(); t3.num_qubits = 2
-        t3.program = {10: 'MEAS 0 -> m', 20: 'MEASURE'}
-        capture(t3.cmd_run)
+        _, out = capture(t.cmd_run)
+        self.assertIn('LOCC', out)
+        self.assertIn('BUILD ERROR', out)
+        # MEAS works in LOCC mode
+        t2 = QBasicTerminal()
+        capture(t2.cmd_locc, '2 2')
+        t2.program = {10: '@A H 0', 20: 'SEND A 0 -> result', 30: 'MEASURE'}
+        capture(t2.cmd_run)
+        self.assertIn('result', t2.variables)
 
     def test_syndrome(self):
         t = QBasicTerminal(); t.num_qubits = 3
@@ -1276,7 +1274,7 @@ class TestMisc(unittest.TestCase):
         t = QBasicTerminal(); t.num_qubits = 2
         t.program = {10: 'X 0', 20: 'MEAS 0 -> r', 30: 'MEASURE'}
         _, out = capture(t.cmd_run)
-        self.assertIn('MEAS r', out); self.assertIn('deferred', out); self.assertIn('LOCC', out)
+        self.assertIn('LOCC', out); self.assertIn('BUILD ERROR', out)
         from qbasic_core.protocol import TerminalProtocol
         self.assertIsInstance(t, TerminalProtocol)
         from qbasic_core.engine import ExecOutcome, ExecResult

@@ -235,7 +235,6 @@ class ExecutorMixin:
             self.arrays[parsed.name][idx] = val
             return ExecResult.ADVANCE
         if isinstance(parsed, PrintStmt):
-            import re as _re
             text = parsed.expr
             suppress_nl = text.rstrip().endswith(';')
             tab_advance = text.rstrip().endswith(',')
@@ -259,8 +258,8 @@ class ExecutorMixin:
                 return ' ' * max(0, int(self._eval_with_vars(m_s.group(1), run_vars)))
             def _tab(m_t):
                 return ' ' * max(0, int(self._eval_with_vars(m_t.group(1), run_vars)))
-            text = _re.sub(r'\bSPC\s*\(([^)]+)\)', _spc, text, flags=_re.IGNORECASE)
-            text = _re.sub(r'\bTAB\s*\(([^)]+)\)', _tab, text, flags=_re.IGNORECASE)
+            text = re.sub(r'\bSPC\s*\(([^)]+)\)', _spc, text, flags=re.IGNORECASE)
+            text = re.sub(r'\bTAB\s*\(([^)]+)\)', _tab, text, flags=re.IGNORECASE)
             if (text.startswith('"') and text.endswith('"')) or \
                (text.startswith("'") and text.endswith("'")):
                 output = text[1:-1]
@@ -307,7 +306,7 @@ class ExecutorMixin:
                                 sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
             return ExecResult.ADVANCE
 
-        # 2. Extended typed dispatch -- delegates to _cf_* with raw string
+        # 2. Extended typed dispatch -- direct isinstance checks (no dict/lambda overhead)
         from qbasic_core.statements import (
             DataStmt, ReadStmt, OnGotoStmt, OnGosubStmt,
             SelectCaseStmt, CaseStmt, EndSelectStmt,
@@ -318,40 +317,118 @@ class ExecutorMixin:
             OnErrorStmt, ResumeStmt, ErrorStmt, AssertStmt,
             StopStmt, OnMeasureStmt, OnTimerStmt,
         )
-        _cf_map = {
-            DataStmt: lambda: self._cf_data(stmt, parsed=parsed),
-            ReadStmt: lambda: self._cf_read(stmt, run_vars, parsed=parsed),
-            OnGotoStmt: lambda: self._cf_on_goto(stmt, run_vars, sorted_lines, parsed=parsed),
-            OnGosubStmt: lambda: self._cf_on_gosub(stmt, run_vars, sorted_lines, ip, parsed=parsed),
-            SelectCaseStmt: lambda: self._cf_select_case(stmt, run_vars, sorted_lines, ip, parsed=parsed),
-            CaseStmt: lambda: self._cf_case(stmt, sorted_lines, ip, parsed=parsed),
-            EndSelectStmt: lambda: self._cf_end_select(stmt, parsed=parsed),
-            DoStmt: lambda: self._cf_do(stmt, run_vars, loop_stack, sorted_lines, ip, parsed=parsed),
-            LoopStmt: lambda: self._cf_loop(stmt, run_vars, loop_stack, sorted_lines, ip, parsed=parsed),
-            ExitStmt: lambda: self._cf_exit(stmt, loop_stack, sorted_lines, ip, parsed=parsed),
-            SwapStmt: lambda: self._cf_swap(stmt, run_vars, parsed=parsed),
-            DefFnStmt: lambda: self._cf_def_fn(stmt, run_vars, parsed=parsed),
-            OptionBaseStmt: lambda: self._cf_option_base(stmt, parsed=parsed),
-            RestoreStmt: lambda: (True, ExecResult.ADVANCE),
-            SubStmt: lambda: self._cf_sub(stmt, sorted_lines, ip, parsed=parsed),
-            EndSubStmt: lambda: self._cf_end_sub(stmt, parsed=parsed),
-            FunctionStmt: lambda: self._cf_function(stmt, sorted_lines, ip, parsed=parsed),
-            EndFunctionStmt: lambda: self._cf_end_function(stmt, parsed=parsed),
-            CallStmt: lambda: self._cf_call(stmt, run_vars, sorted_lines, ip, parsed=parsed),
-            LocalStmt: lambda: self._cf_local(stmt, run_vars, parsed=parsed),
-            StaticStmt: lambda: self._cf_static(stmt, run_vars, parsed=parsed),
-            SharedStmt: lambda: self._cf_shared(stmt, run_vars, parsed=parsed),
-            OnErrorStmt: lambda: self._cf_on_error(stmt, parsed=parsed),
-            ResumeStmt: lambda: self._cf_resume(stmt, sorted_lines, parsed=parsed),
-            ErrorStmt: lambda: self._cf_error(stmt, parsed=parsed),
-            AssertStmt: lambda: self._cf_assert(stmt, run_vars, parsed=parsed),
-            StopStmt: lambda: self._cf_stop(stmt, sorted_lines, ip, parsed=parsed),
-            OnMeasureStmt: lambda: self._cf_on_measure(stmt, parsed=parsed),
-            OnTimerStmt: lambda: self._cf_on_timer(stmt, parsed=parsed),
-        }
-        handler = _cf_map.get(type(parsed))
-        if handler is not None:
-            r = handler()
+        if isinstance(parsed, DataStmt):
+            r = self._cf_data(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, ReadStmt):
+            r = self._cf_read(stmt, run_vars, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, OnGotoStmt):
+            r = self._cf_on_goto(stmt, run_vars, sorted_lines, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, OnGosubStmt):
+            r = self._cf_on_gosub(stmt, run_vars, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, SelectCaseStmt):
+            r = self._cf_select_case(stmt, run_vars, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, CaseStmt):
+            r = self._cf_case(stmt, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, EndSelectStmt):
+            r = self._cf_end_select(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, DoStmt):
+            r = self._cf_do(stmt, run_vars, loop_stack, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, LoopStmt):
+            r = self._cf_loop(stmt, run_vars, loop_stack, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, ExitStmt):
+            r = self._cf_exit(stmt, loop_stack, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, SwapStmt):
+            r = self._cf_swap(stmt, run_vars, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, DefFnStmt):
+            r = self._cf_def_fn(stmt, run_vars, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, OptionBaseStmt):
+            r = self._cf_option_base(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, RestoreStmt):
+            return ExecResult.ADVANCE
+        if isinstance(parsed, SubStmt):
+            r = self._cf_sub(stmt, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, EndSubStmt):
+            r = self._cf_end_sub(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, FunctionStmt):
+            r = self._cf_function(stmt, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, EndFunctionStmt):
+            r = self._cf_end_function(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, CallStmt):
+            r = self._cf_call(stmt, run_vars, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, LocalStmt):
+            r = self._cf_local(stmt, run_vars, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, StaticStmt):
+            r = self._cf_static(stmt, run_vars, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, SharedStmt):
+            r = self._cf_shared(stmt, run_vars, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, OnErrorStmt):
+            r = self._cf_on_error(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, ResumeStmt):
+            r = self._cf_resume(stmt, sorted_lines, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, ErrorStmt):
+            r = self._cf_error(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, AssertStmt):
+            r = self._cf_assert(stmt, run_vars, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, StopStmt):
+            r = self._cf_stop(stmt, sorted_lines, ip, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, OnMeasureStmt):
+            r = self._cf_on_measure(stmt, parsed=parsed)
+            if r is not None:
+                return r[1]
+        if isinstance(parsed, OnTimerStmt):
+            r = self._cf_on_timer(stmt, parsed=parsed)
             if r is not None:
                 return r[1]
 
@@ -616,8 +693,8 @@ class ExecutorMixin:
                 t_args = tokens[1:]
                 params = [self.eval_expr(a) for a in t_args[:n_params]]
                 qubits_inv = [self._resolve_qubit(a) for a in t_args[n_params:n_params+n_qubits_needed]]
-                sub_qc = QuantumCircuit(max(qubits_inv) + 1)
-                self._apply_gate(sub_qc, gate_key, params, list(range(len(qubits_inv))))
+                sub_qc = QuantumCircuit(n_qubits_needed)
+                self._apply_gate(sub_qc, gate_key, params, list(range(n_qubits_needed)))
                 if backend and hasattr(backend, 'append_inverse'):
                     backend.append_inverse(sub_qc, qubits_inv)
                 else:
@@ -665,10 +742,24 @@ class ExecutorMixin:
     def _tokenize_gate(self, stmt: str) -> list[str]:
         """Split gate statement into tokens, handling commas and register notation.
 
-        Splits on whitespace and commas. Preserves register[index] notation.
+        When arguments are comma-separated, splits on commas only so that
+        compound expressions like ``I + 1`` are preserved as single tokens.
+        Falls back to whitespace splitting when no commas are present
+        (legacy format like ``CX 0 1``).
         """
         stmt = RE_REG_INDEX.sub(r'\1[\2]', stmt)
-        return [t.strip() for t in re.split(r'[,\s]+', stmt) if t.strip()]
+        parts = stmt.strip().split(None, 1)
+        if len(parts) < 2:
+            return [parts[0]] if parts else []
+        gate = parts[0]
+        args_str = parts[1]
+        if ',' in args_str:
+            # Comma-separated: split on commas, preserving expressions
+            args = [a.strip() for a in args_str.split(',') if a.strip()]
+        else:
+            # Space-separated: split on whitespace (legacy)
+            args = [a.strip() for a in args_str.split() if a.strip()]
+        return [gate] + args
 
     def _resolve_qubit(self, arg: str, *, n_qubits: int | None = None) -> int:
         """Resolve a qubit argument and validate range.

@@ -173,9 +173,38 @@ _GATE_BUILDERS = {
 # Numpy simulation primitives
 # ═══════════════════════════════════════════════════════════════════════
 
+# Fast-path lookup for 0-param gates: return pre-computed constants directly,
+# skipping the builder callable and its lambda overhead.
+_GATE_CONSTANTS: dict[str, np.ndarray] = {
+    'H':     _MAT_H,
+    'X':     _MAT_X,
+    'Y':     _MAT_Y,
+    'Z':     _MAT_Z,
+    'S':     _MAT_S,
+    'T':     _MAT_T,
+    'SDG':   _MAT_SDG,
+    'TDG':   _MAT_TDG,
+    'SX':    _MAT_SX,
+    'ID':    _MAT_ID,
+    'CX':    _MAT_CX,
+    'CZ':    _MAT_CZ,
+    'CY':    _MAT_CY,
+    'CH':    _MAT_CH,
+    'SWAP':  _MAT_SWAP,
+    'DCX':   _MAT_DCX,
+    'ISWAP': _MAT_ISWAP,
+    'CCX':   _MAT_CCX,
+    'CSWAP': _MAT_CSWAP,
+}
+
+
 def _np_gate_matrix(name: str, params: tuple[float, ...] = ()) -> np.ndarray:
     """Return the unitary matrix for a named gate via registry lookup."""
     canonical = GATE_ALIASES.get(name, name)
+    # Fast path: 0-param gates return pre-computed constants directly.
+    mat = _GATE_CONSTANTS.get(canonical)
+    if mat is not None:
+        return mat
     builder = _GATE_BUILDERS.get(canonical)
     if builder is None:
         raise ValueError(f"No matrix for gate: {name}")
@@ -227,6 +256,11 @@ def _measure_np(
         new_sv[0] = 1.0
         return 0, new_sv
     outcome = 0 if np.random.random() < p0 / total else 1
+    # Guard: if the chosen outcome has negligible probability, force the other.
+    if outcome == 0 and p0 < 1e-300:
+        outcome = 1
+    elif outcome == 1 and p1 < 1e-300:
+        outcome = 0
     new_sv = np.zeros_like(sv)
     if outcome == 0:
         new_sv[tuple(idx_0)] = sv[tuple(idx_0)] / np.sqrt(p0)

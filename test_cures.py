@@ -1470,7 +1470,7 @@ class TestIntegration(unittest.TestCase):
 
         # bell.qb
         r = subprocess.run(
-            ['C:/Python313/python.exe', '-X', 'utf8', 'qbasic.py', '--json', 'examples/bell.qb'],
+            [sys.executable, '-X', 'utf8', 'qbasic.py', '--json', 'examples/bell.qb'],
             capture_output=True, text=True, cwd=os.path.dirname(__file__), timeout=30)
         self.assertEqual(r.returncode, 0)
         data = json.loads(r.stdout)
@@ -1481,7 +1481,7 @@ class TestIntegration(unittest.TestCase):
 
         # grover3.qb
         r = subprocess.run(
-            ['C:/Python313/python.exe', '-X', 'utf8', 'qbasic.py', '--json', 'examples/grover3.qb'],
+            [sys.executable, '-X', 'utf8', 'qbasic.py', '--json', 'examples/grover3.qb'],
             capture_output=True, text=True, cwd=os.path.dirname(__file__), timeout=30)
         self.assertEqual(r.returncode, 0)
         data = json.loads(r.stdout)
@@ -1491,7 +1491,7 @@ class TestIntegration(unittest.TestCase):
         """Integration test with real Qiskit Aer (not mocked) via subprocess."""
         import subprocess, json
         r = subprocess.run(
-            ['C:/Python313/python.exe', '-X', 'utf8', '-c',
+            [sys.executable, '-X', 'utf8', '-c',
              'import json; from qbasic_core.terminal import QBasicTerminal; '
              't = QBasicTerminal(); t.num_qubits = 2; t.shots = 1000; '
              't.process("10 H 0", track_undo=False); '

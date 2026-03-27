@@ -198,7 +198,13 @@ class ExpressionMixin:
 
     def _call_user_fn_expr(self, params: list[str], body: str, args: tuple) -> float:
         """Call a DEF FN function from within expression evaluation."""
+        if len(args) < len(params):
+            missing = params[len(args):]
+            raise ValueError(
+                f"DEF FN requires {len(params)} argument(s), got {len(args)}; "
+                f"missing: {', '.join(missing)}"
+            )
         ns: dict[str, Any] = {}
         for i, pname in enumerate(params):
-            ns[pname] = args[i] if i < len(args) else 0
+            ns[pname] = args[i]
         return float(self._safe_eval(body, extra_ns=ns))

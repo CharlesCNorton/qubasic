@@ -29,6 +29,14 @@ qbasic = "qbasic:main"
 py-modules = ["qbasic"]
 packages = ["qbasic_core"]
 
+[tool.coverage.run]
+source = ["qbasic_core"]
+omit = ["*/test_*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true

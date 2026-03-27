@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+
+MAX_SV_CHECKPOINTS = 1000
 from typing import Any
 
 from qbasic_core.engine import (
@@ -133,6 +135,9 @@ class DebugMixin:
         if self.last_sv is not None and self.num_qubits <= 16:
             import numpy as np
             self._sv_checkpoints.append((line_num, np.array(self.last_sv).copy()))
+            if len(self._sv_checkpoints) > MAX_SV_CHECKPOINTS:
+                excess = len(self._sv_checkpoints) - MAX_SV_CHECKPOINTS
+                del self._sv_checkpoints[:excess]
             self._tt_position = len(self._sv_checkpoints) - 1
 
     def cmd_rewind(self, rest: str = '') -> None:

@@ -62,6 +62,13 @@ class Scope:
         self._persistent.pop(name, None)
 
     def pop(self, name: str, *default):
-        val = self._runtime.pop(name, *default)
-        self._persistent.pop(name, None)
-        return val
+        # Check runtime first, then persistent, before falling back to default.
+        if name in self._runtime:
+            val = self._runtime.pop(name)
+            self._persistent.pop(name, None)
+            return val
+        if name in self._persistent:
+            return self._persistent.pop(name)
+        if default:
+            return default[0]
+        raise KeyError(name)

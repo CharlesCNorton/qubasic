@@ -225,9 +225,24 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             readline.parse_and_bind('tab: complete')
             readline.set_completer_delims(' \t\n')
         except ImportError:
-            pass
+            # On Windows, readline is not bundled; try pyreadline3 as fallback
+            if sys.platform == 'win32':
+                try:
+                    import pyreadline3  # noqa: F401 — registers as readline
+                    import readline
+                    readline.parse_and_bind('tab: complete')
+                except ImportError:
+                    pass  # no readline available — tab completion disabled
 
     def repl(self) -> None:
+        # Enable VT100 escape sequences on Windows console
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            except Exception:
+                pass
         self.print_banner()
         self._setup_readline()
         while True:
@@ -500,6 +515,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 r'(GOTO|GOSUB)\s+(\d+(?:\s*,\s*\d+)+)',
                 _remap_on_target_list, stmt, flags=re.IGNORECASE)
 
+            # Update ON ERROR GOTO <line-number> targets.
+            def _remap_on_error(m):
+                target = int(m.group(1))
+                return f"ON ERROR GOTO {line_map.get(target, target)}"
+            stmt = re.sub(
+                r'\bON\s+ERROR\s+GOTO\s+(\d+)', _remap_on_error, stmt,
+                flags=re.IGNORECASE)
+
             # Update RESUME <line-number> targets.
             def _remap_resume(m):
                 target = int(m.group(1))
@@ -614,8 +637,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     def cmd_circuit_def(self, rest: str) -> None:
         """CIRCUIT_DEF name start-end — define a circuit macro from line range."""
-        import re as _re
-        m = _re.match(r'(\w+)\s+(\d+)\s*-\s*(\d+)', rest)
+        m = re.match(r'(\w+)\s+(\d+)\s*-\s*(\d+)', rest)
         if not m:
             self.io.writeln("?USAGE: CIRCUIT_DEF <name> <start>-<end>")
             return
@@ -633,8 +655,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     def cmd_apply_circuit(self, rest: str) -> None:
         """APPLY_CIRCUIT name [@offset] — apply a circuit macro."""
-        import re as _re
-        m = _re.match(r'(\w+)(?:\s+@(\d+))?', rest)
+        m = re.match(r'(\w+)(?:\s+@(\d+))?', rest)
         if not m:
             self.io.writeln("?USAGE: APPLY_CIRCUIT <name> [@offset]")
             return
@@ -759,6 +780,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 self._circuit_cache = (qc_t, backend)
             try:
                 result = backend.run(qc_t, shots=self.shots).result()
+            except KeyboardInterrupt:
+                self.io.writeln("\n?INTERRUPTED")
+                return
             except Exception as _sim_err:
                 _err_msg = str(_sim_err).lower()
                 if (AerError is not None and isinstance(_sim_err, AerError) and 'stabilizer' in _err_msg) or \
@@ -856,11 +880,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             from qiskit_aer.primitives import SamplerV2
             sampler = SamplerV2()
             result = sampler.run([qc], shots=shots).result()
-            # Extract counts — try multiple access paths for Qiskit version compat
+            # Extract counts — SamplerV2 result format varies by Qiskit version.
+            # Try the V2 get_counts() on named data attributes first, then fall
+            # back to iterating data attributes for older layouts.
             pub_result = result[0]
             counts = {}
+            # V2 preferred path: named classical registers expose get_counts()
             try:
-                # V2 path: data has named classical registers
                 for attr_name in dir(pub_result.data):
                     if attr_name.startswith('_'):
                         continue
@@ -870,8 +896,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                         break
             except Exception:
                 pass
+            # Fallback: try legacy get_counts directly on data
             if not counts:
-                # Fallback: try legacy get_counts
                 try:
                     counts = dict(pub_result.data.get_counts())
                 except Exception:
@@ -892,16 +918,16 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         pauli_str = parts[0].upper()
         qubits = [int(q) for q in parts[1:]] if len(parts) > 1 else list(range(len(pauli_str)))
         try:
-            qc, _ = self.build_circuit()
             from qiskit.quantum_info import SparsePauliOp
+            from qiskit_aer.primitives import EstimatorV2
+            from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+            qc, _ = self.build_circuit()
             full_pauli = ['I'] * self.num_qubits
             for i, p in enumerate(pauli_str):
                 if i < len(qubits):
                     full_pauli[self.num_qubits - 1 - qubits[i]] = p
             op = SparsePauliOp(''.join(full_pauli))
-            from qiskit_aer.primitives import EstimatorV2
             estimator = EstimatorV2()
-            from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
             pm = generate_preset_pass_manager(optimization_level=0)
             qc_t = pm.run(qc)
             result = estimator.run([(qc_t, op)]).result()
@@ -979,21 +1005,41 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         from qbasic_core.statements import (
             GotoStmt, GosubStmt, ForStmt, NextStmt, WhileStmt, WendStmt,
             DoStmt, LoopStmt, SubStmt, EndSubStmt, FunctionStmt, EndFunctionStmt,
+            IfThenStmt,
         )
         line_set = set(sorted_lines)
         for_depth = 0
         while_depth = 0
         do_depth = 0
+        for_var_stack: list[str] = []
         for ln in sorted_lines:
             parsed = self._get_parsed(ln)
             if isinstance(parsed, GotoStmt) and parsed.target not in line_set:
                 raise RuntimeError(f"LINE {ln}: GOTO {parsed.target} — target line not found")
             if isinstance(parsed, GosubStmt) and parsed.target not in line_set:
                 raise RuntimeError(f"LINE {ln}: GOSUB {parsed.target} — target line not found")
+            # Validate GOTO/GOSUB targets embedded in IF THEN/ELSE clauses
+            if isinstance(parsed, IfThenStmt):
+                for clause in (parsed.then_clause, parsed.else_clause):
+                    if clause:
+                        for m in re.finditer(r'\b(?:GOTO|GOSUB)\s+(\d+)', clause, re.IGNORECASE):
+                            target = int(m.group(1))
+                            if target not in line_set:
+                                raise RuntimeError(
+                                    f"LINE {ln}: {m.group(0)} (in IF THEN) — target line not found")
             if isinstance(parsed, ForStmt):
                 for_depth += 1
+                for_var_stack.append(parsed.var.upper())
             elif isinstance(parsed, NextStmt):
                 for_depth -= 1
+                # Check FOR/NEXT variable name matching
+                if parsed.var and for_var_stack:
+                    expected = for_var_stack[-1]
+                    if parsed.var.upper() != expected:
+                        raise RuntimeError(
+                            f"LINE {ln}: NEXT {parsed.var} does not match FOR {expected}")
+                if for_var_stack:
+                    for_var_stack.pop()
             elif isinstance(parsed, WhileStmt):
                 while_depth += 1
             elif isinstance(parsed, WendStmt):
@@ -1025,6 +1071,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         qubit = int(self._eval_with_vars(m.group(1), run_vars))
         var = m.group(2)
         if 0 <= qubit < self.num_qubits:
+            if not self.locc_mode:
+                raise QBasicBuildError(
+                    "MEAS requires LOCC mode for classical feedforward. "
+                    "Use LOCC SEND instead, or use MEASURE for end-of-circuit measurement.")
             b = backend or qc
             if hasattr(b, 'add_classical_register'):
                 cr = b.add_classical_register(f'meas_{var}')
@@ -1036,9 +1086,6 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 qc.measure(qubit, cr[0])
             run_vars[var] = self.MEAS_CIRCUIT_MODE_VALUE
             self.variables[var] = self.MEAS_CIRCUIT_MODE_VALUE
-            self.io.writeln(
-                f"  ?MEAS {var}: deferred measurement (value={self.MEAS_CIRCUIT_MODE_VALUE} "
-                f"during circuit build). Use LOCC SEND for classical feedforward.")
         return True
 
     def _try_exec_reset(self, stmt: str, qc, run_vars: dict, *, backend=None) -> bool:
@@ -1086,8 +1133,6 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             total *= d
         self.arrays[name] = [0.0] * total
         if len(dims) > 1:
-            if not hasattr(self, '_array_dims'):
-                self._array_dims = {}
             self._array_dims[name] = dims
         return True
 
@@ -1425,16 +1470,6 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln(f"?SAVE_AMPS ERROR: {e}")
         return True
 
-    # Named quantum states for SET_STATE Dirac notation
-    _NAMED_STATES = {
-        '|0>': lambda n: _named_sv(n, 0),
-        '|1>': lambda n: _named_sv(n, 1),
-        '|+>': lambda n: _named_sv_plus(n),
-        '|->': lambda n: _named_sv_minus(n),
-        '|BELL>': lambda n: _named_sv_bell(n),
-        '|GHZ>': lambda n: _named_sv_ghz(n),
-    }
-
     def _try_exec_set_state(self, stmt: str, qc) -> bool:
         """SET_STATE <statevector> — inject custom statevector mid-circuit.
 
@@ -1480,7 +1515,6 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     def _try_quantum_print(self, text: str, run_vars: dict) -> str | None:
         """Handle quantum PRINT expressions. Returns formatted string or None."""
-        import re as _re
         upper = text.strip().upper()
         # PRINT @REG — Dirac notation for LOCC register
         if self.locc_mode and self.locc and upper.startswith('@'):
@@ -1490,14 +1524,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 n = self.locc.get_n(reg)
                 return self._format_dirac(sv, n)
         # PRINT QUBIT(n) — single-qubit Bloch info
-        m = _re.match(r'QUBIT\s*\((\d+)\)', text, _re.IGNORECASE)
+        m = re.match(r'QUBIT\s*\((\d+)\)', text, re.IGNORECASE)
         if m and self.last_sv is not None:
             q = int(m.group(1))
             x, y, z = self._bloch_vector(self.last_sv, q)
             p1 = self._peek(0x0100 + q * 8)
             return f"q{q}: P(1)={p1:.4f} Bloch=({x:.3f},{y:.3f},{z:.3f})"
         # PRINT ENTANGLEMENT(a,b) — entropy between qubits
-        m = _re.match(r'ENTANGLEMENT\s*\((\d+)\s*,\s*(\d+)\)', text, _re.IGNORECASE)
+        m = re.match(r'ENTANGLEMENT\s*\((\d+)\s*,\s*(\d+)\)', text, re.IGNORECASE)
         if m and self.last_sv is not None:
             qa, qb = int(m.group(1)), int(m.group(2))
             try:
@@ -1629,15 +1663,20 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 if _estimate_gb(n) < ram[1]:
                     max_q = n
                     break
-        try:
-            gpu_str = ""
-            import subprocess
-            r = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
-                               capture_output=True, text=True, timeout=2)
-            if r.returncode == 0 and r.stdout.strip():
-                gpu_str = f" | GPU: {r.stdout.strip().split(chr(10))[0]}"
-        except Exception:
-            gpu_str = ""
+        if hasattr(QBasicTerminal, '_gpu_cache'):
+            gpu_str = QBasicTerminal._gpu_cache
+        else:
+            try:
+                gpu_str = ""
+                import subprocess
+                r = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                                   capture_output=True, text=True, timeout=2)
+                if r.returncode == 0 and r.stdout.strip():
+                    gpu_str = f" | GPU: {r.stdout.strip().split(chr(10))[0]}"
+                QBasicTerminal._gpu_cache = gpu_str
+            except Exception:
+                gpu_str = ""
+                QBasicTerminal._gpu_cache = gpu_str
         info_line = f"Python {platform.python_version()} | Qiskit {qver} | {ram_str}{gpu_str}"
         config_line = f"{self.num_qubits} qubits | {self.shots} shots | max ~{max_q} qubits"
         self.io.writeln(BANNER_ART.format(info_line=info_line, config_line=config_line))

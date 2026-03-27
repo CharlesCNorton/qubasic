@@ -208,8 +208,9 @@ class ClassicMixin:
 
     def _cf_end_select(self, stmt: str, *, parsed=None) -> tuple[bool, ExecOutcome] | None:
         if parsed is not None or stmt.strip().upper() == 'END SELECT':
-            if self._select_stack:
-                self._select_stack.pop()
+            if not self._select_stack:
+                raise RuntimeError("END SELECT without matching SELECT CASE")
+            self._select_stack.pop()
             return True, ExecResult.ADVANCE
         return None
 

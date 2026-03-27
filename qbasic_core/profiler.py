@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+
+MAX_STATS_RUNS = 10000
 import math
 from typing import Any
 
@@ -112,6 +114,9 @@ class ProfilerMixin:
             finally:
                 self.io = old_io
             if self.last_counts:
+                if len(self._stats_runs) >= MAX_STATS_RUNS:
+                    self.io.writeln(f"?STATS: run limit ({MAX_STATS_RUNS}) reached, stopping collection")
+                    break
                 self._stats_runs.append(dict(self.last_counts))
             if n > 10 and (trial + 1) % (n // 10) == 0:
                 self.io.write(f"  {100 * (trial + 1) // n}%..." + '\r')
