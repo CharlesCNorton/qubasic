@@ -775,6 +775,26 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
         self.last_circuit = qc
 
+        # No-MEASURE shortcut: skip shot simulation, extract statevector only
+        if not has_measure and self.sim_method not in ('unitary', 'superop'):
+            try:
+                qc_sv.save_statevector()
+                sv_backend = AerSimulator(method='statevector')
+                sv_result = sv_backend.run(transpile(qc_sv, sv_backend)).result()
+                self.last_sv = np.array(sv_result.get_statevector())
+            except Exception:
+                self.last_sv = None
+            self.last_counts = None
+            dt = time.time() - t0
+            depth = qc.depth()
+            n_gates = qc.size()
+            self._update_status(gate_count=n_gates, circuit_depth=depth,
+                               run_time_ms=dt * 1000)
+            self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits "
+                            f"in {dt:.2f}s  [depth={depth}, gates={n_gates}]")
+            self.io.writeln("(no MEASURE — use STATE, PROBS, or BLOCH to inspect)")
+            return
+
         # Run with shots (cache transpiled circuit if program unchanged)
         try:
             method = self.sim_method
