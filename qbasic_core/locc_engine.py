@@ -159,7 +159,8 @@ class LOCCEngine:
                 pos = len(state)
                 for i in range(self.n_regs):
                     size = self.sizes[i]
-                    parts.append(state[pos - size:pos])
+                    segment = state[pos - size:pos] if pos >= size else '0' * size
+                    parts.append(segment)
                     pos -= size
                 for name, part in zip(self.names, parts):
                     per_reg[name][part] = per_reg[name].get(part, 0) + count

@@ -145,12 +145,16 @@ class ProfilerMixin:
         for state in state_totals:
             while len(state_totals[state]) < n:
                 state_totals[state].append(0)
-        self.io.writeln(f"\n  Statistics over {n} runs:")
-        self.io.writeln(f"  {'State':>10}  {'Mean':>8}  {'StdDev':>8}  {'Min':>6}  {'Max':>6}")
+        # Compute per-run shot totals for probability conversion
+        shot_totals = [sum(run.values()) for run in self._stats_runs]
+        avg_shots = sum(shot_totals) / len(shot_totals) if shot_totals else 1
+        self.io.writeln(f"\n  Statistics over {n} runs ({avg_shots:.0f} shots/run):")
+        self.io.writeln(f"  {'State':>10}  {'Mean':>8}  {'StdDev':>8}  {'Min':>6}  {'Max':>6}  {'P(mean)':>8}")
         for state in sorted(state_totals.keys()):
             vals = state_totals[state]
             mean = sum(vals) / len(vals)
             variance = sum((v - mean) ** 2 for v in vals) / len(vals)
             std = math.sqrt(variance)
-            self.io.writeln(f"  |{state}\u27E9  {mean:>8.1f}  {std:>8.2f}  {min(vals):>6}  {max(vals):>6}")
+            prob = mean / avg_shots if avg_shots > 0 else 0
+            self.io.writeln(f"  |{state}\u27E9  {mean:>8.1f}  {std:>8.2f}  {min(vals):>6}  {max(vals):>6}  {prob:>7.4f}")
         self.io.writeln('')

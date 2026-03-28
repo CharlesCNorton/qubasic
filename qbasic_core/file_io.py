@@ -49,6 +49,11 @@ class FileIOMixin:
                     f.write(f"METHOD {self.sim_method}\n")
                 if self.sim_device != 'CPU':
                     f.write(f"METHOD {self.sim_device}\n")
+                # Save LOCC config if active
+                if self.locc_mode and self.locc:
+                    mode = "JOINT" if self.locc.joint else "SPLIT"
+                    sizes = ' '.join(str(s) for s in self.locc.sizes)
+                    f.write(f"LOCC {mode} {sizes}\n")
                 # Save custom gates as executable UNITARY commands
                 for name, matrix in self._custom_gates.items():
                     rows = matrix.tolist()
@@ -202,6 +207,18 @@ class FileIOMixin:
                         qualified = f"{mod_name}.{name}"
                         self.subroutines[qualified] = {'body': body, 'params': params}
                         import_count += 1
+                # Also import SUB/FUNCTION definitions as numbered lines
+                elif upper.startswith('SUB ') or upper.startswith('FUNCTION '):
+                    # Store the line for later _scan_subs to pick up
+                    # Use high line numbers to avoid conflicts
+                    max_ln = max(self.program.keys()) if self.program else 0
+                    base = max(max_ln + 1000, 90000)
+                    self.process(f"{base + import_count * 10} {line}", track_undo=False)
+                    import_count += 1
+                elif upper in ('END SUB', 'END FUNCTION') and import_count > 0:
+                    max_ln = max(self.program.keys()) if self.program else 0
+                    self.process(f"{max_ln + 10} {line}", track_undo=False)
+                    import_count += 1
         self.io.writeln(f"IMPORTED {mod_name} ({import_count} definitions from {path})")
 
     def cmd_dir(self, rest: str = '') -> None:
@@ -257,14 +274,28 @@ class FileIOMixin:
             self.io.writeln(qasm)
 
     def cmd_csv(self, rest: str) -> None:
-        """CSV [filename] — export last results to CSV."""
-        if self.last_counts is None:
+        """CSV [filename] — export last results to CSV.
+
+        Includes measurement counts, and statevector amplitudes if available.
+        """
+        if self.last_counts is None and self.last_sv is None:
             self.io.writeln("?NO RESULTS — RUN first")
             return
-        total = sum(self.last_counts.values())
-        lines = ["state,count,probability"]
-        for state, count in sorted(self.last_counts.items(), key=lambda x: -x[1]):
-            lines.append(f"{state},{count},{count/total:.6f}")
+        lines = []
+        if self.last_counts:
+            total = sum(self.last_counts.values())
+            lines.append("state,count,probability")
+            for state, count in sorted(self.last_counts.items(), key=lambda x: -x[1]):
+                lines.append(f"{state},{count},{count/total:.6f}")
+        if self.last_sv is not None:
+            lines.append("")
+            lines.append("state,amplitude_re,amplitude_im,probability")
+            sv = np.ascontiguousarray(self.last_sv).ravel()
+            for i, amp in enumerate(sv):
+                p = abs(amp)**2
+                if p > 1e-8:
+                    state = format(i, f'0{self.num_qubits}b')
+                    lines.append(f"{state},{amp.real:.8f},{amp.imag:.8f},{p:.8f}")
         if rest.strip():
             try:
                 path = self._sanitize_path(rest)

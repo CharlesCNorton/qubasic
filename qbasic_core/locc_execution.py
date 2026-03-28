@@ -71,10 +71,13 @@ class LOCCExecutionMixin:
         mode = "JOINT" if self.locc.joint else "SPLIT"
         shots = self.shots
         max_q = max(self.locc.sizes)
-        if max_q > LOCC_SEND_QUBIT_THRESHOLD and shots > LOCC_SEND_SHOT_CAP:
-            self.io.writeln(f"  WARNING: capping at {LOCC_SEND_SHOT_CAP} shots for "
-                            f"{max_q}-qubit LOCC w/ SEND (per-shot re-execution)")
-            shots = LOCC_SEND_SHOT_CAP
+        # Allow override via POKE $D006 (max_iterations doubles as shot cap override)
+        user_cap = getattr(self, '_locc_shot_cap', None)
+        effective_cap = user_cap if user_cap else LOCC_SEND_SHOT_CAP
+        if max_q > LOCC_SEND_QUBIT_THRESHOLD and shots > effective_cap and not user_cap:
+            self.io.writeln(f"  WARNING: capping at {effective_cap} shots for "
+                            f"{max_q}-qubit LOCC w/ SEND (override: LET _locc_shot_cap = N)")
+            shots = effective_cap
 
         # Execute deterministic prefix once (skip if jumps make it unsafe)
         self.locc.reset()

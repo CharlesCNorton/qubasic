@@ -26,18 +26,7 @@ from qbasic_core.engine import (
 from qbasic_core.terminal import QBasicTerminal
 from qbasic_core.engine import LOCCEngine
 from qbasic import run_script
-
-
-def capture(func, *args, **kwargs):
-    """Capture stdout from a function call, return (result, output_str)."""
-    buf = io.StringIO()
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        result = func(*args, **kwargs)
-    finally:
-        sys.stdout = old
-    return result, buf.getvalue()
+from conftest import capture
 
 
 # ---------------------------------------------------------------------------

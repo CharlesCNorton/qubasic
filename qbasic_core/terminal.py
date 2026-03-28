@@ -121,26 +121,39 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                      SweepMixin, MemoryMixin, StringMixin, ScreenMixin, ClassicMixin,
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin,
                      NoiseMixin, StateDisplayMixin):
-    # Method organization uses the mixin pattern to reduce apparent class
-    # size while keeping everything on QBasicTerminal for import compat.
+    # Architecture: QBasicTerminal composes Engine (state) + 16 mixins (behavior).
     #
-    # Mixins (defined above):
-    #   ExpressionMixin  — AST-based safe eval, no eval()
-    #   DemoMixin        — built-in demo circuits
+    # Mixin map (each provides specific methods; see TerminalProtocol for contract):
+    #   ExecutorMixin     — build_circuit, _exec_line, _apply_gate_str, run_immediate
+    #   ExpressionMixin   — _safe_eval (AST-based, no eval()), eval_expr, _eval_condition
+    #   ControlFlowMixin  — FOR/NEXT, WHILE/WEND, DO/LOOP, IF/THEN, SELECT CASE, etc.
+    #   DisplayMixin      — print_histogram, _print_statevector, _print_bloch_single
+    #   LOCCMixin         — LOCCCommandsMixin + LOCCDisplayMixin + LOCCExecutionMixin
+    #   FileIOMixin       — SAVE/LOAD/INCLUDE/IMPORT/EXPORT/CSV/OPEN/CLOSE
+    #   AnalysisMixin     — EXPECT/ENTROPY/DENSITY/BENCH/RAM
+    #   SweepMixin        — SWEEP parameter scan
+    #   MemoryMixin       — PEEK/POKE/SYS/DUMP/MAP/MONITOR
+    #   StringMixin       — string functions (LEFT$, RIGHT$, etc.)
+    #   ScreenMixin       — SCREEN/COLOR/CLS/LOCATE
+    #   ClassicMixin      — DATA/READ, SELECT CASE, DO/LOOP, SWAP, DEF FN
+    #   SubroutineMixin   — SUB/FUNCTION with LOCAL/STATIC/SHARED
+    #   DebugMixin        — ON ERROR, breakpoints, watch, time-travel, TRON/TROFF
+    #   ProgramMgmtMixin  — AUTO/EDIT/COPY/MOVE/FIND/REPLACE/BANK/CHECKSUM
+    #   ProfilerMixin     — PROFILE, STATS
+    #   NoiseMixin        — noise model configuration
+    #   StateDisplayMixin — STATE/HIST/PROBS/BLOCH/CIRCUIT
+    #   DemoMixin         — 12 built-in demo circuits
     #
-    # Concerns grouped by comment headers below:
-    #   REPL, Commands, Run, Circuit Building,
-    #   Display, File I/O, Analysis,
-    #   LOCC Commands, LOCC Execution,
-    #   Control Flow, Help.
+    # Dual execution paths:
+    #   Qiskit path: build_circuit -> QuantumCircuit -> AerSimulator (standard mode)
+    #   Numpy path:  _locc_execute_program -> LOCCEngine -> numpy tensordot (LOCC mode)
+    #   Shared control flow via _exec_control_flow() with divergent gate application.
+    #   This dualism exists because Qiskit doesn't support mid-circuit classical
+    #   feedforward in the way LOCC protocols require.
     #
-    # The Qiskit circuit-build path and the numpy LOCC path share
-    # control-flow logic via _exec_control_flow() but diverge at
-    # gate application: _apply_gate_str (Qiskit) vs _locc_apply_gate
-    # (numpy).  This dualism is necessary because Qiskit does not
-    # natively support mid-circuit measurement with classical
-    # feedforward in the way LOCC protocols require.
-    # _get_parsed is inherited from Engine
+    # Variable scope: Scope(persistent=self.variables) wraps runtime vars.
+    #   run_vars[name] and self.variables[name] are mirrored for backward compat.
+    #   New code should use Scope methods; legacy mirroring is retained in mixins.
 
     def _gate_info(self, name: str) -> tuple[int, int] | None:
         """Look up (n_params, n_qubits) for a gate name.
@@ -291,7 +304,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'REGS': 'cmd_regs', 'VARS': 'cmd_vars', 'HELP': 'cmd_help',
         'CIRCUIT': 'cmd_circuit', 'DECOMPOSE': 'cmd_decompose',
         'DENSITY': 'cmd_density', 'LOCCINFO': 'cmd_loccinfo',
-        'UNDO': 'cmd_undo', 'BENCH': 'cmd_bench', 'RAM': 'cmd_ram',
+        'UNDO': 'cmd_undo', 'RAM': 'cmd_ram',
         'BYE': '_quit', 'QUIT': '_quit', 'EXIT': '_quit',
         # Memory
         'MAP': 'cmd_map', 'CATALOG': 'cmd_catalog', 'MONITOR': 'cmd_monitor',
@@ -334,7 +347,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         # Module, types, network, primitives
         'IMPORT': 'cmd_import', 'TYPE': 'cmd_type',
         'CONNECT': 'cmd_connect', 'DISCONNECT': 'cmd_disconnect',
-        'SAMPLE': 'cmd_sample', 'ESTIMATE': 'cmd_estimate',
+        'SAMPLE': 'cmd_sample', 'ESTIMATE': 'cmd_estimate', 'BENCH': 'cmd_bench',
+        'SET_STATE': 'cmd_set_state',
         # Circuit macros
         'CIRCUIT_DEF': 'cmd_circuit_def', 'APPLY_CIRCUIT': 'cmd_apply_circuit',
     }
@@ -735,7 +749,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                         pass
                 self.variables['ERR'] = self._err_code
                 self.variables['ERL'] = self._err_line
-                self.io.writeln(f"?BUILD ERROR (trapped): {e}")
+                # Execute the error handler lines directly via PRINT/LET/etc
+                handler_lines = sorted(ln for ln in self.program if ln >= self._error_target)
+                for ln in handler_lines:
+                    stmt = self.program[ln].strip().upper()
+                    if stmt == 'END' or stmt.startswith('RESUME'):
+                        break
+                    self.dispatch(self.program[ln].strip())
+                self._in_error_handler = False
             else:
                 self.io.writeln(f"?BUILD ERROR: {e}")
             return
@@ -765,8 +786,29 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             backend_opts = {'method': method}
             if self.sim_device == 'GPU':
                 backend_opts['device'] = 'GPU'
-            if self._noise_model:
-                backend_opts['noise_model'] = self._noise_model
+            # Build per-qubit noise model from memory map if configured
+            noise = self._noise_model
+            if not noise and hasattr(self, '_qubit_noise') and self._qubit_noise:
+                try:
+                    from qiskit_aer.noise import (
+                        NoiseModel, depolarizing_error, amplitude_damping_error,
+                        phase_damping_error,
+                    )
+                    nm = NoiseModel()
+                    _type_map = {1: depolarizing_error, 2: amplitude_damping_error,
+                                 3: phase_damping_error}
+                    for q, (ntype, nparam) in self._qubit_noise.items():
+                        if ntype in _type_map and nparam > 0 and q < self.num_qubits:
+                            if ntype == 1:
+                                err = _type_map[ntype](nparam, 1)
+                            else:
+                                err = _type_map[ntype](nparam)
+                            nm.add_quantum_error(err, ['h', 'x', 'y', 'z', 'rx', 'ry', 'rz', 'p', 'u', 'id', 's', 't', 'sdg', 'tdg', 'sx'], [q])
+                    noise = nm
+                except ImportError:
+                    pass
+            if noise:
+                backend_opts['noise_model'] = noise
             # Performance tuning from memory-mapped config
             if hasattr(self, '_fusion_enable'):
                 backend_opts['fusion_enable'] = self._fusion_enable
@@ -1520,6 +1562,29 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         except Exception as e:
             self.io.writeln(f"?SET_STATE ERROR: {e}")
         return True
+
+    def cmd_set_state(self, rest: str) -> None:
+        """SET_STATE <state> — set the statevector immediately (stores for next RUN)."""
+        sv_expr = rest.strip()
+        if not sv_expr:
+            self.io.writeln("?USAGE: SET_STATE |+> or SET_STATE [0.707, 0, 0, 0.707]")
+            return
+        try:
+            dim = 2 ** self.num_qubits
+            if sv_expr.upper() in ('|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>',
+                                  '|GHZ3>', '|GHZ4>', '|W>', '|W3>'):
+                sv_flat = _resolve_named_state(sv_expr.upper(), self.num_qubits)
+            else:
+                sv_flat = np.array(self._parse_matrix(sv_expr), dtype=complex).ravel()
+            if len(sv_flat) != dim:
+                raise ValueError(f"Length {len(sv_flat)} != 2^{self.num_qubits} = {dim}")
+            norm = float(np.sum(np.abs(sv_flat) ** 2))
+            if abs(norm - 1.0) > 1e-6:
+                sv_flat = sv_flat / np.sqrt(norm)
+            self.last_sv = sv_flat
+            self.io.writeln(f"STATE SET ({self.num_qubits} qubits)")
+        except Exception as e:
+            self.io.writeln(f"?SET_STATE ERROR: {e}")
 
     # _split_colon_stmts, _substitute_vars, _expand_statement,
     # _offset_qubits, _apply_gate_str, _tokenize_gate, _resolve_qubit,

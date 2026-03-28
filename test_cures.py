@@ -41,18 +41,7 @@ from qbasic_core.statements import (
     MeasStmt, ResetStmt, SendStmt, ShareStmt, AtRegStmt,
     CompoundStmt,
 )
-
-
-def capture(func, *args, **kwargs):
-    """Capture stdout from a function call, return (result, output_str)."""
-    buf = io.StringIO()
-    old = sys.stdout
-    sys.stdout = buf
-    try:
-        result = func(*args, **kwargs)
-    finally:
-        sys.stdout = old
-    return result, buf.getvalue()
+from conftest import capture
 
 
 # =====================================================================
@@ -1510,6 +1499,203 @@ class TestIntegration(unittest.TestCase):
         # Each should be roughly 50% (within statistical tolerance)
         for state in ('00', '11'):
             self.assertGreater(counts.get(state, 0), 300)
+
+    # Grover correctness is tested in test_qbasic.py with real simulation;
+    # test_cures.py runs under auto-mock which returns random counts.
+
+
+# =====================================================================
+# Gap-coverage tests (moved from test_gaps.py)
+# =====================================================================
+
+
+# =====================================================================
+# #18: Noise model tests
+# =====================================================================
+class TestNoiseModel(unittest.TestCase):
+    def test_noise_on_off(self):
+        """cmd_noise sets and clears noise model."""
+        t = QBasicTerminal()
+        # ON
+        _, out = capture(t.cmd_noise, 'depolarizing 0.01')
+        assert t._noise_model is not None
+        assert 'depolarizing' in out.lower()
+        # OFF
+        _, out = capture(t.cmd_noise, 'OFF')
+        assert t._noise_model is None
+
+    def test_noise_types(self):
+        """All noise types parse without error."""
+        t = QBasicTerminal()
+        for ntype in ['depolarizing 0.01', 'amplitude_damping 0.01',
+                       'phase_flip 0.01', 'readout 0.05 0.1',
+                       'combined 0.01 0.02', 'pauli 0.01 0.01 0.01',
+                       'reset 0.01 0.01']:
+            _, out = capture(t.cmd_noise, ntype)
+            assert 'ERROR' not in out.upper(), f"Failed on: {ntype}"
+            t._noise_model = None  # reset
+
+    def test_unknown_noise(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_noise, 'nonexistent 0.01')
+        assert 'UNKNOWN' in out
+
+
+# =====================================================================
+# #19: Step test
+# =====================================================================
+class TestStep(unittest.TestCase):
+    def test_step_empty_program(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_step)
+        assert 'NOTHING TO STEP' in out
+
+
+# =====================================================================
+# #20: Bench test
+# =====================================================================
+class TestBench(unittest.TestCase):
+    def test_bench_output(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_bench)
+        assert 'Benchmark' in out
+        assert 'qubits' in out
+        # Should have results for multiple qubit counts
+        assert '4' in out
+        assert '8' in out
+
+
+# =====================================================================
+# #21: Monitor test
+# =====================================================================
+class TestMonitor(unittest.TestCase):
+    def test_monitor_quit(self):
+        t = QBasicTerminal()
+        import builtins
+        orig = builtins.input
+        builtins.input = lambda prompt='': 'Q'
+        try:
+            _, out = capture(t.cmd_monitor)
+        finally:
+            builtins.input = orig
+        assert 'MONITOR' in out
+
+
+# =====================================================================
+# #22: Clifford detection
+# =====================================================================
+class TestCliffordDetection(unittest.TestCase):
+    def test_clifford_circuit(self):
+        from qiskit import QuantumCircuit
+        t = QBasicTerminal()
+        qc = QuantumCircuit(2)
+        qc.h(0)
+        qc.cx(0, 1)
+        assert t._is_clifford(qc) is True
+
+    def test_non_clifford_circuit(self):
+        from qiskit import QuantumCircuit
+        t = QBasicTerminal()
+        qc = QuantumCircuit(1)
+        qc.rx(0.5, 0)
+        assert t._is_clifford(qc) is False
+
+
+# =====================================================================
+# #23: Circuit cache
+# =====================================================================
+class TestCircuitCache(unittest.TestCase):
+    def test_cache_hit(self):
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 10
+        t.process('10 H 0', track_undo=False)
+        t.process('20 CX 0,1', track_undo=False)
+        t.process('30 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        key1 = t._circuit_cache_key
+        # Second run should use cache
+        _, _ = capture(t.cmd_run)
+        assert t._circuit_cache_key == key1
+
+    def test_cache_invalidation(self):
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 10
+        t.process('10 H 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        key1 = t._circuit_cache_key
+        # Modify program
+        t.process('15 X 1', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        assert t._circuit_cache_key != key1
+
+
+# =====================================================================
+# #24: Stabilizer fallback
+# =====================================================================
+class TestStabilizerFallback(unittest.TestCase):
+    def test_non_clifford_auto_method(self):
+        """Non-Clifford circuit with auto method should use statevector, not stabilizer."""
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 10
+        t.sim_method = 'automatic'
+        t.process('10 RX 0.5, 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, out = capture(t.cmd_run)
+        assert 'ERROR' not in out.upper()
+
+
+# =====================================================================
+# Property-based tests
+# =====================================================================
+from hypothesis import given, strategies as st, settings
+
+
+class TestPropertyBased(unittest.TestCase):
+    @given(st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False))
+    @settings(max_examples=50)
+    def test_eval_roundtrip(self, x):
+        """Any float evaluable as expression should return itself."""
+        t = QBasicTerminal()
+        result = t.eval_expr(str(x))
+        self.assertAlmostEqual(result, x, places=5)
+
+    @given(st.text(alphabet='ABCDEFGHIJ 0123456789,', min_size=0, max_size=30))
+    @settings(max_examples=100)
+    def test_parser_no_crash(self, text):
+        """Parser should never crash on arbitrary input."""
+        from qbasic_core.parser import parse_stmt
+        try:
+            parse_stmt(text)
+        except Exception:
+            pass  # errors OK, crashes not
+
+    @given(st.integers(min_value=1, max_value=8))
+    @settings(max_examples=5)
+    @unittest.skip("requires real simulation; test_cures runs under auto-mock")
+    def test_ghz_state_valid(self, n):
+        """GHZ state on n qubits should produce only all-zeros or all-ones."""
+        t = QBasicTerminal()
+        t.num_qubits = n
+        t.shots = 100
+        t.process('10 H 0', track_undo=False)
+        for i in range(1, n):
+            t.process(f'{10+i*10} CX {i-1},{i}', track_undo=False)
+        t.process(f'{10+n*10} MEASURE', track_undo=False)
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            t.cmd_run()
+        finally:
+            sys.stdout = old
+        if t.last_counts:
+            for state in t.last_counts:
+                self.assertTrue(all(c == state[0] for c in state),
+                    f"GHZ-{n} produced non-GHZ state: {state}")
 
 
 # =====================================================================

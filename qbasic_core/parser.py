@@ -83,10 +83,17 @@ def _handle_while(text, raw):
     return None
 
 def _handle_if(text, raw):
-    m = RE_IF_THEN.match(text)
+    # Check for ELSEIF first — rewrite as nested IF in the ELSE clause
+    from qbasic_core.patterns import RE_ELSEIF
+    m = RE_ELSEIF.match(text)
     if m:
         return IfThenStmt(raw=raw, condition=m.group(1).strip(),
                           then_clause=m.group(2).strip(),
+                          else_clause='IF ' + m.group(3).strip())
+    m = RE_IF_THEN.match(text)
+    if m:
+        return IfThenStmt(raw=raw, condition=m.group(1).strip(),
+                          then_clause=m.group(2).strip() if m.group(2) else '',
                           else_clause=m.group(3).strip() if m.group(3) else None)
     return None
 
@@ -508,6 +515,10 @@ def parse_stmt(raw: str) -> Stmt:
         return MeasureStmt(raw=raw)
     if upper == 'END':
         return EndStmt(raw=raw)
+    if upper == 'END IF':
+        return RawStmt(raw=raw)  # handled by multi-line IF block scanning
+    if upper == 'ELSE':
+        return RawStmt(raw=raw)  # handled by multi-line IF block scanning
     if upper == 'RETURN':
         return ReturnStmt(raw=raw)
     if upper == 'BARRIER':

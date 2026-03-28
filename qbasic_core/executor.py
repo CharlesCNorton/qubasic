@@ -103,6 +103,8 @@ class ExecutorMixin:
                     if part.strip().upper() == 'MEASURE':
                         has_measure = True
 
+            if hasattr(self, '_profile_line_start'):
+                self._profile_line_start(line_num)
             try:
                 result = self._exec_line(stmt, parsed=parsed, ctx=ctx)
             except QBasicBuildError as e:
@@ -111,6 +113,9 @@ class ExecutorMixin:
                 ) from None
             except Exception as e:
                 raise RuntimeError(f"LINE {line_num}: {e}") from None
+            finally:
+                if hasattr(self, '_profile_line_end'):
+                    self._profile_line_end(line_num)
 
             if result is ExecResult.END:
                 break
@@ -292,6 +297,27 @@ class ExecutorMixin:
                 else:
                     cond_vars.update(run_vars)
             result = ExecResult.ADVANCE
+            # Multi-line IF block: IF cond THEN (with empty then_clause)
+            if not parsed.then_clause and not parsed.else_clause:
+                cond_true = self._eval_condition(parsed.condition, cond_vars)
+                if cond_true:
+                    return ExecResult.ADVANCE  # execute next lines until END IF
+                else:
+                    # Skip to ELSE or END IF
+                    depth = 1
+                    scan = ip + 1
+                    while scan < len(sorted_lines):
+                        s = self.program[sorted_lines[scan]].strip().upper()
+                        if s.startswith('IF ') and s.rstrip().endswith('THEN'):
+                            depth += 1
+                        elif s == 'END IF':
+                            depth -= 1
+                            if depth == 0:
+                                return scan + 1
+                        elif depth == 1 and s.startswith('ELSE'):
+                            return scan + 1
+                        scan += 1
+                    return ExecResult.ADVANCE  # no END IF found, fall through
             if self._eval_condition(parsed.condition, cond_vars):
                 if parsed.then_clause:
                     r = self._exec_line(parsed.then_clause, qc=qc, loop_stack=loop_stack,
@@ -437,6 +463,11 @@ class ExecutorMixin:
             r = self._cf_on_timer(stmt, parsed=parsed)
             if r is not None:
                 return r[1]
+
+        # Multi-line IF block markers — no-ops during execution
+        upper = stmt.strip().upper()
+        if upper in ('END IF', 'ELSE'):
+            return ExecResult.ADVANCE
 
         # 3. Statement handlers
         _backend = ctx.backend if ctx else None

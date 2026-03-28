@@ -34,7 +34,9 @@ RE_FOR = re.compile(
 RE_NEXT = re.compile(r'NEXT\s+(\w+)\s*$', re.IGNORECASE)
 RE_WHILE = re.compile(r'WHILE\s+(.+)$', re.IGNORECASE)
 RE_IF_THEN = re.compile(
-    r'IF\s+(.+?)\s+THEN\s+(.*?)(?:\s+ELSE\s+(.*))?$', re.IGNORECASE)
+    r'IF\s+(.+?)\s+THEN(?:\s+(.*?))?(?:\s+ELSE\s+(.*))?$', re.IGNORECASE)
+RE_ELSEIF = re.compile(
+    r'IF\s+(.+?)\s+THEN\s+(.*?)\s+(?:ELSEIF|ELSE\s+IF)\s+(.+)$', re.IGNORECASE)
 RE_GOTO_GOSUB_TARGET = re.compile(r'(GOTO|GOSUB)\s+(\d+)', re.IGNORECASE)
 RE_MEASURE_BASIS = re.compile(
     r'MEASURE_(X|Y|Z)\s+(\S+)', re.IGNORECASE)

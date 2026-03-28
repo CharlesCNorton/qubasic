@@ -107,8 +107,12 @@ class AnalysisMixin:
         self.io.writeln(f"\n  Purity: {np.real(np.trace(rho @ rho)):.6f}")
         self.io.writeln('')
 
-    def cmd_bench(self) -> None:
-        """BENCH — benchmark simulation at various qubit counts."""
+    def cmd_bench(self, rest: str = '') -> None:
+        """BENCH [n1 n2 ...] — benchmark simulation at various qubit counts."""
+        if rest.strip():
+            qubit_counts = [int(x) for x in rest.replace(',', ' ').split() if x.strip()]
+        else:
+            qubit_counts = [4, 8, 12, 16, 20, 24, 28]
         self.io.writeln("\n  Benchmark (H + CX chain + measure):")
         try:
             import psutil
@@ -117,7 +121,7 @@ class AnalysisMixin:
             has_psutil = False
         header_mem = '  mem_gb' if has_psutil else ''
         self.io.writeln(f"  {'qubits':>8}  {'method':>20}  {'time':>8}{header_mem}")
-        for n in [4, 8, 12, 16, 20, 24, 28]:
+        for n in qubit_counts:
             qc = QuantumCircuit(n)
             for i in range(n):
                 qc.h(i)

@@ -148,6 +148,13 @@ class ExpressionMixin:
                 ns[short] = fn
                 ns[short.lower()] = fn
                 ns[short.upper()] = fn
+        # Register FUNCTION blocks as callables in expression context
+        if hasattr(self, '_func_defs') and hasattr(self, '_invoke_function'):
+            sorted_lines = sorted(self.program.keys()) if hasattr(self, 'program') else []
+            for fname in self._func_defs:
+                fn = lambda *args, n=fname, sl=sorted_lines: self._invoke_function(n, list(args), sl)
+                ns[fname] = fn
+                ns[fname.lower()] = fn
         try:
             import psutil
             ns['FRE'] = lambda x=0: psutil.virtual_memory().available

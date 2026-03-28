@@ -122,10 +122,14 @@ ADVANCED
   DENSITY                 Show density matrix
   ENTROPY [qubits]        Entanglement entropy
   DECOMPOSE               Gate count breakdown
-  EXPORT [file]           Export circuit as OpenQASM
-  CSV [file]              Export results as CSV
-  RAM                     Memory budget and parallelism estimates
-  BENCH                   Benchmark qubit scaling
+  EXPORT [file]           Export circuit as OpenQASM (not available in LOCC mode)
+  CSV [file]              Export results as CSV (includes statevector if available)
+  RAM                     Memory budget and parallelism estimates (3x overhead)
+  BENCH [n1 n2 ...]       Benchmark qubit scaling (default: 4 8 12 16 20 24 28)
+  PEEK addr               Read memory-mapped address
+  USR(addr)               Execute SYS routine, return top measurement as integer
+  WAIT addr,mask[,val,t]  Block until (PEEK(addr) AND mask) == val (default t=30s)
+  CIRCUIT_DEF name s-e    Define gate macro from line range (see also DEF)
   INCLUDE file            Merge another .qb file
   DIR [path]              List .qb files
   CLEAR var               Remove a variable or array

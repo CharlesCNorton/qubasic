@@ -26,6 +26,12 @@ QBASIC is a quantum computing environment built on Qiskit Aer that uses BASIC sy
 ## Install
 
 ```
+pip install qubasic
+```
+
+Development install:
+
+```
 pip install -e ".[charts]"
 ```
 

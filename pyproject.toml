@@ -39,13 +39,20 @@ Issues = "https://github.com/CharlesCNorton/qbasic/issues"
 
 [project.optional-dependencies]
 charts = ["plotille>=5.0"]
+readline = ["pyreadline3>=3.4; sys_platform == 'win32'"]
 
 [project.scripts]
 qbasic = "qbasic:main"
+qubasic = "qbasic:main"
 
 [tool.setuptools]
 py-modules = ["qbasic"]
 packages = ["qbasic_core"]
+
+[tool.setuptools.package-data]
+
+[tool.setuptools.data-files]
+"share/qubasic/examples" = ["examples/*.qb"]
 
 [tool.coverage.run]
 source = ["qbasic_core"]
