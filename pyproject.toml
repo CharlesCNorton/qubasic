@@ -6,10 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "qbasic"
 version = "0.1.0"
 description = "Quantum BASIC Interactive Terminal"
+readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
-    {name = "Charles C. Norton"},
+    {name = "Charles C. Norton", email = "machineelv@gmail.com"},
+]
+keywords = ["quantum", "computing", "qiskit", "basic", "repl", "simulator"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
     "qiskit>=1.0",
@@ -18,6 +31,11 @@ dependencies = [
     "psutil>=5.9",
     "rich>=13.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/CharlesCNorton/qbasic"
+Repository = "https://github.com/CharlesCNorton/qbasic"
+Issues = "https://github.com/CharlesCNorton/qbasic/issues"
 
 [project.optional-dependencies]
 charts = ["plotille>=5.0"]
