@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[charts]" pytest-cov mypy
       - name: Run tests
-        run: python -m pytest test_qbasic.py test_cures.py -v --tb=short --cov=qbasic_core --cov-report=term-missing
+        run: python -m pytest test_qbasic.py test_cures.py test_gaps.py -v --tb=short --cov=qbasic_core --cov-report=term-missing --cov-fail-under=60
       - name: Type check
         run: mypy qbasic_core --ignore-missing-imports
         continue-on-error: true

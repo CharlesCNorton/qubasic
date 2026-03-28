@@ -310,15 +310,29 @@ class ProgramMgmtMixin:
 
     def cmd_defs(self) -> None:
         """List all defined subroutines."""
-        if not self.subroutines:
+        found = False
+        if self.subroutines:
+            for name, sub in self.subroutines.items():
+                if isinstance(sub, list):
+                    self.io.writeln(f"  {name} = {' : '.join(sub)}")
+                else:
+                    params = f"({', '.join(sub['params'])})" if sub['params'] else ""
+                    self.io.writeln(f"  {name}{params} = {' : '.join(sub['body'])}")
+                found = True
+        # Also show SUB/FUNCTION blocks in the program
+        from qbasic_core.engine import RE_SUB, RE_FUNCTION
+        for ln in sorted(self.program.keys()):
+            stmt = self.program[ln].strip()
+            m = RE_SUB.match(stmt)
+            if m:
+                self.io.writeln(f"  SUB {m.group(1).upper()}({m.group(2) or ''}) at line {ln}")
+                found = True
+            m = RE_FUNCTION.match(stmt)
+            if m:
+                self.io.writeln(f"  FUNCTION {m.group(1).upper()}({m.group(2) or ''}) at line {ln}")
+                found = True
+        if not found:
             self.io.writeln("NO SUBROUTINES DEFINED")
-            return
-        for name, sub in self.subroutines.items():
-            if isinstance(sub, list):
-                self.io.writeln(f"  {name} = {' : '.join(sub)}")
-            else:
-                params = f"({', '.join(sub['params'])})" if sub['params'] else ""
-                self.io.writeln(f"  {name}{params} = {' : '.join(sub['body'])}")
 
     def cmd_regs(self) -> None:
         """List all named registers with their qubit ranges."""

@@ -138,15 +138,33 @@ class ExpressionMixin:
                 fn_params = fdef['params']
                 fn_body = fdef['body']
                 ns[fname] = lambda *args, p=fn_params, b=fn_body: self._call_user_fn_expr(p, b, args)
+            # Also register without FN prefix and in lowercase for flexible invocation
+            for fname, fdef in self._user_fns.items():
+                fn_params = fdef['params']
+                fn_body = fdef['body']
+                fn = lambda *args, p=fn_params, b=fn_body: self._call_user_fn_expr(p, b, args)
+                # Strip FN prefix if present, add as both upper and lower
+                short = fname[2:] if fname.upper().startswith('FN') else fname
+                ns[short] = fn
+                ns[short.lower()] = fn
+                ns[short.upper()] = fn
         try:
             import psutil
             ns['FRE'] = lambda x=0: psutil.virtual_memory().available
         except ImportError:
             ns['FRE'] = lambda x=0: 0
+        # Add Python-safe aliases for all $-suffixed keys in namespace
+        for k, v in list(ns.items()):
+            if '$' in k:
+                ns[k.replace('$', '_S_')] = v
         # Hex/bin prefix support
         expr_str = str(expr).strip()
         expr_str = re.sub(r'&H([0-9A-Fa-f]+)', r'0x\1', expr_str)
         expr_str = re.sub(r'&B([01]+)', r'0b\1', expr_str)
+        # Normalize FN prefix: "FN square(x)" -> "square(x)"
+        expr_str = re.sub(r'\bFN\s+(\w+)', r'\1', expr_str, flags=re.IGNORECASE)
+        # Normalize $ in identifiers for Python AST compatibility
+        expr_str = re.sub(r'(\w+)\$', r'\1_S_', expr_str)
         if not expr_str:
             raise ValueError("EMPTY EXPRESSION")
         try:

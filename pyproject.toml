@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qbasic"
-version = "0.0.0"
+version = "0.1.0"
 description = "Quantum BASIC Interactive Terminal"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -42,3 +42,6 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true

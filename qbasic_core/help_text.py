@@ -94,6 +94,8 @@ LOCC MODE (dual-register distributed quantum simulation)
   SPLIT: max capacity (31+31), no cross-register entanglement
   JOINT: shared entanglement, limited to ~32 total qubits
   LOCCINFO                  Protocol metrics after run
+  CONNECT "host:port" AS C   Attach remote register (stub — local sim only)
+  DISCONNECT C               Detach remote register
 
 BASIS MEASUREMENT
   MEASURE_X qubit         Measure in X basis (H before measure)
@@ -107,10 +109,12 @@ ERROR CORRECTION
   length must match qubit count. I/X/Y/Z supported.
 
 ADVANCED
-  UNITARY NAME = [[..]]   Define gate from unitary matrix
+  UNITARY NAME = [[..]]   Define gate from unitary matrix (standard basis order)
   CTRL gate ctrl, tgt     Controlled version of any gate
   INV gate qubit          Inverse/dagger of a gate
   RESET qubit             Reset qubit to |0>
+  SET_STATE |name>        Set qubit state (|0>, |1>, |+>, |->, |BELL>, |GHZ>)
+  SET_STATE [a, b, ...]   Set explicit amplitudes (auto-normalized)
   SWEEP var s e [n]       Run circuit sweeping a variable
   NOISE type [p]          Set noise model (depolarizing, etc.)
   NOISE OFF               Disable noise
@@ -126,6 +130,8 @@ ADVANCED
   DIR [path]              List .qb files
   CLEAR var               Remove a variable or array
   UNDO                    Undo last program edit
+  BANK n                  Switch to program slot n (auto-saves current)
+  BANK                    Show current slot and list used slots
 
 FLOW CONTROL (in programs)
   GOTO line               Jump to line

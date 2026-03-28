@@ -317,7 +317,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'SEND': 'cmd_send', 'SHARE': 'cmd_share', 'DIR': 'cmd_dir',
         'CLEAR': 'cmd_clear',
         # Memory
-        'POKE': 'cmd_poke', 'SYS': 'cmd_sys', 'DUMP': 'cmd_dump', 'WAIT': 'cmd_wait',
+        'PEEK': 'cmd_peek', 'POKE': 'cmd_poke', 'SYS': 'cmd_sys', 'DUMP': 'cmd_dump', 'WAIT': 'cmd_wait',
         # Screen
         'SCREEN': 'cmd_screen', 'COLOR': 'cmd_color', 'LOCATE': 'cmd_locate',
         'PROMPT': 'cmd_prompt',
@@ -723,7 +723,21 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln("\n?INTERRUPTED")
             return
         except Exception as e:
-            self.io.writeln(f"?BUILD ERROR: {e}")
+            if hasattr(self, '_error_target') and self._error_target is not None:
+                self._err_code = 1
+                self._err_line = 0
+                self._in_error_handler = True
+                msg = str(e)
+                if msg.startswith('ERROR '):
+                    try:
+                        self._err_code = int(msg.split()[1])
+                    except (IndexError, ValueError):
+                        pass
+                self.variables['ERR'] = self._err_code
+                self.variables['ERL'] = self._err_line
+                self.io.writeln(f"?BUILD ERROR (trapped): {e}")
+            else:
+                self.io.writeln(f"?BUILD ERROR: {e}")
             return
 
         # Copy before adding measurements (for statevector extraction)
@@ -1112,7 +1126,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 raise ValueError("Matrix must be 2^n x 2^n")
             product = matrix @ matrix.conj().T
             if not np.allclose(product, np.eye(matrix.shape[0]), atol=1e-6):
-                raise ValueError("Matrix is not unitary (U @ U† ≠ I)")
+                raise ValueError("Matrix is not unitary (U @ U† ≠ I, atol=1e-6). Use expressions like 1/sqrt(2) instead of truncated decimals.")
             self._custom_gates[name] = matrix
             self.io.writeln(f"UNITARY {name}: {n_qubits}-qubit gate defined")
         except Exception as e:

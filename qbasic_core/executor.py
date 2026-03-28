@@ -70,7 +70,7 @@ class ExecutorMixin:
     def build_circuit(self) -> tuple['QuantumCircuit', bool]:
         """Compile program lines into a QuantumCircuit. Returns (circuit, has_measure)."""
         from qbasic_core.exec_context import ExecContext
-        from qbasic_core.statements import MeasureStmt
+        from qbasic_core.statements import MeasureStmt, CompoundStmt
         from qbasic_core.scope import Scope
         from qbasic_core.backend import QiskitBackend
 
@@ -98,6 +98,10 @@ class ExecutorMixin:
                 has_measure = True
                 ctx.ip += 1
                 continue
+            if isinstance(parsed, CompoundStmt):
+                for part in parsed.parts:
+                    if part.strip().upper() == 'MEASURE':
+                        has_measure = True
 
             try:
                 result = self._exec_line(stmt, parsed=parsed, ctx=ctx)
@@ -265,7 +269,9 @@ class ExecutorMixin:
                 output = text[1:-1]
             else:
                 try:
-                    output = str(self._eval_with_vars(text, run_vars))
+                    ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else dict(run_vars) if not isinstance(run_vars, dict) else run_vars
+                    result = self._safe_eval(text, extra_ns=ns)
+                    output = str(result)
                 except Exception:
                     output = text
             if suppress_nl:
@@ -544,6 +550,15 @@ class ExecutorMixin:
         """
         if _call_stack is None:
             _call_stack = set()
+
+        # Handle parenthesized subroutine calls: NAME(arg1, arg2) -> NAME arg1, arg2
+        m_call = re.match(r'(\w+)\(([^)]*)\)', stmt)
+        if m_call:
+            call_name = m_call.group(1).upper()
+            if call_name in self.subroutines:
+                call_args = m_call.group(2)
+                stmt = f"{call_name} {call_args}"
+
         parts = stmt.split()
         word = parts[0].upper() if parts else ''
 
@@ -632,6 +647,12 @@ class ExecutorMixin:
 
         # Expand subroutines with call-stack tracking for recursion detection
         word = stmt.split()[0].upper() if stmt.split() else ''
+        # Also check for parenthesized call syntax: NAME(args)
+        m_paren = re.match(r'(\w+)\(', stmt)
+        if m_paren:
+            paren_name = m_paren.group(1).upper()
+            if paren_name in self.subroutines:
+                word = paren_name
         if word in self.subroutines:
             for sub_stmt in self._expand_statement(stmt, _call_stack):
                 self._apply_gate_str(sub_stmt, qc, _call_stack, backend=backend)

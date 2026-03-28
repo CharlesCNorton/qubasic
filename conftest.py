@@ -1,5 +1,7 @@
 """Pytest configuration — provides fast mock for non-simulation tests."""
 
+import sys
+
 import pytest
 
 
@@ -60,3 +62,16 @@ def _auto_mock_for_cures(request, monkeypatch):
     if 'test_cures' in request.node.nodeid:
         from qbasic_core.mock_backend import patch_aer
         patch_aer(monkeypatch)
+
+
+def capture(func, *args, **kwargs):
+    """Capture stdout from a function call, return (result, output_str)."""
+    import io as _io
+    buf = _io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        result = func(*args, **kwargs)
+    finally:
+        sys.stdout = old
+    return result, buf.getvalue()

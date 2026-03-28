@@ -66,6 +66,12 @@ class LOCCCommandsMixin:
         elif args[0] == 'SPLIT':
             nums = args[1:]
 
+        # Support "2+2+2" notation: split on + if present
+        expanded = []
+        for n in nums:
+            expanded.extend(n.split('+'))
+        nums = [n for n in expanded if n]
+
         if len(nums) < 2:
             self.io.writeln("?USAGE: LOCC [JOINT|SPLIT] <n1> <n2> [n3 ...]")
             return

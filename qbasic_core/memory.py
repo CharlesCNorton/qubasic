@@ -195,6 +195,15 @@ class MemoryMixin:
 
     # ── Commands ───────────────────────────────────────────────────────
 
+    def cmd_peek(self, rest: str) -> None:
+        """PEEK addr — read from memory-mapped address."""
+        if not rest.strip():
+            self.io.writeln("?USAGE: PEEK <addr>")
+            return
+        addr = self.eval_expr(rest.strip())
+        val = self._peek(addr)
+        self.io.writeln(f"  ${int(addr):04X} = {val}")
+
     def cmd_poke(self, rest: str) -> None:
         """POKE addr, value — write to memory-mapped address."""
         from qbasic_core.engine import RE_POKE

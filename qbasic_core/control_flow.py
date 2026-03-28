@@ -112,7 +112,9 @@ class ControlFlowMixin:
             output = text[1:-1]
         else:
             try:
-                output = str(self._eval_with_vars(text, run_vars))
+                ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else dict(run_vars) if not isinstance(run_vars, dict) else run_vars
+                result = self._safe_eval(text, extra_ns=ns)
+                output = str(result)
             except Exception:
                 output = text
         # Output with separator behavior
