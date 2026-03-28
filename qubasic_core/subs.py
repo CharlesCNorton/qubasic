@@ -185,7 +185,14 @@ class SubroutineMixin:
                 elif result is ExecResult.END:
                     break
             ctx.ip += 1
-        ret_val = self.variables.get(uname, ctx.run_vars.get(uname, 0))
+        # LET writes lowercase; check both, preferring the non-zero value
+        candidates = [
+            self.variables.get(uname.lower()),
+            ctx.run_vars.get(uname.lower()),
+            self.variables.get(uname),
+            ctx.run_vars.get(uname),
+        ]
+        ret_val = next((v for v in candidates if v is not None and v != 0), 0)
         self._pop_scope()
         return ret_val
 

@@ -25,7 +25,7 @@ from qubasic_core.engine import (
 )
 from qubasic_core.terminal import QBasicTerminal
 from qubasic_core.engine import LOCCEngine
-from qbasic import run_script
+from qubasic import run_script
 from conftest import capture
 
 

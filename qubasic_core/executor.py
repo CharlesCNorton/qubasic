@@ -597,7 +597,7 @@ class ExecutorMixin:
             return [stmt]
 
         if word in _call_stack:
-            raise RuntimeError(f"RECURSIVE SUBROUTINE: {word} calls itself")
+            raise RuntimeError(f"RECURSION: {word} calls itself")
         _call_stack = _call_stack | {word}
 
         sub = self.subroutines[word]
@@ -677,6 +677,8 @@ class ExecutorMixin:
             return
 
         # Expand subroutines with call-stack tracking for recursion detection
+        if _call_stack is None:
+            _call_stack = set()
         word = stmt.split()[0].upper() if stmt.split() else ''
         # Also check for parenthesized call syntax: NAME(args)
         m_paren = re.match(r'(\w+)\(', stmt)
@@ -685,8 +687,10 @@ class ExecutorMixin:
             if paren_name in self.subroutines:
                 word = paren_name
         if word in self.subroutines:
+            if word in _call_stack:
+                raise QBasicBuildError(f"RECURSION: {word} calls itself")
             for sub_stmt in self._expand_statement(stmt, _call_stack):
-                self._apply_gate_str(sub_stmt, qc, _call_stack, backend=backend)
+                self._apply_gate_str(sub_stmt, qc, _call_stack | {word}, backend=backend)
             return
 
         upper = stmt.upper()

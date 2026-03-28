@@ -137,11 +137,24 @@ ADVANCED
   BANK n                  Switch to program slot n (auto-saves current)
   BANK                    Show current slot and list used slots
 
+INLINE CIRCUIT INSTRUCTIONS (in programs, results available after RUN)
+  SAVE_EXPECT ZZ 0,1 -> v   Expectation value -> variable
+  SAVE_PROBS 0,1 -> p       Probability snapshot -> array
+  SAVE_AMPS 0,3 -> a        Specific amplitudes -> array
+  MEAS qubit -> var          Mid-circuit measurement (LOCC mode)
+  MEASURE_X/Y/Z qubit       Basis measurement
+
 FLOW CONTROL (in programs)
   GOTO line               Jump to line
   GOSUB line / RETURN     Subroutine call with stack
   WHILE expr / WEND       Conditional loop
-  IF expr THEN ... ELSE   Conditional (supports expressions)
+  IF expr THEN ... ELSE   Conditional (single-line)
+  IF expr THEN / ... / END IF    Multi-line block
+  IF ... ELSEIF ... ELSE  Chained conditions
+  DO [WHILE|UNTIL] / LOOP  Pre/post-test loops
+  SELECT CASE / CASE / END SELECT
+  SUB name(args) / END SUB      Subroutine with scope
+  FUNCTION name(args) / END FUNCTION  Function with return value
   END                     Stop execution
   PRINT expr              Output during run
   INPUT "prompt", var     Read user input

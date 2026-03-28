@@ -737,6 +737,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln("\n?INTERRUPTED")
             return
         except Exception as e:
+            self.last_circuit = None  # clear stale circuit on build failure
             if hasattr(self, '_error_target') and self._error_target is not None:
                 self._err_code = 1
                 self._err_line = 0
@@ -775,13 +776,29 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
         self.last_circuit = qc
 
-        # No-MEASURE shortcut: skip shot simulation, extract statevector only
+        # No-MEASURE path: run statevector simulation, extract save results
         if not has_measure and self.sim_method not in ('unitary', 'superop'):
             try:
                 qc_sv.save_statevector()
                 sv_backend = AerSimulator(method='statevector')
-                sv_result = sv_backend.run(transpile(qc_sv, sv_backend)).result()
+                sv_qc = transpile(qc_sv, sv_backend)
+                sv_result = sv_backend.run(sv_qc).result()
                 self.last_sv = np.array(sv_result.get_statevector())
+                # Extract SAVE_EXPECT / SAVE_PROBS / SAVE_AMPS results
+                data = sv_result.data()
+                for key, val in data.items():
+                    if key.startswith('exp_'):
+                        self.variables[key[4:]] = float(np.real(val))
+                    elif key.startswith('prob_'):
+                        var = key[5:]
+                        self.variables[var] = val
+                        if isinstance(val, np.ndarray):
+                            self.arrays[var] = val.tolist()
+                    elif key.startswith('amp_'):
+                        var = key[4:]
+                        if isinstance(val, np.ndarray):
+                            self.arrays[var] = [complex(v) for v in val]
+                        self.variables[var] = val
             except Exception:
                 self.last_sv = None
             self.last_counts = None
@@ -861,13 +878,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 return
             except Exception as _sim_err:
                 _err_msg = str(_sim_err).lower()
-                if (AerError is not None and isinstance(_sim_err, AerError) and 'stabilizer' in _err_msg) or \
-                   ('stabilizer' in _err_msg and 'invalid parameters' in _err_msg):
+                if 'stabilizer' in _err_msg or 'invalid parameters' in _err_msg:
                     self._circuit_cache_key = None
                     self._circuit_cache = None
                     sv_opts = {k: v for k, v in backend_opts.items()
                                if k != 'method'}
                     sv_opts['method'] = 'statevector'
+                    self.io.writeln(f"  (stabilizer failed — falling back to statevector)")
                     backend = AerSimulator(**sv_opts)
                     qc_t = transpile(qc, backend)
                     result = backend.run(qc_t, shots=self.shots).result()
@@ -891,7 +908,18 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     else:
                         self.io.writeln(f"    (too large to display — stored in variable '{label}')")
             else:
-                self.last_counts = dict(result.get_counts())
+                try:
+                    self.last_counts = dict(result.get_counts())
+                except Exception:
+                    # Simulation method failed silently (e.g. stabilizer on non-Clifford)
+                    self.io.writeln(f"  (method '{method}' produced no counts — falling back to statevector)")
+                    self._circuit_cache_key = None
+                    sv_opts = {k: v for k, v in backend_opts.items() if k != 'method'}
+                    sv_opts['method'] = 'statevector'
+                    sv_backend = AerSimulator(**sv_opts)
+                    sv_qc = transpile(qc, sv_backend)
+                    result = sv_backend.run(sv_qc, shots=self.shots).result()
+                    self.last_counts = dict(result.get_counts())
             # Extract save instruction results into BASIC variables
             data = result.data()
             for key, val in data.items():
@@ -1408,7 +1436,21 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             or self._try_exec_save_probs(stmt, qc, run_vars)
             or self._try_exec_save_amps(stmt, qc, run_vars)
             or self._try_exec_set_state(stmt, qc)
+            or self._try_exec_apply_circuit(stmt, qc, backend=backend)
         )
+
+    def _try_exec_apply_circuit(self, stmt: str, qc, *, backend=None) -> bool:
+        """Handle APPLY_CIRCUIT name [@offset] inside program execution."""
+        m = re.match(r'APPLY_CIRCUIT\s+(\w+)(?:\s+@(\d+))?', stmt, re.IGNORECASE)
+        if not m:
+            return False
+        name = m.group(1).upper()
+        offset = int(m.group(2)) if m.group(2) else 0
+        if name not in self.subroutines:
+            raise ValueError(f"UNDEFINED CIRCUIT: {name}")
+        call_str = f"{name} @{offset}" if offset else name
+        self._apply_gate_str(call_str, qc, backend=backend)
+        return True
 
     def _try_exec_poke(self, stmt: str, run_vars: dict) -> bool:
         m = RE_POKE.match(stmt)
