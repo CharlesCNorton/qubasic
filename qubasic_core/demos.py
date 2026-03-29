@@ -1,4 +1,4 @@
-"""QUBASIC built-in demo circuits."""
+"""QUBASIC built-in demo circuits with self-verification."""
 
 
 class DemoMixin:
@@ -36,6 +36,29 @@ class DemoMixin:
             return
         demos[name]()
 
+    def _verify_demo(self, expected_states: list[str], min_frac: float = 0.85,
+                     label: str = '') -> bool:
+        """Check that expected states dominate the output.
+
+        expected_states: list of bitstrings that should capture >= min_frac of shots.
+        Returns True if verification passes.
+        """
+        if not self.last_counts:
+            self.io.writeln(f"  VERIFY: no results")
+            return False
+        total = sum(self.last_counts.values())
+        hit = sum(self.last_counts.get(s, 0) for s in expected_states)
+        frac = hit / total if total > 0 else 0
+        tag = f" ({label})" if label else ""
+        if frac >= min_frac:
+            self.io.writeln(f"  VERIFY PASS{tag}: {frac:.1%} in expected states "
+                           f"(threshold {min_frac:.0%})")
+            return True
+        else:
+            self.io.writeln(f"  VERIFY FAIL{tag}: {frac:.1%} in expected states "
+                           f"(threshold {min_frac:.0%})")
+            return False
+
     def _demo_bell(self):
         self.cmd_new()
         self.num_qubits = 2
@@ -49,6 +72,7 @@ class DemoMixin:
         self.io.writeln("LOADED: Bell State (2 qubits)")
         self.cmd_list()
         self.cmd_run()
+        self._verify_demo(['00', '11'], 0.95, 'Bell: only |00> and |11>')
 
     def _demo_ghz(self):
         self.cmd_new()
@@ -69,6 +93,7 @@ class DemoMixin:
         self.io.writeln(f"LOADED: GHZ State ({n} qubits)")
         self.cmd_list()
         self.cmd_run()
+        self._verify_demo(['0' * n, '1' * n], 0.95, f'GHZ: only |{"0"*n}> and |{"1"*n}>')
 
     def _demo_teleport(self):
         self.cmd_new()
@@ -138,6 +163,7 @@ class DemoMixin:
         self.io.writeln("LOADED: Grover's Search (3 qubits, target=|101>)")
         self.cmd_list()
         self.cmd_run()
+        self._verify_demo(['101'], 0.85, 'Grover: target |101>')
 
     def _demo_qft(self):
         self.cmd_new()
@@ -193,6 +219,8 @@ class DemoMixin:
         self.io.writeln("  Expect: qubit 0 = 1 (balanced)")
         self.cmd_list()
         self.cmd_run()
+        # q0=1 means bit pattern x1 (states 01 or 11)
+        self._verify_demo(['01', '11'], 0.95, 'Deutsch: q0=1 (balanced)')
 
     def _demo_bernstein(self):
         self.cmd_new()
@@ -218,6 +246,8 @@ class DemoMixin:
         self.io.writeln("  Expect: measurement shows ...1011 (q3q2q1q0)")
         self.cmd_list()
         self.cmd_run()
+        # Ancilla (q4) is random; data qubits should read 1011
+        self._verify_demo(['01011', '11011'], 0.95, 'BV: secret=1011')
 
     def _demo_superdense(self):
         self.cmd_new()
@@ -243,6 +273,7 @@ class DemoMixin:
         self.io.writeln("  Expect: |11> with high probability")
         self.cmd_list()
         self.cmd_run()
+        self._verify_demo(['11'], 0.95, 'Superdense: message=11')
 
     def _demo_random(self):
         self.cmd_new()
