@@ -388,6 +388,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         # Program management
         'CHECKSUM': 'cmd_checksum',
         'VERSION': 'cmd_version',
+        'SEED': 'cmd_seed',
         # Classic
         'RESTORE': 'cmd_restore',
     }
@@ -950,7 +951,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 self._circuit_cache_key = cache_key
                 self._circuit_cache = (qc_t, backend)
             try:
-                result = backend.run(qc_t, shots=self.shots).result()
+                _run_kw = {'shots': self.shots}
+                if self._seed is not None:
+                    _run_kw['seed_simulator'] = self._seed
+                result = backend.run(qc_t, **_run_kw).result()
             except KeyboardInterrupt:
                 self.io.writeln("\n?INTERRUPTED")
                 return
@@ -965,7 +969,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     backend_opts.pop('device', None)
                     backend = AerSimulator(**backend_opts)
                     qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
-                    result = backend.run(qc_t, shots=self.shots).result()
+                    _run_kw = {'shots': self.shots}
+                    if self._seed is not None:
+                        _run_kw['seed_simulator'] = self._seed
+                    result = backend.run(qc_t, **_run_kw).result()
                 elif 'stabilizer' in _err_msg or 'invalid parameters' in _err_msg:
                     self._circuit_cache_key = None
                     self._circuit_cache = None
@@ -975,7 +982,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     self.io.writeln(f"  (stabilizer failed — falling back to statevector)")
                     backend = AerSimulator(**sv_opts)
                     qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
-                    result = backend.run(qc_t, shots=self.shots).result()
+                    _run_kw = {'shots': self.shots}
+                    if self._seed is not None:
+                        _run_kw['seed_simulator'] = self._seed
+                    result = backend.run(qc_t, **_run_kw).result()
                     # Validate fallback produced usable counts
                     if has_measure:
                         _fb_counts = result.get_counts()
@@ -1012,7 +1022,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     sv_opts['method'] = 'statevector'
                     sv_backend = AerSimulator(**sv_opts)
                     sv_qc = transpile(qc, sv_backend, optimization_level=self._transpile_opt_level)
-                    result = sv_backend.run(sv_qc, shots=self.shots).result()
+                    _sv_kw = {'shots': self.shots}
+                    if self._seed is not None:
+                        _sv_kw['seed_simulator'] = self._seed
+                    result = sv_backend.run(sv_qc, **_sv_kw).result()
                     self.last_counts = dict(result.get_counts())
             # Extract save instruction results into BASIC variables
             data = result.data()
@@ -1912,6 +1925,18 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         all_gates = sorted(g for g in GATE_TABLE if g not in GATE_ALIASES)
         self.io.writeln(f"        ALL COMMANDS: {', '.join(all_cmds)}")
         self.io.writeln(f"        ALL GATES: {', '.join(all_gates)}")
+
+    def cmd_seed(self, rest: str) -> None:
+        """SEED <n> — set deterministic random seed for reproducible results.
+        SEED OFF — return to non-deterministic mode."""
+        if not rest.strip() or rest.strip().upper() == 'OFF':
+            self._seed = None
+            self.io.writeln("SEED OFF (non-deterministic)")
+            return
+        s = int(rest.strip())
+        self._seed = s
+        np.random.seed(s)
+        self.io.writeln(f"SEED = {s}")
 
     def cmd_version(self, rest: str = '') -> None:
         """VERSION — print build ID, simulator versions, and feature flags."""

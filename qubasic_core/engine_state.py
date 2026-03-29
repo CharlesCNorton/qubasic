@@ -40,6 +40,7 @@ class Engine:
         self.sim_device: str = 'CPU'
         self._noise_model: Any = None
         self._noise_depol_p: float = 0.0
+        self._seed: int | None = None
         self._max_iterations: int = MAX_LOOP_ITERATIONS
         self._include_depth: int = 0
 
