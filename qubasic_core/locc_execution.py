@@ -147,10 +147,50 @@ class LOCCExecutionMixin:
             self.last_counts = counts_joint
 
     def _locc_run_vectorized(self, sorted_lines, has_measure):
-        """LOCC execution without SEND — single execution, vectorized sampling."""
+        """LOCC execution without SEND — single execution, vectorized sampling.
+
+        When noise is active, re-executes per shot so that Monte Carlo noise
+        fires independently each time (matching the SEND path behavior).
+        """
         sizes_str = '+'.join(str(s) for s in self.locc.sizes)
         mode = "JOINT" if self.locc.joint else "SPLIT"
         t0 = time.time()
+
+        noisy = getattr(self.locc, 'noise_param', 0.0) > 0
+
+        if noisy and has_measure:
+            # Per-shot execution so noise fires independently each time
+            per_reg = {name: {} for name in self.locc.names}
+            counts_joint = {}
+            for _shot in range(self.shots):
+                self.locc.reset()
+                try:
+                    self._locc_execute_program(sorted_lines)
+                except (RuntimeError, ValueError) as e:
+                    self.io.writeln(f"?RUNTIME ERROR: {e}")
+                    return
+                if self.locc.joint:
+                    out = _sample_one_np(self.locc.sv, self.locc.n_total)
+                    parts = []
+                    pos = len(out)
+                    for i in range(self.locc.n_regs):
+                        size = self.locc.sizes[i]
+                        parts.append(out[pos - size:pos])
+                        pos -= size
+                else:
+                    parts = [_sample_one_np(self.locc.svs[name],
+                             self.locc.get_size(name))
+                             for name in self.locc.names]
+                for name, bits in zip(self.locc.names, parts):
+                    per_reg[name][bits] = per_reg[name].get(bits, 0) + 1
+                jkey = '|'.join(parts)
+                counts_joint[jkey] = counts_joint.get(jkey, 0) + 1
+            dt = time.time() - t0
+            self.io.writeln(f"\nRAN {len(self.program)} lines, LOCC {mode} "
+                            f"{sizes_str}q, {self.shots} shots in {dt:.2f}s")
+            self._locc_display_results(per_reg, counts_joint)
+            self.last_counts = counts_joint if counts_joint else per_reg.get('A', {})
+            return
 
         self.locc.reset()
         try:

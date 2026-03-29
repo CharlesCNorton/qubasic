@@ -23,6 +23,10 @@ class NoiseMixin:
         """
         if not rest or rest.strip().upper() == 'OFF':
             self._noise_model = None
+            self._noise_depol_p = 0.0
+            # Update LOCC engine if active
+            if getattr(self, 'locc', None) is not None:
+                self.locc.noise_param = 0.0
             self.io.writeln("NOISE OFF")
             return
         parts = rest.split()
@@ -92,5 +96,13 @@ class NoiseMixin:
                 self.io.writeln("         readout, combined, pauli, reset")
                 return
             self._noise_model = nm
+            # Store scalar depolarizing param for LOCC numpy path
+            if ntype == 'depolarizing':
+                self._noise_depol_p = float(parts[1]) if len(parts) > 1 else 0.01
+            else:
+                self._noise_depol_p = 0.0
+            # Propagate to LOCC engine if active
+            if getattr(self, 'locc', None) is not None:
+                self.locc.noise_param = self._noise_depol_p
         except ImportError:
             self.io.writeln("?Noise model requires qiskit-aer noise module")

@@ -26,12 +26,19 @@ class LOCCEngine:
     JOINT mode: one statevector, LOCC constraints enforced.
     """
 
-    def __init__(self, sizes: list[int], joint: bool = False):
-        """Initialize LOCC engine with given register sizes."""
+    def __init__(self, sizes: list[int], joint: bool = False,
+                 noise_param: float = 0.0):
+        """Initialize LOCC engine with given register sizes.
+
+        noise_param: depolarizing probability per gate (0 = noiseless).
+        When > 0, after each gate application a random Pauli (X, Y, or Z)
+        is applied to each target qubit with probability noise_param/3.
+        """
         self.sizes = list(sizes)
         self.n_regs = len(self.sizes)
         self.names = [chr(ord('A') + i) for i in range(self.n_regs)]
         self.joint = joint
+        self.noise_param = noise_param
         self.classical = {}
         # Precompute offsets for JOINT mode
         self.offsets = []
@@ -93,8 +100,36 @@ class LOCCEngine:
                     f"Qubit {q} out of range for register {reg} (size {size})"
                 )
 
+    def _apply_depolarizing(self, reg: str, qubits: list[int]) -> None:
+        """Apply single-qubit depolarizing noise to each target qubit.
+
+        For depolarizing parameter p, each qubit independently gets a random
+        Pauli (X, Y, or Z) with probability p/3 each, or identity with
+        probability 1-p. This is the Monte Carlo implementation of the
+        depolarizing channel.
+        """
+        if self.noise_param <= 0:
+            return
+        _paulis = [
+            _np_gate_matrix('X', ()),
+            _np_gate_matrix('Y', ()),
+            _np_gate_matrix('Z', ()),
+        ]
+        for q in qubits:
+            r = np.random.random()
+            if r < self.noise_param:
+                # Pick a random Pauli
+                pauli = _paulis[np.random.randint(3)]
+                if self.joint:
+                    idx = self._idx(reg)
+                    actual_q = q + self.offsets[idx]
+                    self.sv = _apply_gate_np(self.sv, pauli, [actual_q], self.n_total)
+                else:
+                    size = self.sizes[self._idx(reg)]
+                    self.svs[reg] = _apply_gate_np(self.svs[reg], pauli, [q], size)
+
     def apply(self, reg: str, gate_name: str, params: tuple[float, ...], qubits: list[int]) -> None:
-        """Apply a gate to a specific register."""
+        """Apply a gate to a specific register, then apply noise if configured."""
         self._check_qubits(reg, qubits)
         matrix = _np_gate_matrix(gate_name, tuple(params))
         if self.joint:
@@ -104,6 +139,7 @@ class LOCCEngine:
         else:
             size = self.sizes[self._idx(reg)]
             self.svs[reg] = _apply_gate_np(self.svs[reg], matrix, qubits, size)
+        self._apply_depolarizing(reg, qubits)
 
     def share(self, reg1: str, q1: int, reg2: str, q2: int) -> None:
         """Create Bell pair |Phi+> between reg1[q1] and reg2[q2]. JOINT only."""
@@ -116,7 +152,10 @@ class LOCCEngine:
         actual1 = q1 + self.offsets[self._idx(reg1)]
         actual2 = q2 + self.offsets[self._idx(reg2)]
         self.sv = _apply_gate_np(self.sv, h, [actual1], self.n_total)
+        self._apply_depolarizing(reg1, [q1])
         self.sv = _apply_gate_np(self.sv, cx, [actual1, actual2], self.n_total)
+        self._apply_depolarizing(reg1, [q1])
+        self._apply_depolarizing(reg2, [q2])
 
     def send(self, reg: str, qubit: int) -> int:
         """Measure a qubit (Born rule) and return the classical outcome."""
@@ -184,6 +223,7 @@ class LOCCEngine:
         else:
             size = self.sizes[self._idx(reg)]
             self.svs[reg] = _apply_gate_np(self.svs[reg], matrix, qubits, size)
+        self._apply_depolarizing(reg, qubits)
 
     def mem_gb(self) -> tuple[float, float]:  # (total_gb, peak_gb)
         """Return (total_gb, peak_gb) realistic memory estimates including overhead."""

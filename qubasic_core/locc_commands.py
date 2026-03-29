@@ -17,6 +17,13 @@ class LOCCCommandsMixin:
     self.variables, self.eval_expr(), self.io.
     """
 
+    def _locc_noise_param(self) -> float:
+        """Return the scalar depolarizing probability for LOCC noise.
+
+        Stored by cmd_noise when a depolarizing model is set.
+        """
+        return getattr(self, '_noise_depol_p', 0.0)
+
     def cmd_locc(self, rest):
         args = rest.upper().split()
         if not args:
@@ -90,7 +97,8 @@ class LOCCCommandsMixin:
 
         # Pre-check RAM before allocating
         mode = "JOINT" if joint else "SPLIT"
-        temp_eng = LOCCEngine(sizes, joint=joint)
+        noise_p = self._locc_noise_param()
+        temp_eng = LOCCEngine(sizes, joint=joint, noise_param=noise_p)
         tot, peak = temp_eng.mem_gb()
         ram = _get_ram_gb()
         if ram and tot > ram[1]:
