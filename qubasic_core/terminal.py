@@ -198,6 +198,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         # Reject absolute paths (Unix / or Windows drive letters)
         if os.path.isabs(path):
             raise ValueError("Absolute paths are not allowed")
+        # Catch Windows drive letters on non-Windows hosts (e.g. CI on Linux)
+        import re as _re
+        if _re.match(r'^[A-Za-z]:[/\\]', path):
+            raise ValueError("Absolute paths are not allowed")
         # Reject UNC paths (\\server\share) and extended-length paths (\\?\)
         if path.startswith('\\\\'):
             raise ValueError("UNC/extended paths are not allowed")
