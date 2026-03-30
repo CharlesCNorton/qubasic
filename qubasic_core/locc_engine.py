@@ -65,6 +65,7 @@ class LOCCEngine:
     def reset(self) -> None:
         """Reset all registers to |0> and clear classical state."""
         self.classical.clear()
+        self.correction_log: list[str] = []
         if self.joint:
             self.sv = np.zeros(2**self.n_total, dtype=complex)
             self.sv[0] = 1.0

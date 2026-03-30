@@ -287,6 +287,8 @@ class LOCCExecutionMixin:
             run_vars[parsed.var] = outcome
             self.variables[parsed.var] = outcome
             self.locc.classical[parsed.var] = outcome
+            self.locc.correction_log.append(
+                f"SEND {parsed.reg}[{qubit}] -> {parsed.var}={outcome}")
             return ExecResult.ADVANCE
         if isinstance(parsed, ShareStmt):
             self.locc.share(parsed.reg1, parsed.q1, parsed.reg2, parsed.q2)

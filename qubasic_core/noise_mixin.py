@@ -21,6 +21,18 @@ class NoiseMixin:
           pauli <px> <py> <pz>         General Pauli channel
           reset <p0> <p1>              Spontaneous reset error
         """
+        if rest and rest.strip().upper() == 'INFO':
+            if self._noise_model is None:
+                self.io.writeln("  NOISE OFF (no noise model active)")
+            else:
+                self.io.writeln(f"  Noise model active:")
+                self.io.writeln(f"    depol_p = {self._noise_depol_p}")
+                nm_str = str(self._noise_model)
+                for line in nm_str.split('\n'):
+                    self.io.writeln(f"    {line}")
+                if getattr(self, 'locc', None) and self.locc.noise_param > 0:
+                    self.io.writeln(f"    LOCC engine: depol p={self.locc.noise_param}")
+            return
         if not rest or rest.strip().upper() == 'OFF':
             self._noise_model = None
             self._noise_depol_p = 0.0

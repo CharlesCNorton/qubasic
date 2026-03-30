@@ -143,6 +143,82 @@ class AnalysisMixin:
                 self.io.writeln(f"  {n:>8}  {method:>20}  FAILED: {e}")
         self.io.writeln('')
 
+    def cmd_consistency(self, rest: str = '') -> None:
+        """CONSISTENCY — cross-check histogram, SV, density, Bloch, and EXPECT."""
+        sv = self._active_sv
+        if sv is None:
+            self.io.writeln("?NO STATE — RUN first")
+            return
+        n = self._active_nqubits
+        sv = np.ascontiguousarray(sv).ravel()
+        checks = []
+
+        # 1. SV normalization
+        norm = float(np.sum(np.abs(sv)**2))
+        ok = abs(norm - 1.0) < 1e-6
+        checks.append(('SV norm == 1', ok, f"{norm:.8f}"))
+
+        # 2. Density matrix purity
+        rho = np.outer(sv, sv.conj())
+        purity = float(np.real(np.trace(rho @ rho)))
+        ok2 = purity <= 1.0 + 1e-6
+        checks.append(('Purity <= 1', ok2, f"{purity:.8f}"))
+
+        # 3. Bloch vector length <= 1 for each qubit
+        bloch_ok = True
+        for q in range(min(n, 8)):
+            x, y, z = self._bloch_vector(sv, q, n)
+            r = (x**2 + y**2 + z**2) ** 0.5
+            if r > 1.0 + 1e-4:
+                bloch_ok = False
+                break
+        checks.append(('Bloch |r| <= 1', bloch_ok, ''))
+
+        # 4. EXPECT Z on qubit 0 matches P(0) - P(1)
+        try:
+            from qiskit.quantum_info import Statevector, SparsePauliOp
+            sv_q = Statevector(sv)
+            pauli_z = ['I'] * n
+            pauli_z[n - 1] = 'Z'
+            op = SparsePauliOp(''.join(pauli_z))
+            ez = float(sv_q.expectation_value(op).real)
+            # Compare with direct calculation
+            sv_t = sv.reshape([2] * n)
+            ax = n - 1
+            t0 = np.moveaxis(sv_t, ax, 0)[0].flatten()
+            t1 = np.moveaxis(sv_t, ax, 0)[1].flatten()
+            p0 = float(np.sum(np.abs(t0)**2))
+            p1 = float(np.sum(np.abs(t1)**2))
+            ez_direct = p0 - p1
+            ok4 = abs(ez - ez_direct) < 1e-6
+            checks.append(('<Z> consistent', ok4, f"qiskit={ez:.6f} direct={ez_direct:.6f}"))
+        except Exception as _e:
+            checks.append(('<Z> consistent', None, f"skip: {_e}"))
+
+        # 5. Histogram vs SV (if counts available)
+        if self.last_counts:
+            total = sum(self.last_counts.values())
+            hist_p0 = self.last_counts.get('0' * n, 0) / total
+            sv_p0 = float(np.abs(sv[0])**2)
+            # Loose check: histogram is statistical, allow 10% deviation
+            ok5 = abs(hist_p0 - sv_p0) < 0.15 or total < 50
+            checks.append(('Hist~SV P(|0>)', ok5,
+                          f"hist={hist_p0:.3f} sv={sv_p0:.3f}"))
+
+        self.io.writeln(f"\n  Consistency checks ({n} qubits):")
+        all_pass = True
+        for name, ok, detail in checks:
+            if ok is None:
+                status = 'SKIP'
+            elif ok:
+                status = 'PASS'
+            else:
+                status = 'FAIL'
+                all_pass = False
+            extra = f"  {detail}" if detail else ""
+            self.io.writeln(f"    {name:25s} {status}{extra}")
+        self.io.writeln(f"\n  {'ALL CONSISTENT' if all_pass else 'INCONSISTENCY DETECTED'}")
+
     def cmd_ram(self) -> None:
         """RAM — show memory budget, per-instance cost, and parallelism estimates."""
         ram = _get_ram_gb()

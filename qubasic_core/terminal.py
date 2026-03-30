@@ -399,7 +399,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     _CMD_NO_ARG = {
         'RUN': 'cmd_run', 'NEW': 'cmd_new', 'STEP': 'cmd_step',
         'HIST': 'cmd_hist', 'PROBS': 'cmd_probs', 'DEFS': 'cmd_defs',
-        'REGS': 'cmd_regs', 'VARS': 'cmd_vars', 'HELP': 'cmd_help',
+        'REGS': 'cmd_regs', 'VARS': 'cmd_vars',
         'CIRCUIT': 'cmd_circuit', 'DECOMPOSE': 'cmd_decompose',
         'DENSITY': 'cmd_density', 'LOCCINFO': 'cmd_loccinfo',
         'UNDO': 'cmd_undo', 'RAM': 'cmd_ram',
@@ -451,6 +451,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'SET_STATE': 'cmd_set_state',
         # Circuit macros
         'CIRCUIT_DEF': 'cmd_circuit_def', 'APPLY_CIRCUIT': 'cmd_apply_circuit',
+        'HELP': 'cmd_help', 'CONSISTENCY': 'cmd_consistency',
     }
 
     def dispatch(self, line: str) -> None:
@@ -871,6 +872,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln("NOTHING TO RUN")
             return
 
+        # Pre-check method-device compatibility
+        _unsupported_gpu = {'stabilizer', 'extended_stabilizer', 'unitary', 'superop'}
+        if self.sim_device == 'GPU' and self.sim_method in _unsupported_gpu:
+            self.io.writeln(f"?METHOD '{self.sim_method}' does not support GPU — "
+                           f"use METHOD statevector or density_matrix")
+            return
+
         t0 = time.time()
         self._gosub_stack = []
         self._collect_data()
@@ -927,6 +935,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             qc.measure_all()
 
         self.last_circuit = qc
+        self._last_transpiled = None  # set after transpile
 
         # No-MEASURE path: run statevector simulation, extract save results
         if not has_measure and self.sim_method not in ('unitary', 'superop'):
@@ -1005,6 +1014,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
                 self._circuit_cache_key = cache_key
                 self._circuit_cache = (qc_t, backend)
+                self._last_transpiled = qc_t
             try:
                 _run_kw = {'shots': self.shots}
                 if self._seed is not None:
@@ -1099,7 +1109,18 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                         self.arrays[var] = [complex(v) for v in val]
                     self.variables[var] = val
         except Exception as e:
-            self.io.writeln(f"?RUNTIME ERROR: {e}")
+            _err = str(e).lower()
+            if 'gpu' in _err:
+                subsys = 'device/GPU'
+            elif 'noise' in _err or 'kraus' in _err:
+                subsys = 'noise'
+            elif 'stabilizer' in _err:
+                subsys = 'backend/stabilizer'
+            elif 'mps' in _err or 'matrix_product' in _err:
+                subsys = 'backend/MPS'
+            else:
+                subsys = f'backend/{method}'
+            self.io.writeln(f"?RUNTIME ERROR [{subsys}]: {e}")
             return
 
         # Get statevector from the measurement-free copy
@@ -1125,6 +1146,20 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self.variables['_DEPTH'] = depth
         self.variables['_GATES'] = n_gates
         self.variables['_TIME'] = dt
+
+        # Replayable manifest: capture everything needed to reproduce this run
+        self._run_manifest = {
+            'program': dict(self.program),
+            'num_qubits': self.num_qubits,
+            'shots': self.shots,
+            'method': method,
+            'device': self.sim_device,
+            'seed': self._seed,
+            'noise_depol_p': self._noise_depol_p,
+            'depth': depth,
+            'gates': n_gates,
+            'time_s': dt,
+        }
 
         # Display results with execution metadata
         _meta_parts = [f"method={method}"]
@@ -1973,9 +2008,28 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     # ── Help ──────────────────────────────────────────────────────────
 
-    def cmd_help(self) -> None:
+    _EXPERIMENTAL_CMDS = frozenset({
+        'CONNECT', 'DISCONNECT', 'PROBE',
+    })
+    _PARTIAL_CMDS = frozenset({
+        'SAMPLE', 'ESTIMATE',  # SamplerV2/EstimatorV2 wrappers
+    })
+
+    def cmd_help(self, rest: str = '') -> None:
+        if rest.strip().upper() == 'STATUS':
+            self.io.writeln("\n  Command Implementation Status:")
+            all_cmds = sorted(set(self._CMD_NO_ARG.keys()) | set(self._CMD_WITH_ARG.keys()))
+            for cmd in all_cmds:
+                if cmd in self._EXPERIMENTAL_CMDS:
+                    tag = 'experimental'
+                elif cmd in self._PARTIAL_CMDS:
+                    tag = 'partial'
+                else:
+                    tag = 'native'
+                self.io.writeln(f"    {cmd:20s} [{tag}]")
+            self.io.writeln(f"\n  {len(all_cmds)} commands registered")
+            return
         self.io.writeln(HELP_TEXT)
-        # Auto-generated command reference from registry
         all_cmds = sorted(set(self._CMD_NO_ARG.keys()) | set(self._CMD_WITH_ARG.keys()))
         all_gates = sorted(g for g in GATE_TABLE if g not in GATE_ALIASES)
         self.io.writeln(f"        ALL COMMANDS: {', '.join(all_cmds)}")
@@ -2037,7 +2091,23 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         results.append(('Conditional ctrl', cond_ok))
         self.cmd_locc('OFF')
 
-        # 5. GPU probe (non-fatal)
+        # 5. Combined: noise + LOCC + mid-circuit + correction
+        self.cmd_new(silent=True)
+        self.cmd_noise('depolarizing 0.1')
+        self.cmd_locc('JOINT 2 2')
+        self.shots = 200
+        self.process('10 @A H 0', track_undo=False)
+        self.process('20 SHARE A 1, B 0', track_undo=False)
+        self.process('30 SEND A 0 -> m', track_undo=False)
+        self.process('40 IF m THEN @B X 0', track_undo=False)
+        self.process('50 MEASURE', track_undo=False)
+        self.cmd_run()
+        combo_ok = self.last_counts is not None and len(self.last_counts) > 0
+        results.append(('Noise+LOCC+SEND+IF', combo_ok))
+        self.cmd_noise('off')
+        self.cmd_locc('OFF')
+
+        # 6. GPU probe (non-fatal)
         gpu_ok = None
         try:
             _b = AerSimulator(method='statevector', device='GPU')

@@ -353,25 +353,38 @@ class DemoMixin:
         self.io.writeln("  Alice sends |+> to Bob. Expect Bob's qubit ~ 50/50.")
         self.cmd_list()
         self.cmd_run()
-        # Fidelity: |+> teleported -> Bob B[0] should be 50/50 in Z basis
-        # Perfect fidelity = P(0) + P(1) both near 0.5
-        # Report fidelity as 1 - |P(0) - 0.5| (deviation from ideal)
+        # Fidelity: |+> teleported to Bob B[0]
+        # Z-basis: should be 50/50 (|+> has equal P(0) and P(1))
+        # X-basis: should be ~100% |0> (|+> is eigenstate of X with eigenvalue +1)
         if self.last_counts:
             total = sum(self.last_counts.values())
-            # Extract Bob's qubit (last bit of the B register part)
             b0_counts = {'0': 0, '1': 0}
             for state, count in self.last_counts.items():
                 parts = state.split('|')
                 if len(parts) >= 2:
-                    bob_bit = parts[-1][-1]  # last bit of B register
+                    bob_bit = parts[-1][-1]
                     b0_counts[bob_bit] = b0_counts.get(bob_bit, 0) + count
             b_total = sum(b0_counts.values())
             if b_total > 0:
                 p0 = b0_counts['0'] / b_total
-                # For |+> teleported, ideal is P(0)=P(1)=0.5
-                fidelity = 1.0 - abs(p0 - 0.5) * 2
-                self.io.writeln(f"  Teleportation fidelity: {fidelity:.3f} "
+                z_fidelity = 1.0 - abs(p0 - 0.5) * 2
+                self.io.writeln(f"  Z-basis fidelity: {z_fidelity:.3f} "
                                f"(Bob B[0]: P(0)={p0:.3f}, P(1)={1-p0:.3f})")
+        # X-basis verification via LOCC statevector
+        if self.locc and self.locc.joint:
+            import numpy as np
+            sv = np.ascontiguousarray(self.locc.sv).ravel()
+            n = self.locc.n_total
+            # Bob qubit 0 is at global index = offset_B + 0
+            bob_q = self.locc.offsets[1]
+            sv_t = sv.reshape([2] * n)
+            ax = n - 1 - bob_q
+            t0 = np.moveaxis(sv_t, ax, 0)[0].flatten()
+            t1 = np.moveaxis(sv_t, ax, 0)[1].flatten()
+            rho_01 = np.sum(np.conj(t0) * t1)
+            expect_x = float(2 * rho_01.real)
+            self.io.writeln(f"  X-basis verification: <X> on Bob B[0] = {expect_x:.3f} "
+                           f"(ideal |+> = 1.000)")
 
     def _demo_locc_coord(self):
         """Classical coordination between independent registers (SPLIT mode)."""

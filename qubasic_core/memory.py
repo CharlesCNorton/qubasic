@@ -304,11 +304,21 @@ class MemoryMixin:
             return
         self.io.writeln("?WAIT TIMEOUT")
 
+    _SYS_BACKENDS = {
+        'BELL': 'Aer/statevector', 'GHZ': 'Aer/statevector',
+        'QFT': 'Aer/statevector', 'GROVER': 'Aer/statevector',
+        'TELEPORT': 'Aer/statevector', 'DEUTSCH': 'Aer/statevector',
+        'BERNSTEIN': 'Aer/statevector', 'SUPERDENSE': 'Aer/statevector',
+        'RANDOM': 'Aer/statevector', 'STRESS': 'Aer/automatic',
+        'LOCC-TELEPORT': 'LOCC/numpy-joint', 'LOCC-COORD': 'LOCC/numpy-split',
+    }
+
     def cmd_catalog(self) -> None:
-        """CATALOG — list all SYS routines with addresses."""
+        """CATALOG — list all SYS routines with addresses and backends."""
         self.io.writeln("\n  Built-in SYS Routines:")
         for addr, name in sorted(SYS_ROUTINES.items()):
-            self.io.writeln(f"    ${addr:04X}  {name}")
+            backend = self._SYS_BACKENDS.get(name, 'Aer')
+            self.io.writeln(f"    ${addr:04X}  {name:20s} [{backend}]")
         if self._user_sys:
             self.io.writeln("\n  User SYS Routines:")
             for addr, name in sorted(self._user_sys.items()):

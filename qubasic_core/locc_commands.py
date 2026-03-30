@@ -212,6 +212,15 @@ class LOCCCommandsMixin:
                 self.io.writeln(f"  Branch stats: {n0} zeros, {n1} ones "
                                f"(last run)")
 
+        # Correction log (from last run)
+        log = getattr(self.locc, 'correction_log', [])
+        if log:
+            self.io.writeln(f"  Correction log ({len(log)} entries, last run):")
+            for entry in log[-20:]:  # cap display
+                self.io.writeln(f"    {entry}")
+            if len(log) > 20:
+                self.io.writeln(f"    ... ({len(log) - 20} more)")
+
         # Noise
         noise_p = getattr(self.locc, 'noise_param', 0.0)
         if noise_p > 0:
