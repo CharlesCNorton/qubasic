@@ -180,15 +180,43 @@ class LOCCCommandsMixin:
         reg_desc = '  '.join(f"{n}={s}q" for n, s in
                              zip(self.locc.names, self.locc.sizes))
         self.io.writeln(f"  Registers: {reg_desc}  ({self.locc.n_regs} parties)")
+
+        # Entanglement creation
+        n_shares = sum(1 for l in self.program.values()
+                       if re.search(r'\bSHARE\b', l, re.IGNORECASE))
+        if n_shares:
+            self.io.writeln(f"  Entanglement: {n_shares} SHARE operation(s)")
+
+        # Classical communication
         n_classical = len(self.locc.classical)
         self.io.writeln(f"  Classical bits exchanged: {n_classical}")
         if self.locc.classical:
             for k, v in self.locc.classical.items():
                 self.io.writeln(f"    {k} = {v}")
+
+        # Measurement outcomes and correction paths
         n_sends = sum(1 for l in self.program.values()
                       if re.search(r'\bSEND\b', l, re.IGNORECASE))
+        n_ifs = sum(1 for l in self.program.values()
+                    if re.search(r'\bIF\b.*\bTHEN\b.*@', l, re.IGNORECASE))
         self.io.writeln(f"  SEND operations: {n_sends}")
+        self.io.writeln(f"  Conditional corrections: {n_ifs}")
         self.io.writeln(f"  Communication rounds: ~{n_sends}")
+
+        # Branch statistics from classical bits
+        if n_sends > 0 and self.locc.classical:
+            bits = [v for v in self.locc.classical.values() if isinstance(v, (int, float))]
+            if bits:
+                n0 = sum(1 for b in bits if b == 0)
+                n1 = sum(1 for b in bits if b == 1)
+                self.io.writeln(f"  Branch stats: {n0} zeros, {n1} ones "
+                               f"(last run)")
+
+        # Noise
+        noise_p = getattr(self.locc, 'noise_param', 0.0)
+        if noise_p > 0:
+            self.io.writeln(f"  Noise: depolarizing p={noise_p}")
+
         tot, peak = self.locc.mem_gb()
         self.io.writeln(f"  Memory: {tot:.1f} GB")
         self.io.writeln('')

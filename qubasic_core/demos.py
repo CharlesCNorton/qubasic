@@ -353,6 +353,25 @@ class DemoMixin:
         self.io.writeln("  Alice sends |+> to Bob. Expect Bob's qubit ~ 50/50.")
         self.cmd_list()
         self.cmd_run()
+        # Fidelity: |+> teleported -> Bob B[0] should be 50/50 in Z basis
+        # Perfect fidelity = P(0) + P(1) both near 0.5
+        # Report fidelity as 1 - |P(0) - 0.5| (deviation from ideal)
+        if self.last_counts:
+            total = sum(self.last_counts.values())
+            # Extract Bob's qubit (last bit of the B register part)
+            b0_counts = {'0': 0, '1': 0}
+            for state, count in self.last_counts.items():
+                parts = state.split('|')
+                if len(parts) >= 2:
+                    bob_bit = parts[-1][-1]  # last bit of B register
+                    b0_counts[bob_bit] = b0_counts.get(bob_bit, 0) + count
+            b_total = sum(b0_counts.values())
+            if b_total > 0:
+                p0 = b0_counts['0'] / b_total
+                # For |+> teleported, ideal is P(0)=P(1)=0.5
+                fidelity = 1.0 - abs(p0 - 0.5) * 2
+                self.io.writeln(f"  Teleportation fidelity: {fidelity:.3f} "
+                               f"(Bob B[0]: P(0)={p0:.3f}, P(1)={1-p0:.3f})")
 
     def _demo_locc_coord(self):
         """Classical coordination between independent registers (SPLIT mode)."""
