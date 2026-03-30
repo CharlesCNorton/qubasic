@@ -134,7 +134,9 @@ class LOCCExecutionMixin:
                 counts_joint[jkey] = counts_joint.get(jkey, 0) + 1
             if shots > 50 and (shot + 1) % progress_interval == 0:
                 pct = 100 * (shot + 1) // shots
-                _prog = f"  {pct}% ({shot+1}/{shots} shots)..."
+                from qubasic_core.qol import quantum_spin
+                spin = quantum_spin(shot)
+                _prog = f"  {spin} {pct}% ({shot+1}/{shots} shots)..."
                 if hasattr(self.io, 'write') and sys.stdout.isatty():
                     self.io.write(_prog + '\r')
                 # Non-terminal: skip progress to avoid \r noise

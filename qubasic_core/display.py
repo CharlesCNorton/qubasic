@@ -88,11 +88,21 @@ class DisplayMixin:
         max_count = max(c for _, c in display) if display else 1
         max_label = max(len(k) for k, _ in display) if display else 1
 
+        _theme = getattr(self, '_theme', {})
         for state, count in display:
             pct = 100 * count / total
             bar_len = int(HISTOGRAM_BAR_WIDTH * count / max_count)
             bar = '\u2588' * bar_len
             ket = f"|{state}\u27E9"
+            # Colorize bar by probability
+            if _theme and sys.stdout.isatty():
+                rst = _theme.get('reset', '')
+                if pct > 40:
+                    bar = f"{_theme.get('bar_hi', '')}{bar}{rst}"
+                elif pct > 10:
+                    bar = f"{_theme.get('bar_mid', '')}{bar}{rst}"
+                else:
+                    bar = f"{_theme.get('bar_lo', '')}{bar}{rst}"
             self.io.writeln(f"  {ket:>{max_label+3}}  {count:>6}  ({pct:5.1f}%)  {bar}")
 
         if len(sorted_counts) > MAX_HISTOGRAM_STATES:

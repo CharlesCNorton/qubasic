@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.0 (2026-03-30)
+
+- **Colorized histograms**: bars colored green/yellow/dim by probability in terminal
+- **Animated STEP mode**: press A during STEP for auto-advance with configurable delay
+- **"Did you mean?"**: typo suggestions for misspelled commands (BLASCH -> BLOCH)
+- **Status bar prompt**: REPL prompt shows qubit count, LOCC, noise status
+- **DRAW command**: braille-character Bloch sphere rendering
+- **Color-coded LIST**: gates in cyan, flow in yellow, comments dim (THEME controls)
+- **Gate throughput**: RUN summary shows gates/s and circuit complexity (T-count, CNOT count)
+- **COMPARE command**: run circuit with two methods and diff output distributions
+- **HEATMAP command**: qubit-qubit entanglement entropy grid
+- **Startup tip of the day**: random tip shown at REPL launch
+- **ANIMATE command**: animated parameter sweep with in-place terminal updates
+- **QUIZ mode**: interactive quantum computing quiz with multiple choice
+- **Tab completion for file paths**: SAVE/LOAD/INCLUDE complete .qb filenames
+- **DIFF command**: diff current program against another BANK slot
+- **PLOT command**: ASCII scatter plot of P(top state) vs swept variable
+- **UNDO preview**: shows what lines will change before applying
+- **THEME command**: switch color schemes (default, retro, none)
+- **F1/F2/F3 demo shortcuts**: load Bell, GHZ, Grover demos via function keys
+- **Quantum spinner**: |0>, |+>, |1>, |-> cycling during STATS and LOCC progress
+- **EXPLAIN command**: describe each program line in plain English
+- **LOCC progress spinner**: quantum-themed progress during SEND-based LOCC runs
+- **CLIP command**: copy last results to system clipboard
+- **Sound on completion**: terminal bell for runs exceeding 2 seconds
+- New QoLMixin with 24 quality-of-life features
+
 ## 0.4.1 (2026-03-30)
 
 - **Fix SEED dispatch**: moved from no-arg to with-arg dispatch table so `SEED 42` works from the REPL

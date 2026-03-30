@@ -57,6 +57,7 @@ from qubasic_core.program_mgmt import ProgramMgmtMixin
 from qubasic_core.profiler import ProfilerMixin
 from qubasic_core.noise_mixin import NoiseMixin
 from qubasic_core.state_display import StateDisplayMixin
+from qubasic_core.qol import QoLMixin, did_you_mean, tip_of_the_day, quantum_spin
 from qubasic_core.errors import QBasicError, QBasicBuildError, QBasicRangeError
 from qubasic_core.io_protocol import StdIOPort
 from qubasic_core.parser import parse_stmt
@@ -126,7 +127,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                      LOCCMixin, ControlFlowMixin, FileIOMixin, AnalysisMixin,
                      SweepMixin, MemoryMixin, StringMixin, ScreenMixin, ClassicMixin,
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin,
-                     NoiseMixin, StateDisplayMixin):
+                     NoiseMixin, StateDisplayMixin, QoLMixin):
     # Architecture: QBasicTerminal composes Engine (state) + 16 mixins (behavior).
     #
     # Mixin map (each provides specific methods; see TerminalProtocol for contract):
@@ -219,6 +220,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self._init_program_mgmt()
         self._init_profiler()
         self._init_file_handles()
+        self._init_qol()
 
     # ── Backend factory ─────────────────────────────────────────────
 
@@ -344,10 +346,27 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 matches += [s for s in self.subroutines if s.startswith(t)]
                 matches += [v for v in self.variables if v.upper().startswith(t)]
                 matches += [r for r in self.registers if r.upper().startswith(t)]
+                # File path completion for SAVE/LOAD/INCLUDE
+                try:
+                    line_buf = readline.get_line_buffer()
+                    first = line_buf.split()[0].upper() if line_buf.split() else ''
+                    if first in ('SAVE', 'LOAD', 'INCLUDE', 'IMPORT', 'CHAIN', 'MERGE'):
+                        import glob as _glob
+                        pattern = text + '*.qb' if not text.endswith('.qb') else text + '*'
+                        matches = _glob.glob(pattern)
+                except Exception:
+                    pass
                 return matches[state] + ' ' if state < len(matches) else None
             readline.set_completer(completer)
             readline.parse_and_bind('tab: complete')
             readline.set_completer_delims(' \t\n')
+            # Bind F1-F3 to load demos (terminal permitting)
+            try:
+                readline.parse_and_bind('"\\eOP": "DEMO BELL\\n"')
+                readline.parse_and_bind('"\\eOQ": "DEMO GHZ\\n"')
+                readline.parse_and_bind('"\\eOR": "DEMO GROVER\\n"')
+            except Exception:
+                pass
         except ImportError:
             # On Windows, readline is not bundled; try pyreadline3 as fallback
             if sys.platform == 'win32':
@@ -368,10 +387,12 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             except Exception:
                 pass
         self.print_banner()
+        self.io.writeln(f"  Tip: {tip_of_the_day()}")
         self._setup_readline()
         while True:
             try:
-                line = self.io.read_line(self._prompt).strip()
+                prompt = self._status_prompt() if self._prompt == '] ' else self._prompt
+                line = self.io.read_line(prompt).strip()
                 if line:
                     self.process(line)
             except KeyboardInterrupt:
@@ -465,6 +486,11 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'CIRCUIT_DEF': 'cmd_circuit_def', 'APPLY_CIRCUIT': 'cmd_apply_circuit',
         'HELP': 'cmd_help', 'CONSISTENCY': 'cmd_consistency',
         'SEED': 'cmd_seed',
+        # QoL features
+        'COMPARE': 'cmd_compare', 'HEATMAP': 'cmd_heatmap',
+        'ANIMATE': 'cmd_animate', 'QUIZ': 'cmd_quiz',
+        'DIFF': 'cmd_diff', 'PLOT': 'cmd_plot', 'THEME': 'cmd_theme',
+        'CLIP': 'cmd_clip', 'EXPLAIN': 'cmd_explain', 'DRAW': 'cmd_draw',
     }
 
     def dispatch(self, line: str) -> None:
@@ -500,6 +526,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 self.run_immediate(line)
             except Exception as e:
                 self.io.writeln(f"?SYNTAX ERROR: {e}")
+                self._suggest_command(cmd)
 
     def _quit(self) -> None:
         """Exit the REPL by raising EOFError."""
@@ -611,8 +638,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if not self.program:
             self.io.writeln("EMPTY PROGRAM")
             return
-        lines = sorted(self.program.keys())
-        for num in lines:
+        if self._theme_name != 'none' and sys.stdout.isatty():
+            return self.cmd_list_colored()
+        for num in sorted(self.program.keys()):
             self.io.writeln(f"  {num:5d}  {self.program[num]}")
 
     def cmd_new(self, *, silent: bool = False) -> None:
@@ -1174,16 +1202,22 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             _noise_tag = f"noise=depol({m['noise_depol_p']})" if m['noise_depol_p'] > 0 else "noise=on"
             _meta_parts.append(_noise_tag)
         _meta = ', '.join(_meta_parts)
+        _throughput = f", {m['gates']/m['time_s']:.0f} gates/s" if m['time_s'] > 0.001 and m['gates'] > 0 else ""
+        _complexity = self._circuit_complexity()
+        _cx_str = f", {_complexity}" if _complexity else ""
         self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits, "
                         f"{self.shots} shots in {m['time_s']:.2f}s  "
-                        f"[depth={m['depth']}, gates={m['gates']}, {_meta}]")
+                        f"[depth={m['depth']}, gates={m['gates']}{_throughput}, {_meta}{_cx_str}]")
         if method in ('unitary', 'superop'):
             pass  # matrix already displayed above
         elif has_measure and self.last_counts:
             self.print_histogram(self.last_counts)
             self._auto_display()
         else:
-            self.io.writeln("(no MEASURE in program — use STATE or PROBS to inspect)")
+            self.io.writeln("(no MEASURE in program \u2014 use STATE or PROBS to inspect)")
+        # Sound on completion for long runs (#25)
+        if m['time_s'] > 2.0 and sys.stdout.isatty():
+            self.io.write('\a')
 
     def cmd_sample(self, rest: str = '') -> None:
         """SAMPLE [shots] — sample the current circuit using SamplerV2 primitive."""
@@ -1271,8 +1305,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             max_iterations=self._max_iterations, qc=qc,
         )
 
-        self.io.writeln(f"STEP MODE — {len(sorted_lines)} lines, {self.num_qubits} qubits")
-        self.io.writeln("Press ENTER to advance, Q to quit\n")
+        self.io.writeln(f"STEP MODE \u2014 {len(sorted_lines)} lines, {self.num_qubits} qubits")
+        self.io.writeln("Press ENTER to advance, A for auto-play, Q to quit\n")
 
         while ctx.ip < len(sorted_lines):
             ctx.iteration_count += 1
@@ -1299,21 +1333,35 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             except Exception:
                 self.io.writeln("   (state unavailable)")
 
-            # Wait for input
-            try:
-                user = self.io.read_line("   [ENTER/Q] ").strip().upper()
-                if user == 'Q':
-                    self.io.writeln("STOPPED")
+            # Wait for input (or auto-advance)
+            if not getattr(self, '_step_auto', False):
+                try:
+                    user = self.io.read_line("   [ENTER/A/Q] ").strip().upper()
+                    if user == 'Q':
+                        self.io.writeln("STOPPED")
+                        return
+                    if user == 'A' or user.startswith('A'):
+                        self._step_auto = True
+                        delay = 0.5
+                        if len(user) > 1:
+                            try:
+                                delay = float(user[1:]) / 1000
+                            except ValueError:
+                                pass
+                        self._step_delay = delay
+                except (KeyboardInterrupt, EOFError):
+                    self.io.writeln("\nSTOPPED")
                     return
-            except (KeyboardInterrupt, EOFError):
-                self.io.writeln("\nSTOPPED")
-                return
+            if getattr(self, '_step_auto', False):
+                import time as _time
+                _time.sleep(getattr(self, '_step_delay', 0.5))
 
             if isinstance(result, int):
                 ctx.ip = result
             else:
                 ctx.ip += 1
 
+        self._step_auto = False
         self.io.writeln("DONE")
 
     # run_immediate provided by ExecutorMixin.
@@ -2000,12 +2048,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     # cmd_clear provided by ProgramMgmtMixin.
 
     def cmd_undo(self) -> None:
-        if not self._undo_stack:
-            self.io.writeln("NOTHING TO UNDO")
-            return
-        self.program = self._undo_stack.pop()
-        self._parsed = {num: parse_stmt(s) for num, s in self.program.items()}
-        self.io.writeln(f"UNDO ({len(self.program)} lines)")
+        return self.cmd_undo_preview()
 
     # LOCC execution (_locc_run, _locc_exec_line, etc.) provided by LOCCMixin.
 

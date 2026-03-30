@@ -128,7 +128,9 @@ class ProfilerMixin:
                     break
                 self._stats_runs.append(dict(self.last_counts))
             if n > 10 and (trial + 1) % (n // 10) == 0:
-                self.io.write(f"  {100 * (trial + 1) // n}%..." + '\r')
+                from qubasic_core.qol import quantum_spin
+                spin = quantum_spin(trial)
+                self.io.write(f"  {spin} {100 * (trial + 1) // n}%..." + '\r')
         if n > 10:
             self.io.write(" " * 30 + '\r')
         self.io.writeln(f"Collected {len(self._stats_runs)} runs ({n} trials)")
