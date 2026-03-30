@@ -578,59 +578,91 @@ class QoLMixin:
             return
         from qubasic_core.gates import GATE_TABLE, GATE_ALIASES
         gate_desc = {
-            'H': 'put qubit {q} in superposition (Hadamard)',
-            'X': 'flip qubit {q} (NOT gate)',
-            'Y': 'apply Pauli-Y to qubit {q}',
-            'Z': 'flip the phase of qubit {q}',
-            'S': 'apply pi/2 phase to qubit {q}',
-            'T': 'apply pi/4 phase to qubit {q}',
-            'CX': 'entangle qubits {q} (CNOT)',
-            'CZ': 'apply controlled-Z on qubits {q}',
-            'CCX': 'apply Toffoli (AND gate) on qubits {q}',
-            'SWAP': 'swap qubits {q}',
-            'RX': 'rotate qubit around X axis',
-            'RY': 'rotate qubit around Y axis',
-            'RZ': 'rotate qubit around Z axis',
+            'H': 'put qubit {q} in superposition',
+            'X': 'flip qubit {q} (NOT)',
+            'Y': 'Pauli-Y on qubit {q}',
+            'Z': 'flip phase of qubit {q}',
+            'S': 'S-phase on qubit {q}',
+            'T': 'T-phase on qubit {q}',
+            'SDG': 'S-dagger on qubit {q}',
+            'TDG': 'T-dagger on qubit {q}',
+            'SX': 'sqrt(X) on qubit {q}',
+            'ID': 'identity on qubit {q}',
+            'CX': 'CNOT: flip {q1} if {q0}=|1>',
+            'CZ': 'CZ: phase flip if both |1>',
+            'CY': 'controlled-Y',
+            'CH': 'controlled-H',
+            'CCX': 'Toffoli: flip {q2} if {q0},{q1}=|1>',
+            'CSWAP': 'Fredkin: swap if control=|1>',
+            'SWAP': 'swap qubits {q0} and {q1}',
+            'RX': 'rotate {q} around X by {p}',
+            'RY': 'rotate {q} around Y by {p}',
+            'RZ': 'rotate {q} around Z by {p}',
+            'P': 'phase({p}) on qubit {q}',
+            'CP': 'controlled-phase({p})',
+            'CRX': 'controlled-RX({p})',
+            'CRY': 'controlled-RY({p})',
+            'CRZ': 'controlled-RZ({p})',
+            'RXX': 'XX interaction({p})',
+            'RYY': 'YY interaction({p})',
+            'RZZ': 'ZZ interaction({p})',
+            'U': 'general unitary U({p})',
+            'DCX': 'double-CNOT',
+            'ISWAP': 'iSWAP',
         }
         flow_desc = {
-            'FOR': 'begin loop',
-            'NEXT': 'end of loop',
-            'WHILE': 'loop while condition holds',
-            'WEND': 'end of WHILE loop',
-            'IF': 'conditional branch',
-            'GOTO': 'jump to line',
-            'GOSUB': 'call subroutine',
-            'RETURN': 'return from subroutine',
-            'END': 'stop execution',
-            'MEASURE': 'measure all qubits',
-            'BARRIER': 'optimization barrier',
-            'PRINT': 'output text or value',
-            'LET': 'set variable',
-            'DIM': 'create array',
+            'FOR': 'begin loop', 'NEXT': 'end of loop',
+            'WHILE': 'loop while condition holds', 'WEND': 'end of WHILE loop',
+            'IF': 'conditional branch', 'GOTO': 'jump to line',
+            'GOSUB': 'call subroutine', 'RETURN': 'return from subroutine',
+            'END': 'stop execution', 'MEASURE': 'measure all qubits',
+            'BARRIER': 'optimization barrier', 'PRINT': 'output text or value',
+            'LET': 'set variable', 'DIM': 'create array',
+            'DO': 'begin DO loop', 'LOOP': 'end of DO loop',
+            'EXIT': 'exit loop early', 'SELECT': 'begin SELECT CASE',
+            'CASE': 'match case', 'CALL': 'call subroutine',
+            'SUB': 'define subroutine', 'FUNCTION': 'define function',
+            'DATA': 'inline data', 'READ': 'read from DATA',
+            'RESTORE': 'reset DATA pointer',
         }
         for num in sorted(self.program.keys()):
-            stmt = self.program[num].strip()
-            upper = stmt.upper()
-            word = upper.split()[0] if stmt.split() else ''
-            word = GATE_ALIASES.get(word, word)
+            raw = self.program[num].strip()
+            upper = raw.upper()
             if upper.startswith('REM') or upper.startswith("'"):
-                desc = "(comment)"
-            elif word in gate_desc:
-                args = stmt.split(None, 1)[1] if ' ' in stmt else ''
-                desc = gate_desc[word].format(q=args)
-            elif word in flow_desc:
-                desc = flow_desc[word]
-            elif ':' in stmt:
-                desc = f"multiple operations ({stmt.count(':') + 1} parts)"
-            elif word.startswith('@'):
-                desc = f"gate on LOCC register {word[1:]}"
-            elif word == 'SEND':
-                desc = "measure and send classical bit"
-            elif word == 'SHARE':
-                desc = "create shared entanglement"
-            else:
-                desc = stmt
-            self.io.writeln(f"  {num:5d}  {desc}")
+                self.io.writeln(f"  {num:5d}  (comment)")
+                continue
+            # Split on colons and explain each part
+            parts = [s.strip() for s in raw.split(':') if s.strip()]
+            descs = []
+            for part in parts:
+                word = part.split()[0].upper() if part.split() else ''
+                canonical = GATE_ALIASES.get(word, word)
+                if canonical in gate_desc:
+                    info = GATE_TABLE.get(canonical)
+                    args = part.split(None, 1)[1].strip() if ' ' in part else ''
+                    arg_list = [a.strip() for a in args.split(',')]
+                    n_params = info[0] if info else 0
+                    params = arg_list[:n_params]
+                    qubits = arg_list[n_params:]
+                    fmt = gate_desc[canonical]
+                    fmt = fmt.replace('{q}', ', '.join(qubits) if qubits else '?')
+                    fmt = fmt.replace('{p}', ', '.join(params) if params else '?')
+                    for i, q in enumerate(qubits):
+                        fmt = fmt.replace(f'{{q{i}}}', q)
+                    descs.append(fmt)
+                elif word in flow_desc:
+                    descs.append(flow_desc[word])
+                elif word.startswith('@'):
+                    reg = word[1:]
+                    inner = part.split(None, 1)[1].strip() if ' ' in part else ''
+                    descs.append(f"@{reg}: {inner}")
+                elif word == 'SEND':
+                    descs.append("measure and send classical bit")
+                elif word == 'SHARE':
+                    descs.append("create shared entanglement")
+                else:
+                    descs.append(part)
+            self.io.writeln(f"  {num:5d}  {'; '.join(descs)}")
 
     # ── #24: CLIP ─────────────────────────────────────────────────────
 
