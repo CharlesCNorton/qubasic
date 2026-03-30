@@ -27,7 +27,10 @@ class AnalysisMixin:
         Examples: EXPECT Z 0, EXPECT ZZ 0 1, EXPECT X 0"""
         sv = self._active_sv
         if sv is None:
-            self.io.writeln("?NO STATE — RUN first")
+            if self.locc_mode and self.locc and not self.locc.joint:
+                self.io.writeln("?SPLIT mode: use STATE A / STATE B for per-register inspection")
+            else:
+                self.io.writeln("?NO STATE — RUN first")
             return
         parts = rest.split()
         if not parts:

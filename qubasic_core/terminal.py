@@ -286,18 +286,27 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     def _active_sv(self) -> 'np.ndarray | None':
         """Return the current authoritative statevector.
 
-        In LOCC mode, returns the LOCC engine's statevector (joint or
-        register A for split). In standard mode, returns last_sv.
-        Every state-reporting command should use this instead of
-        accessing last_sv directly.
+        In LOCC JOINT mode, returns the joint statevector.
+        In LOCC SPLIT mode, returns None (use STATE A / STATE B instead,
+        since split registers have independent states).
+        In standard mode, returns last_sv.
         """
         if self.locc_mode and self.locc:
             if self.locc.joint:
                 return np.ascontiguousarray(self.locc.sv).ravel()
-            # Split mode: return register A by default
-            return np.ascontiguousarray(self.locc.svs.get('A', None)).ravel() \
-                if self.locc.svs.get('A') is not None else None
+            return None  # split: no single SV; use per-register commands
         return self.last_sv
+
+    def _active_sv_for_reg(self, reg: str) -> 'tuple[np.ndarray, int] | tuple[None, int]':
+        """Return (statevector, n_qubits) for a specific LOCC register."""
+        if not self.locc:
+            return None, 0
+        if self.locc.joint:
+            return np.ascontiguousarray(self.locc.sv).ravel(), self.locc.n_total
+        sv = self.locc.svs.get(reg)
+        if sv is None:
+            return None, 0
+        return np.ascontiguousarray(sv).ravel(), self.locc.get_size(reg)
 
     @property
     def _active_nqubits(self) -> int:
@@ -305,7 +314,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if self.locc_mode and self.locc:
             if self.locc.joint:
                 return self.locc.n_total
-            return self.locc.sizes[0]
+            return 0  # split: no single qubit count
         return self.num_qubits
 
     # ── REPL ──────────────────────────────────────────────────────────
@@ -864,6 +873,162 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     # ── Run ───────────────────────────────────────────────────────────
 
+    def _run_kwargs(self) -> dict:
+        """Build keyword args for backend.run() with optional seed."""
+        kw: dict = {'shots': self.shots}
+        if self._seed is not None:
+            kw['seed_simulator'] = self._seed
+        return kw
+
+    def _select_method(self, qc) -> str:
+        """Choose simulation method, auto-selecting for automatic."""
+        method = self.sim_method
+        if method == 'automatic':
+            if self.num_qubits > 28:
+                method = 'matrix_product_state'
+            elif not self._noise_model and self._is_clifford(qc):
+                method = 'stabilizer'
+        return method
+
+    def _build_backend_opts(self, method: str) -> dict:
+        """Construct AerSimulator options dict for a given method."""
+        opts: dict = {'method': method}
+        if self.sim_device == 'GPU':
+            opts['device'] = 'GPU'
+        noise = self._noise_model
+        if not noise and hasattr(self, '_qubit_noise') and self._qubit_noise:
+            noise = self._build_qubit_noise()
+        if noise:
+            opts['noise_model'] = noise
+        return opts
+
+    def _extract_save_results(self, result) -> None:
+        """Extract SAVE_EXPECT/SAVE_PROBS/SAVE_AMPS into BASIC variables."""
+        data = result.data()
+        for key, val in data.items():
+            if key.startswith('exp_'):
+                self.variables[key[4:]] = float(np.real(val))
+            elif key.startswith('prob_'):
+                var = key[5:]
+                self.variables[var] = val
+                if isinstance(val, np.ndarray):
+                    self.arrays[var] = val.tolist()
+            elif key.startswith('amp_'):
+                var = key[4:]
+                if isinstance(val, np.ndarray):
+                    self.arrays[var] = [complex(v) for v in val]
+                self.variables[var] = val
+
+    def _extract_statevector(self, qc_sv) -> None:
+        """Run the measurement-free circuit copy to get last_sv.
+
+        Includes noise when active so STATE/BLOCH/DENSITY reflect the
+        same noisy state as the histogram.  The SV is from one sample of
+        the noise channel (stochastic), which is physically correct.
+        """
+        try:
+            qc_sv.save_statevector()
+            sv_backend = self._make_backend('statevector', include_noise=True)
+            _sv_kw = {}
+            if self._seed is not None:
+                _sv_kw['seed_simulator'] = self._seed
+            sv_result = sv_backend.run(
+                transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level),
+                **_sv_kw).result()
+            self.last_sv = np.array(sv_result.get_statevector())
+        except Exception:
+            self.last_sv = None
+
+    def _finalize_run(self, qc, method: str, t0: float) -> None:
+        """Update status, manifest, metrics after a successful run."""
+        dt = time.time() - t0
+        depth = qc.depth()
+        n_gates = qc.size()
+        self._update_status(gate_count=n_gates, circuit_depth=depth,
+                           run_time_ms=dt * 1000)
+        self.variables['_DEPTH'] = depth
+        self.variables['_GATES'] = n_gates
+        self.variables['_TIME'] = dt
+        self._run_manifest = {
+            'program': dict(self.program),
+            'num_qubits': self.num_qubits,
+            'shots': self.shots,
+            'method': method,
+            'device': self.sim_device,
+            'seed': self._seed,
+            'noise_depol_p': self._noise_depol_p,
+            'depth': depth,
+            'gates': n_gates,
+            'time_s': dt,
+        }
+
+    def _run_no_measure(self, qc, qc_sv, t0: float) -> None:
+        """Execute the no-MEASURE path: statevector only, no shots."""
+        try:
+            qc_sv.save_statevector()
+            sv_backend = self._make_backend('statevector', include_noise=True)
+            sv_result = sv_backend.run(
+                transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level)).result()
+            self.last_sv = np.array(sv_result.get_statevector())
+            self._extract_save_results(sv_result)
+        except (RuntimeError, ValueError, TypeError, KeyError):
+            self.last_sv = None
+        self.last_counts = None
+        self._finalize_run(qc, self.sim_method, t0)
+        depth = qc.depth()
+        n_gates = qc.size()
+        dt = time.time() - t0
+        self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits "
+                        f"in {dt:.2f}s  [depth={depth}, gates={n_gates}]")
+        self.io.writeln("(no MEASURE — use STATE, PROBS, or BLOCH to inspect)")
+
+    def _run_with_fallback(self, qc, backend_opts: dict, method: str) -> 'Any':
+        """Run the circuit with shots, handling GPU and stabilizer fallbacks."""
+        _noise_key = str(self._noise_model) if self._noise_model else None
+        cache_key = (
+            tuple(sorted(self.program.items())),
+            self.num_qubits, method, self.sim_device,
+            _noise_key,
+            getattr(self, '_fusion_enable', None),
+            getattr(self, '_mps_truncation', None),
+            getattr(self, '_sv_parallel_threshold', None),
+            getattr(self, '_es_approx_error', None),
+        )
+        if self._circuit_cache_key == cache_key and self._circuit_cache is not None:
+            qc_t, backend = self._circuit_cache
+        else:
+            backend = AerSimulator(**backend_opts)
+            qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
+            self._circuit_cache_key = cache_key
+            self._circuit_cache = (qc_t, backend)
+            self._last_transpiled = qc_t
+        try:
+            return backend.run(qc_t, **self._run_kwargs()).result()
+        except KeyboardInterrupt:
+            self.io.writeln("\n?INTERRUPTED")
+            raise
+        except Exception as _sim_err:
+            _err_msg = str(_sim_err).lower()
+            if 'gpu' in _err_msg and 'not supported' in _err_msg:
+                self.io.writeln("?GPU EXECUTION FAILED — falling back to CPU")
+                self.sim_device = 'CPU'
+                self._circuit_cache_key = None
+                self._circuit_cache = None
+                backend_opts.pop('device', None)
+                backend = AerSimulator(**backend_opts)
+                qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
+                return backend.run(qc_t, **self._run_kwargs()).result()
+            elif 'stabilizer' in _err_msg or 'invalid parameters' in _err_msg:
+                self._circuit_cache_key = None
+                self._circuit_cache = None
+                sv_opts = {k: v for k, v in backend_opts.items() if k != 'method'}
+                sv_opts['method'] = 'statevector'
+                self.io.writeln("  (stabilizer failed — falling back to statevector)")
+                backend = AerSimulator(**sv_opts)
+                qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
+                return backend.run(qc_t, **self._run_kwargs()).result()
+            raise
+
     def cmd_run(self) -> None:
         """Execute the stored program."""
         if self.locc_mode:
@@ -872,7 +1037,6 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln("NOTHING TO RUN")
             return
 
-        # Pre-check method-device compatibility
         _unsupported_gpu = {'stabilizer', 'extended_stabilizer', 'unitary', 'superop'}
         if self.sim_device == 'GPU' and self.sim_method in _unsupported_gpu:
             self.io.writeln(f"?METHOD '{self.sim_method}' does not support GPU — "
@@ -893,7 +1057,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln("\n?INTERRUPTED")
             return
         except Exception as e:
-            self.last_circuit = None  # clear stale circuit on build failure
+            self.last_circuit = None
             if hasattr(self, '_error_target') and self._error_target is not None:
                 self._err_code = 1
                 self._err_line = 0
@@ -906,11 +1070,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                         pass
                 self.variables['ERR'] = self._err_code
                 self.variables['ERL'] = self._err_line
-                # Execute the error handler lines directly via PRINT/LET/etc
                 handler_lines = sorted(ln for ln in self.program if ln >= self._error_target)
-                _handler_limit = min(len(handler_lines), 200)
                 for _hi, ln in enumerate(handler_lines):
-                    if _hi >= _handler_limit:
+                    if _hi >= 200:
                         self.io.writeln("?ERROR HANDLER LIMIT (200 lines)")
                         break
                     stmt = self.program[ln].strip().upper()
@@ -922,192 +1084,28 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 self.io.writeln(f"?BUILD ERROR: {e}")
             return
 
-        # Copy before adding measurements (for statevector extraction)
         qc_sv = qc.copy()
 
-        # Unitary/superop methods need save instructions, not measurements
         if self.sim_method in ('unitary', 'superop'):
-            if self.sim_method == 'unitary':
-                qc.save_unitary(label='unitary')
-            else:
-                qc.save_superop(label='superop')
+            qc.save_unitary(label='unitary') if self.sim_method == 'unitary' else qc.save_superop(label='superop')
         elif has_measure:
             qc.measure_all()
 
         self.last_circuit = qc
-        self._last_transpiled = None  # set after transpile
+        self._last_transpiled = None
 
-        # No-MEASURE path: run statevector simulation, extract save results
+        # No-MEASURE path
         if not has_measure and self.sim_method not in ('unitary', 'superop'):
-            try:
-                qc_sv.save_statevector()
-                sv_backend = self._make_backend('statevector')
-                sv_qc = transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level)
-                sv_result = sv_backend.run(sv_qc).result()
-                self.last_sv = np.array(sv_result.get_statevector())
-                # Extract SAVE_EXPECT / SAVE_PROBS / SAVE_AMPS results
-                data = sv_result.data()
-                for key, val in data.items():
-                    if key.startswith('exp_'):
-                        self.variables[key[4:]] = float(np.real(val))
-                    elif key.startswith('prob_'):
-                        var = key[5:]
-                        self.variables[var] = val
-                        if isinstance(val, np.ndarray):
-                            self.arrays[var] = val.tolist()
-                    elif key.startswith('amp_'):
-                        var = key[4:]
-                        if isinstance(val, np.ndarray):
-                            self.arrays[var] = [complex(v) for v in val]
-                        self.variables[var] = val
-            except (RuntimeError, ValueError, TypeError, KeyError) as _sv_err:
-                self.last_sv = None
-            self.last_counts = None
-            dt = time.time() - t0
-            depth = qc.depth()
-            n_gates = qc.size()
-            self._update_status(gate_count=n_gates, circuit_depth=depth,
-                               run_time_ms=dt * 1000)
-            # Expose circuit metrics as variables for programmatic access
-            self.variables['_DEPTH'] = depth
-            self.variables['_GATES'] = n_gates
-            self.variables['_TIME'] = dt
-            self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits "
-                            f"in {dt:.2f}s  [depth={depth}, gates={n_gates}]")
-            self.io.writeln("(no MEASURE — use STATE, PROBS, or BLOCH to inspect)")
+            self._run_no_measure(qc, qc_sv, t0)
             return
 
-        # Run with shots (cache transpiled circuit if program unchanged)
+        # Run with shots
+        method = self._select_method(qc)
+        backend_opts = self._build_backend_opts(method)
         try:
-            method = self.sim_method
-            if method == 'automatic':
-                if self.num_qubits > 28:
-                    method = 'matrix_product_state'
-                elif not self._noise_model and self._is_clifford(qc):
-                    method = 'stabilizer'
-            # Backend construction is centralized in _make_backend
-            # but we still need backend_opts for the fallback paths below
-            backend_opts = {'method': method}
-            if self.sim_device == 'GPU':
-                backend_opts['device'] = 'GPU'
-            noise = self._noise_model
-            if not noise and hasattr(self, '_qubit_noise') and self._qubit_noise:
-                noise = self._build_qubit_noise()
-            if noise:
-                backend_opts['noise_model'] = noise
-            # Content-based noise key: use str repr instead of id() so
-            # equivalent noise models share the cache.
-            _noise_key = str(self._noise_model) if self._noise_model else None
-            cache_key = (
-                tuple(sorted(self.program.items())),
-                self.num_qubits, method, self.sim_device,
-                _noise_key,
-                getattr(self, '_fusion_enable', None),
-                getattr(self, '_mps_truncation', None),
-                getattr(self, '_sv_parallel_threshold', None),
-                getattr(self, '_es_approx_error', None),
-            )
-            if self._circuit_cache_key == cache_key and self._circuit_cache is not None:
-                qc_t, backend = self._circuit_cache
-            else:
-                backend = AerSimulator(**backend_opts)
-                qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
-                self._circuit_cache_key = cache_key
-                self._circuit_cache = (qc_t, backend)
-                self._last_transpiled = qc_t
-            try:
-                _run_kw = {'shots': self.shots}
-                if self._seed is not None:
-                    _run_kw['seed_simulator'] = self._seed
-                result = backend.run(qc_t, **_run_kw).result()
-            except KeyboardInterrupt:
-                self.io.writeln("\n?INTERRUPTED")
-                return
-            except Exception as _sim_err:
-                _err_msg = str(_sim_err).lower()
-                if 'gpu' in _err_msg and 'not supported' in _err_msg:
-                    self.io.writeln(f"?GPU EXECUTION FAILED: {_sim_err}")
-                    self.io.writeln("  Falling back to CPU")
-                    self.sim_device = 'CPU'
-                    self._circuit_cache_key = None
-                    self._circuit_cache = None
-                    backend_opts.pop('device', None)
-                    backend = AerSimulator(**backend_opts)
-                    qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
-                    _run_kw = {'shots': self.shots}
-                    if self._seed is not None:
-                        _run_kw['seed_simulator'] = self._seed
-                    result = backend.run(qc_t, **_run_kw).result()
-                elif 'stabilizer' in _err_msg or 'invalid parameters' in _err_msg:
-                    self._circuit_cache_key = None
-                    self._circuit_cache = None
-                    sv_opts = {k: v for k, v in backend_opts.items()
-                               if k != 'method'}
-                    sv_opts['method'] = 'statevector'
-                    self.io.writeln(f"  (stabilizer failed — falling back to statevector)")
-                    backend = AerSimulator(**sv_opts)
-                    qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
-                    _run_kw = {'shots': self.shots}
-                    if self._seed is not None:
-                        _run_kw['seed_simulator'] = self._seed
-                    result = backend.run(qc_t, **_run_kw).result()
-                    # Validate fallback produced usable counts
-                    if has_measure:
-                        _fb_counts = result.get_counts()
-                        if not _fb_counts:
-                            self.io.writeln("?FALLBACK PRODUCED NO RESULTS")
-                            return
-                else:
-                    raise
-            # Extract results based on method
-            if method in ('unitary', 'superop'):
-                self.last_counts = None
-                data = result.data()
-                label = 'unitary' if method == 'unitary' else 'superop'
-                mat = data.get(label)
-                if mat is not None:
-                    mat_np = np.asarray(mat)
-                    self.variables[label] = mat_np
-                    dim = mat_np.shape[0]
-                    self.io.writeln(f"\n  {label.upper()} ({dim}x{dim}):")
-                    if dim <= 16:
-                        for i in range(dim):
-                            row = '  '.join(f"{v.real:+.3f}{v.imag:+.3f}j" for v in mat_np[i])
-                            self.io.writeln(f"    {row}")
-                    else:
-                        self.io.writeln(f"    (too large to display — stored in variable '{label}')")
-            else:
-                try:
-                    self.last_counts = dict(result.get_counts())
-                except Exception:
-                    # Simulation method failed silently (e.g. stabilizer on non-Clifford)
-                    self.io.writeln(f"  (method '{method}' produced no counts — falling back to statevector)")
-                    self._circuit_cache_key = None
-                    sv_opts = {k: v for k, v in backend_opts.items() if k != 'method'}
-                    sv_opts['method'] = 'statevector'
-                    sv_backend = AerSimulator(**sv_opts)
-                    sv_qc = transpile(qc, sv_backend, optimization_level=self._transpile_opt_level)
-                    _sv_kw = {'shots': self.shots}
-                    if self._seed is not None:
-                        _sv_kw['seed_simulator'] = self._seed
-                    result = sv_backend.run(sv_qc, **_sv_kw).result()
-                    self.last_counts = dict(result.get_counts())
-            # Extract save instruction results into BASIC variables
-            data = result.data()
-            for key, val in data.items():
-                if key.startswith('exp_'):
-                    var = key[4:]
-                    self.variables[var] = float(np.real(val))
-                elif key.startswith('prob_'):
-                    var = key[5:]
-                    self.variables[var] = val
-                    if isinstance(val, np.ndarray):
-                        self.arrays[var] = val.tolist()
-                elif key.startswith('amp_'):
-                    var = key[4:]
-                    if isinstance(val, np.ndarray):
-                        self.arrays[var] = [complex(v) for v in val]
-                    self.variables[var] = val
+            result = self._run_with_fallback(qc, backend_opts, method)
+        except KeyboardInterrupt:
+            return
         except Exception as e:
             _err = str(e).lower()
             if 'gpu' in _err:
@@ -1123,54 +1121,58 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln(f"?RUNTIME ERROR [{subsys}]: {e}")
             return
 
-        # Get statevector from the measurement-free copy
-        if method not in ('unitary', 'superop'):
+        # Extract results
+        if method in ('unitary', 'superop'):
+            self.last_counts = None
+            data = result.data()
+            label = method
+            mat = data.get(label)
+            if mat is not None:
+                mat_np = np.asarray(mat)
+                self.variables[label] = mat_np
+                dim = mat_np.shape[0]
+                self.io.writeln(f"\n  {label.upper()} ({dim}x{dim}):")
+                if dim <= 16:
+                    for i in range(dim):
+                        row = '  '.join(f"{v.real:+.3f}{v.imag:+.3f}j" for v in mat_np[i])
+                        self.io.writeln(f"    {row}")
+                else:
+                    self.io.writeln(f"    (too large — stored in variable '{label}')")
+        else:
             try:
-                qc_sv.save_statevector()
-                sv_backend = self._make_backend('statevector')
-                sv_result = sv_backend.run(transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level)).result()
-                self.last_sv = np.array(sv_result.get_statevector())
+                self.last_counts = dict(result.get_counts())
             except Exception:
-                self.last_sv = None
+                self.io.writeln(f"  (method '{method}' produced no counts — falling back)")
+                self._circuit_cache_key = None
+                sv_opts = {k: v for k, v in backend_opts.items() if k != 'method'}
+                sv_opts['method'] = 'statevector'
+                sv_backend = AerSimulator(**sv_opts)
+                sv_qc = transpile(qc, sv_backend, optimization_level=self._transpile_opt_level)
+                result = sv_backend.run(sv_qc, **self._run_kwargs()).result()
+                self.last_counts = dict(result.get_counts())
+
+        self._extract_save_results(result)
+
+        # Statevector extraction (noisy when noise is active)
+        if method not in ('unitary', 'superop'):
+            self._extract_statevector(qc_sv)
         else:
             self.last_sv = None
 
-        dt = time.time() - t0
-
-        # Update status registers
-        depth = qc.depth()
-        n_gates = qc.size()
-        self._update_status(gate_count=n_gates, circuit_depth=depth,
-                           run_time_ms=dt * 1000)
-        # Expose circuit metrics as variables for programmatic access
-        self.variables['_DEPTH'] = depth
-        self.variables['_GATES'] = n_gates
-        self.variables['_TIME'] = dt
-
-        # Replayable manifest: capture everything needed to reproduce this run
-        self._run_manifest = {
-            'program': dict(self.program),
-            'num_qubits': self.num_qubits,
-            'shots': self.shots,
-            'method': method,
-            'device': self.sim_device,
-            'seed': self._seed,
-            'noise_depol_p': self._noise_depol_p,
-            'depth': depth,
-            'gates': n_gates,
-            'time_s': dt,
-        }
+        self._finalize_run(qc, method, t0)
 
         # Display results with execution metadata
-        _meta_parts = [f"method={method}"]
-        if self.sim_device != 'CPU':
-            _meta_parts.append(f"device={self.sim_device}")
+        m = self._run_manifest
+        _meta_parts = [f"method={m['method']}"]
+        if m['device'] != 'CPU':
+            _meta_parts.append(f"device={m['device']}")
         if self._noise_model is not None:
-            _noise_tag = f"noise=depol({self._noise_depol_p})" if self._noise_depol_p > 0 else "noise=on"
+            _noise_tag = f"noise=depol({m['noise_depol_p']})" if m['noise_depol_p'] > 0 else "noise=on"
             _meta_parts.append(_noise_tag)
         _meta = ', '.join(_meta_parts)
         self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits, "
-                        f"{self.shots} shots in {dt:.2f}s  [depth={depth}, gates={n_gates}, {_meta}]")
+                        f"{self.shots} shots in {m['time_s']:.2f}s  "
+                        f"[depth={m['depth']}, gates={m['gates']}, {_meta}]")
         if method in ('unitary', 'superop'):
             pass  # matrix already displayed above
         elif has_measure and self.last_counts:
@@ -1286,7 +1288,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             try:
                 qc_tmp = qc.copy()
                 qc_tmp.save_statevector()
-                sv_b = self._make_backend('statevector')
+                sv_b = self._make_backend('statevector', include_noise=True)
                 sv_r = sv_b.run(transpile(qc_tmp, sv_b, optimization_level=self._transpile_opt_level)).result()
                 sv = np.array(sv_r.get_statevector())
                 self._print_sv_compact(sv)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qubasic"
-version = "0.3.1"
+version = "0.4.0"
 description = "Quantum BASIC Interactive Terminal"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,6 +52,9 @@ packages = ["qubasic_core"]
 
 [tool.setuptools.data-files]
 "share/qubasic/examples" = ["examples/*.qb"]
+
+[tool.pytest.ini_options]
+markers = ["real_sim: test requires real Qiskit Aer simulation (no mock)"]
 
 [tool.coverage.run]
 source = ["qubasic_core"]

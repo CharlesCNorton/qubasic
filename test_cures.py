@@ -25,6 +25,8 @@ import unittest
 import tempfile
 import builtins
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 from qubasic_core.terminal import QBasicTerminal
 from qubasic_core.errors import (
@@ -1683,6 +1685,308 @@ class TestPropertyBased(unittest.TestCase):
             for state in t.last_counts:
                 self.assertTrue(all(c == state[0] for c in state),
                     f"GHZ-{n} produced non-GHZ state: {state}")
+
+
+# =====================================================================
+# New feature tests (noise, GPU, SEED, VERSION, PROBE, CONSISTENCY, etc.)
+# =====================================================================
+
+@pytest.mark.real_sim
+class TestNoiseEffects(unittest.TestCase):
+    """Noise must actually change measurement outcomes."""
+
+    def test_depolarizing_changes_single_qubit(self):
+        """X gate under heavy depolarizing must leak to |0>."""
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.shots = 2000
+        t.cmd_noise('depolarizing 0.3')
+        t.process('10 X 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, out = capture(t.cmd_run)
+        p0 = t.last_counts.get('0', 0) / 2000
+        self.assertGreater(p0, 0.03, f"Noise should leak to |0>, got P(0)={p0:.3f}")
+
+    def test_clean_is_pure(self):
+        """Without noise, X gate should produce pure |1>."""
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.shots = 500
+        t.process('10 X 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertEqual(t.last_counts.get('0', 0), 0)
+
+    def test_noise_off_restores_clean(self):
+        """NOISE OFF must restore noiseless behavior."""
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.shots = 500
+        t.cmd_noise('depolarizing 0.5')
+        t.cmd_noise('off')
+        t.process('10 X 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertEqual(t.last_counts.get('0', 0), 0)
+
+    def test_noise_info(self):
+        """NOISE INFO should print model details."""
+        t = QBasicTerminal()
+        t.cmd_noise('depolarizing 0.1')
+        _, out = capture(t.cmd_noise, 'INFO')
+        self.assertIn('depol_p', out)
+        self.assertIn('0.1', out)
+
+    def test_bell_noise_breaks_correlations(self):
+        """Heavy noise on Bell state should produce error states."""
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 2000
+        t.cmd_noise('depolarizing 0.3')
+        t.process('10 H 0', track_undo=False)
+        t.process('20 CX 0,1', track_undo=False)
+        t.process('30 MEASURE', track_undo=False)
+        _, out = capture(t.cmd_run)
+        errors = t.last_counts.get('01', 0) + t.last_counts.get('10', 0)
+        self.assertGreater(errors / 2000, 0.02)
+
+
+@pytest.mark.real_sim
+class TestLOCCNoise(unittest.TestCase):
+    """LOCC engine noise integration."""
+
+    def test_locc_noise_propagates(self):
+        """Noise param should reach LOCC engine both orderings."""
+        t = QBasicTerminal()
+        t.cmd_noise('depolarizing 0.2')
+        t.cmd_locc('JOINT 1 1')
+        self.assertAlmostEqual(t.locc.noise_param, 0.2)
+        t.cmd_locc('OFF')
+
+        t2 = QBasicTerminal()
+        t2.cmd_locc('JOINT 1 1')
+        t2.cmd_noise('depolarizing 0.3')
+        self.assertAlmostEqual(t2.locc.noise_param, 0.3)
+
+    def test_locc_noise_breaks_bell(self):
+        """Noisy LOCC Bell pair should show decorrelation."""
+        t = QBasicTerminal()
+        t.cmd_noise('depolarizing 0.3')
+        t.cmd_locc('JOINT 2 2')
+        t.shots = 2000
+        t.process('10 SHARE A 0, B 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, out = capture(t.cmd_run)
+        total = sum(t.last_counts.values())
+        errors = sum(c for s, c in t.last_counts.items()
+                     if '|' in s and s.split('|')[0] != s.split('|')[1])
+        self.assertGreater(errors / total, 0.05)
+
+    def test_non_depolarizing_warns(self):
+        """Non-depolarizing noise + LOCC should warn."""
+        t = QBasicTerminal()
+        t.cmd_noise('amplitude_damping 0.1')
+        _, out = capture(t.cmd_locc, 'JOINT 1 1')
+        self.assertIn('WARNING', out)
+
+
+@pytest.mark.real_sim
+class TestSeedReproducibility(unittest.TestCase):
+    """SEED must produce identical results."""
+
+    def test_same_seed_same_counts(self):
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 100
+        t.process('10 H 0', track_undo=False)
+        t.process('20 CX 0,1', track_undo=False)
+        t.process('30 MEASURE', track_undo=False)
+        t.cmd_seed('42')
+        _, _ = capture(t.cmd_run)
+        run1 = dict(t.last_counts)
+        t.cmd_seed('42')
+        t._circuit_cache_key = None
+        _, _ = capture(t.cmd_run)
+        run2 = dict(t.last_counts)
+        self.assertEqual(run1, run2)
+
+    def test_different_seed_different_counts(self):
+        t = QBasicTerminal()
+        t.num_qubits = 3
+        t.shots = 50
+        t.process('10 H 0', track_undo=False)
+        t.process('20 H 1', track_undo=False)
+        t.process('30 H 2', track_undo=False)
+        t.process('40 MEASURE', track_undo=False)
+        t.cmd_seed('1')
+        _, _ = capture(t.cmd_run)
+        run1 = dict(t.last_counts)
+        t.cmd_seed('9999')
+        t._circuit_cache_key = None
+        _, _ = capture(t.cmd_run)
+        run2 = dict(t.last_counts)
+        # With 8 states and 50 shots, different seeds should differ
+        self.assertNotEqual(run1, run2)
+
+
+@pytest.mark.real_sim
+class TestVersionAndProbe(unittest.TestCase):
+    """VERSION and PROBE commands."""
+
+    def test_version(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_version)
+        self.assertIn('QUBASIC', out)
+        self.assertIn('Qiskit', out)
+        self.assertIn('Features', out)
+
+    def test_probe_passes_core(self):
+        """PROBE should pass CPU, noise, LOCC, and conditional tests."""
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_probe)
+        # Extract PROBE results lines
+        result_lines = [l.strip() for l in out.split('\n')
+                        if 'PASS' in l or 'FAIL' in l]
+        for required in ['CPU Bell', 'Noise depol', 'LOCC JOINT', 'Conditional ctrl']:
+            found = any(required in l and 'PASS' in l for l in result_lines)
+            self.assertTrue(found, f"{required} did not PASS in PROBE output: {result_lines}")
+
+    def test_method_capability(self):
+        """METHOD with no args should list available methods."""
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_method, '')
+        self.assertIn('automatic', out)
+        self.assertIn('statevector', out)
+
+
+@pytest.mark.real_sim
+class TestConsistency(unittest.TestCase):
+    """CONSISTENCY command cross-checks."""
+
+    def test_bell_consistent(self):
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 500
+        t.process('10 H 0', track_undo=False)
+        t.process('20 CX 0,1', track_undo=False)
+        t.process('30 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        _, out = capture(t.cmd_consistency)
+        self.assertIn('ALL CONSISTENT', out)
+        self.assertNotIn('FAIL', out)
+
+
+@pytest.mark.real_sim
+class TestStateAfterLOCC(unittest.TestCase):
+    """EXPECT/DENSITY/BLOCH should work after LOCC runs."""
+
+    def test_expect_after_locc_joint(self):
+        t = QBasicTerminal()
+        t.cmd_locc('JOINT 2 2')
+        t.process('10 SHARE A 0, B 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        _, out = capture(t.cmd_expect, 'Z 0')
+        self.assertNotIn('NO STATE', out)
+        self.assertIn('<Z>', out)
+
+    def test_density_after_locc(self):
+        t = QBasicTerminal()
+        t.cmd_locc('JOINT 1 1')
+        t.process('10 SHARE A 0, B 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        _, out = capture(t.cmd_density)
+        self.assertIn('Purity', out)
+
+    def test_split_mode_warns(self):
+        """SPLIT mode should tell user to use per-register commands."""
+        t = QBasicTerminal()
+        t.cmd_locc('SPLIT 1 1')
+        t.process('10 @A H 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        _, out = capture(t.cmd_expect, 'Z 0')
+        self.assertIn('SPLIT', out)
+
+
+@pytest.mark.real_sim
+class TestDemoVerification(unittest.TestCase):
+    """Demo self-verification passes under clean conditions."""
+
+    def test_bell_demo_verifies(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_demo, 'BELL')
+        self.assertIn('VERIFY PASS', out)
+
+    def test_grover_demo_verifies(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_demo, 'GROVER')
+        self.assertIn('VERIFY PASS', out)
+
+    def test_bell_demo_fails_under_noise(self):
+        t = QBasicTerminal()
+        t.cmd_noise('depolarizing 0.3')
+        _, out = capture(t.cmd_demo, 'BELL')
+        self.assertIn('VERIFY FAIL', out)
+
+
+@pytest.mark.real_sim
+class TestHelpAndCatalog(unittest.TestCase):
+    """HELP STATUS and CATALOG."""
+
+    def test_help_status(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_help, 'STATUS')
+        self.assertIn('native', out)
+        self.assertIn('commands registered', out)
+
+    def test_catalog_backends(self):
+        t = QBasicTerminal()
+        _, out = capture(t.cmd_catalog)
+        self.assertIn('Aer/statevector', out)
+        self.assertIn('LOCC/numpy-joint', out)
+
+
+@pytest.mark.real_sim
+class TestRunManifest(unittest.TestCase):
+    """Run manifest captures execution parameters."""
+
+    def test_manifest_keys(self):
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.shots = 10
+        t.process('10 H 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        m = t._run_manifest
+        for key in ['program', 'num_qubits', 'shots', 'method', 'device',
+                     'seed', 'noise_depol_p', 'depth', 'gates', 'time_s']:
+            self.assertIn(key, m, f"Missing manifest key: {key}")
+
+    def test_manifest_seed_captured(self):
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.shots = 10
+        t.cmd_seed('77')
+        t.process('10 H 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, _ = capture(t.cmd_run)
+        self.assertEqual(t._run_manifest['seed'], 77)
+
+
+@pytest.mark.real_sim
+class TestMethodDevicePrecheck(unittest.TestCase):
+    """Method-device incompatibilities caught before execution."""
+
+    def test_stabilizer_gpu_blocked(self):
+        t = QBasicTerminal()
+        t.sim_method = 'stabilizer'
+        t.sim_device = 'GPU'
+        t.process('10 H 0', track_undo=False)
+        t.process('20 MEASURE', track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertIn('does not support GPU', out)
 
 
 # =====================================================================

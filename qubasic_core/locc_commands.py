@@ -126,6 +126,9 @@ class LOCCCommandsMixin:
             self.io.writeln(f"  Joint statevector — use SHARE for pre-shared entanglement")
         if peak > 30:
             self.io.writeln(f"  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
+        if self._noise_model and noise_p == 0:
+            self.io.writeln(f"  WARNING: non-depolarizing noise model active but not supported "
+                           f"in LOCC numpy path. Only NOISE depolarizing propagates to LOCC.")
 
     def cmd_send(self, rest):
         if not self.locc_mode:

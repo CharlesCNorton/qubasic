@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 (2026-03-29)
+
+- **Noise correctness**: transpile with optimization_level=0 when noisy so gates survive for noise attachment
+- **Noisy statevector**: STATE/BLOCH/DENSITY now reflect the noisy executed state, not the ideal state
+- **LOCC noise**: Monte Carlo depolarizing noise in the numpy LOCC engine with per-shot execution
+- **GPU**: _make_backend centralizes device flag to all execution paths; graceful probe and fallback
+- **cmd_run decomposition**: extracted _run_no_measure, _run_with_fallback, _extract_statevector, _finalize_run, _select_method, _build_backend_opts, _run_kwargs
+- **State consistency**: _active_sv/_active_nqubits unify LOCC and standard paths for all state commands
+- **SPLIT mode**: EXPECT/DENSITY correctly report that per-register commands are needed
+- **Non-depolarizing noise warning**: entering LOCC mode with unsupported noise types warns explicitly
+- SEED command for deterministic reproducible results
+- VERSION command with build ID, simulator versions, and feature flags
+- PROBE command: one-shot exercise of CPU, noise, LOCC, conditional, and combined paths
+- CONSISTENCY command: cross-check SV norm, purity, Bloch vectors, EXPECT, and histogram
+- METHOD capability map: real probing of each method and GPU availability
+- HELP STATUS: tags all 93 commands as native/experimental/partial
+- CATALOG shows backend behind each SYS routine
+- RUN prints method, device, noise params in summary line
+- Demo self-verification: Bell, GHZ, Grover, Deutsch, BV, Superdense auto-check with pass/fail thresholds
+- Teleportation fidelity output with X-basis verification
+- LOCCINFO: entanglement creation, correction log, branch statistics, noise status
+- Method-device pre-check blocks incompatible combinations before execution
+- Runtime errors identify failing subsystem (GPU/noise/stabilizer/MPS)
+- Run manifest captures all execution parameters for replay
+- Correction log in LOCC engine tracks SEND outcomes
+- NOISE INFO prints exact channels, operations, qubits
+- 25 new tests covering noise, LOCC noise, SEED, VERSION, PROBE, CONSISTENCY, demos, state-after-LOCC, manifest, and method-device pre-check (196 total, up from 171)
+- real_sim pytest marker for tests requiring actual Qiskit Aer simulation
+
 ## 0.3.1 (2026-03-29)
 
 - Fix f-string backslash escapes that broke import on Python 3.10/3.11
