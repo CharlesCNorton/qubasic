@@ -14,7 +14,7 @@ bitwise operators, EXIT FOR/WHILE/DO, SYS INSTALL, UNITARY multi-qubit,
 CTRL custom gate, INV parametric, MEASURE_X/Y, SYNDROME, LOCC MEAS/CTRL,
 parser Stmt types, errors hierarchy, IOPort protocol.
 
-Run: python test_cures.py
+Run: python test_features.py
 """
 
 import sys
@@ -1490,7 +1490,7 @@ class TestIntegration(unittest.TestCase):
             self.assertGreater(counts.get(state, 0), 300)
 
     # Grover correctness is tested in test_qubasic.py with real simulation;
-    # test_cures.py runs under auto-mock which returns random counts.
+    # test_features.py runs under auto-mock which returns random counts.
 
 
 # =====================================================================
@@ -1664,7 +1664,7 @@ class TestPropertyBased(unittest.TestCase):
 
     @given(st.integers(min_value=1, max_value=8))
     @settings(max_examples=5)
-    @unittest.skip("requires real simulation; test_cures runs under auto-mock")
+    @unittest.skip("requires real simulation; test_features runs under auto-mock")
     def test_ghz_state_valid(self, n):
         """GHZ state on n qubits should produce only all-zeros or all-ones."""
         t = QBasicTerminal()
@@ -2283,7 +2283,7 @@ class TestGapCoverage(unittest.TestCase):
 
 
 # =====================================================================
-# Hypothesis property-based tests (cure #5)
+# Hypothesis property-based tests
 # =====================================================================
 
 from hypothesis import given, strategies as st, settings as hyp_settings
@@ -2339,7 +2339,7 @@ class TestPropertyBasedExtended(unittest.TestCase):
 
 
 # =====================================================================
-# CLI integration tests (cure #6)
+# CLI integration tests
 # =====================================================================
 
 class TestCLIIntegration(unittest.TestCase):
@@ -2362,7 +2362,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.t.dispatch('   ')
 
     def test_seed_dispatch_with_arg(self):
-        """SEED 42 should work via dispatch (cure #1 verification)."""
+        """SEED 42 should work via dispatch."""
         self.t.dispatch('SEED 42')
         self.assertEqual(self.t._seed, 42)
 
@@ -2373,14 +2373,14 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIsNone(self.t._seed)
 
     def test_locc_non_numeric_args(self):
-        """LOCC with non-numeric args should not crash (cure #3)."""
+        """LOCC with non-numeric args should not crash."""
         buf = _capture_io(self.t)
         self.t.cmd_locc('4 banana')
         output = buf.get_output()
         self.assertIn('integer', output.lower())
 
     def test_method_no_args_no_crash(self):
-        """METHOD with no args should not crash (cure #2 context)."""
+        """METHOD with no args should not crash."""
         buf = _capture_io(self.t)
         # This exercises the GPU probe path that had the _pqc bug
         self.t.cmd_method('')
@@ -2388,7 +2388,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIn('METHOD', output)
 
     def test_cli_seed_flag(self):
-        """--seed flag should be accepted by CLI (cure #14)."""
+        """--seed flag should be accepted by CLI."""
         import subprocess, json
         result = subprocess.run(
             [sys.executable, os.path.join(os.path.dirname(__file__), 'qubasic.py'),
@@ -2419,8 +2419,8 @@ def _capture_io(terminal):
 
 
 @pytest.mark.real_sim
-class TestCuredBehaviors(unittest.TestCase):
-    """Real-simulation checks for behaviors fixed in this round."""
+class TestRegressionBehaviors(unittest.TestCase):
+    """Real-simulation checks for language and execution behaviors."""
 
     def test_multiline_if_executes_only_taken_branch(self):
         t = QBasicTerminal(); t.num_qubits = 1; t.shots = 100

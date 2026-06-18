@@ -2,7 +2,7 @@
 
 ## 0.6.0 (2026-06-18)
 
-Correctness, scalability, and usability pass (61 fixes).
+Correctness, scalability, and usability improvements.
 
 ### Fixed
 - **Time-travel debugging now works**: STEP records statevector checkpoints, so REWIND/FORWARD/HISTORY operate (previously `_checkpoint_sv` was never called).

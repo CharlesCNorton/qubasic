@@ -57,13 +57,13 @@ def mock_aer(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _auto_mock_for_cures(request, monkeypatch):
-    """Auto-apply mock AerSimulator for test_cures.py tests.
+def _auto_mock_for_features(request, monkeypatch):
+    """Auto-apply mock AerSimulator for test_features.py tests.
 
     Tests marked with @pytest.mark.real_sim skip the mock and use
     the real Qiskit Aer simulator.
     """
-    if 'test_cures' in request.node.nodeid:
+    if 'test_features' in request.node.nodeid:
         if request.node.get_closest_marker('real_sim'):
             return  # skip mock for real-simulation tests
         from qubasic_core.mock_backend import patch_aer
