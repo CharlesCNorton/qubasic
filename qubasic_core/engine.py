@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum, auto
+from typing import Any
 import numpy as np
 from qubasic_core.patterns import (
     RE_LINE_NUM, RE_DEF_SINGLE, RE_DEF_BEGIN, RE_REG_INDEX,
@@ -79,7 +80,7 @@ try:
     from rich.panel import Panel as _RichPanel
     from rich.text import Text as _RichText
     _RICH = True
-    _console = _RichConsole(highlight=False)
+    _console: Any = _RichConsole(highlight=False)
 except ImportError:
     _RICH = False
     _console = None

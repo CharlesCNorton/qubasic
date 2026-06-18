@@ -182,7 +182,7 @@ class AnalysisMixin:
             return
         n = self._active_nqubits
         sv = np.ascontiguousarray(sv).ravel()
-        checks = []
+        checks: list = []
 
         # 1. SV normalization
         norm = float(np.sum(np.abs(sv)**2))

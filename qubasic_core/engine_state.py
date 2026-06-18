@@ -71,6 +71,7 @@ class Engine:
         self._circuit_cache_key: Any = None
         self._circuit_cache: Any = None
         self._pending_set_state: Any = None  # immediate SET_STATE for next RUN
+        self._poke_state_prep: dict[Any, Any] = {}  # qubit prep from POKE $0100
 
         # LOCC
         self.locc: Any = None

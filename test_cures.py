@@ -2494,6 +2494,142 @@ class TestCuredBehaviors(unittest.TestCase):
         self.assertIn('4', out)
 
 
+class TestCommandSurfaceCoverage(unittest.TestCase):
+    """Drive the broad command surface (under the fast mock) for crash-safety
+    and coverage: QoL, program management, debug, screen, and memory commands."""
+
+    def _ready(self):
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 20
+        t.process('10 H 0', track_undo=False)
+        t.process('20 CX 0,1', track_undo=False)
+        t.process('30 MEASURE', track_undo=False)
+        capture(t.cmd_run)
+        return t
+
+    def test_qol_surface(self):
+        import builtins
+        t = self._ready()
+        for fn, arg in [
+            (t.cmd_draw, '0'), (t.cmd_draw, ''), (t.cmd_list_colored, None),
+            (t.cmd_compare, 'statevector stabilizer'), (t.cmd_heatmap, ''),
+            (t.cmd_plot, 'a 0 1 3'), (t.cmd_animate, 'a 0 1 2 0'),
+            (t.cmd_theme, ''), (t.cmd_theme, 'retro'), (t.cmd_theme, 'none'),
+            (t.cmd_theme, 'bogus'), (t.cmd_explain, ''), (t.cmd_clip, ''),
+        ]:
+            if arg is None:
+                _, out = capture(fn)
+            else:
+                _, out = capture(fn, arg)
+            self.assertIsInstance(out, str)
+        capture(t.cmd_bank, '1')
+        capture(t.cmd_bank, '0')
+        capture(t.cmd_diff, '1')
+        orig = builtins.input
+        builtins.input = lambda p='': 'A'
+        try:
+            capture(t.cmd_quiz)
+        finally:
+            builtins.input = orig
+        from qubasic_core.qol import (tip_of_the_day, did_you_mean,
+                                      quantum_spin, braille_bloch)
+        self.assertIsInstance(tip_of_the_day(), str)
+        self.assertIsNone(did_you_mean('BLOCH'))
+        self.assertIsInstance(did_you_mean('BLASCH'), (str, type(None)))
+        self.assertIsInstance(quantum_spin(3), str)
+        self.assertTrue(braille_bloch(0.5, 0.5, 0.5))
+        self.assertIsInstance(t._status_prompt(), str)
+        capture(t._suggest_command, 'XYZ')
+
+    def test_program_and_io_surface(self):
+        import builtins
+        t = self._ready()
+        for fn, arg in [
+            (t.cmd_copy, '10-20 TO 100'), (t.cmd_move, '100-110 TO 200'),
+            (t.cmd_find, '"H"'), (t.cmd_replace, '"H 0" WITH "X 0"'),
+            (t.cmd_checksum, None), (t.cmd_list, 'SUBS'), (t.cmd_list, 'VARS'),
+            (t.cmd_list, 'ARRAYS'), (t.cmd_defs, None), (t.cmd_regs, None),
+            (t.cmd_vars, None),
+        ]:
+            if arg is None:
+                capture(fn)
+            else:
+                capture(fn, arg)
+        orig = builtins.input
+        builtins.input = lambda p='': '.'
+        try:
+            capture(t.cmd_auto, '500, 10')
+        finally:
+            builtins.input = orig
+        builtins.input = lambda p='': 'REM edited'
+        try:
+            capture(t.cmd_edit, '10')
+        finally:
+            builtins.input = orig
+
+    def test_debug_screen_memory_surface(self):
+        import builtins
+        import numpy as np
+        t = self._ready()
+        capture(t.cmd_profile, 'ON')
+        capture(t.cmd_run)
+        capture(t.cmd_profile, 'SHOW')
+        capture(t.cmd_profile, 'OFF')
+        for a in ('x', '', 'CLEAR'):
+            capture(t.cmd_watch, a)
+        for a in ('20', '', 'LIST', '10-30', 'CLEAR'):
+            capture(t.cmd_breakpoint, a)
+        capture(t.cmd_tron)
+        capture(t.cmd_troff)
+        capture(t.cmd_stats, '3')
+        capture(t.cmd_stats, 'SHOW')
+        capture(t.cmd_stats, 'CLEAR')
+        t._sv_checkpoints = [(10, np.array([1, 0, 0, 0], dtype=complex)),
+                             (20, np.array([0.7071, 0, 0, 0.7071], dtype=complex))]
+        t._tt_position = 1
+        capture(t.cmd_history)
+        capture(t.cmd_rewind, '1')
+        capture(t.cmd_forward, '1')
+        for m in range(6):
+            capture(t.cmd_screen, str(m))
+        capture(t.cmd_color, 'green')
+        capture(t.cmd_color, 'red, blue')
+        capture(t.cmd_cls)
+        capture(t.cmd_locate, '2, 3')
+        capture(t.cmd_play, '1')
+        capture(t.cmd_prompt, '"> "')
+        capture(t.cmd_map)
+        capture(t.cmd_catalog)
+        capture(t.cmd_dump, '0 31')
+        capture(t.cmd_peek, '$D000')
+        capture(t.cmd_poke, '$D001, 64')
+        capture(t.cmd_sys, '$E000')
+        orig = builtins.input
+        builtins.input = lambda p='': 'Q'
+        try:
+            capture(t.cmd_monitor)
+        finally:
+            builtins.input = orig
+        capture(t.cmd_version)
+        capture(t.cmd_help)
+        capture(t.cmd_help, 'STATUS')
+        capture(t.cmd_help, 'LOCC')
+        capture(t.cmd_help, 'H')
+        capture(t.cmd_decompose)
+        capture(t.cmd_method, '')
+
+    def test_string_surface(self):
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.process('10 LET name$ = "hello"', track_undo=False)
+        t.process('20 PRINT LEFT$(name$, 3)', track_undo=False)
+        capture(t.cmd_run)
+        self.assertEqual(t._eval_string_expr('"abc"'), 'abc')
+        capture(t.cmd_let_str, 'g$', '"hi"')
+        self.assertEqual(t.variables['g$'], 'hi')
+
+
 # =====================================================================
 # Run
 # =====================================================================

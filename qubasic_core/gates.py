@@ -242,8 +242,8 @@ def _measure_np(
     """
     sv = np.ascontiguousarray(sv).reshape([2] * n_qubits)
     ax = n_qubits - 1 - qubit
-    idx_0 = [slice(None)] * n_qubits
-    idx_1 = [slice(None)] * n_qubits
+    idx_0: list = [slice(None)] * n_qubits
+    idx_1: list = [slice(None)] * n_qubits
     idx_0[ax] = 0
     idx_1[ax] = 1
     p0 = float(np.sum(np.abs(sv[tuple(idx_0)])**2))

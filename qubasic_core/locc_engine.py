@@ -42,7 +42,7 @@ class LOCCEngine:
         self.joint = joint
         self.noise_param = noise_param
         self.noise_type = noise_type
-        self.classical = {}
+        self.classical: dict[str, int] = {}
         # Precompute offsets for JOINT mode
         self.offsets = []
         off = 0
@@ -237,8 +237,8 @@ class LOCCEngine:
         """Sample and return (per_reg_counts, joint_counts)."""
         if self.joint:
             raw = _sample_np(self.sv, self.n_total, shots)
-            per_reg = {name: {} for name in self.names}
-            joint = {}
+            per_reg: dict[str, dict[str, int]] = {name: {} for name in self.names}
+            joint: dict[str, int] = {}
             for state, count in raw.items():
                 # Split the joint bitstring into per-register segments.
                 # The joint statevector is ordered A[0..nA-1] B[0..nB-1] ...

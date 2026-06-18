@@ -110,8 +110,8 @@ class LOCCExecutionMixin:
         snap = self.locc.snapshot()
         snap_vars = dict(self.variables)
 
-        per_reg = {name: {} for name in self.locc.names}
-        counts_joint = {}
+        per_reg: dict[str, dict[str, int]] = {name: {} for name in self.locc.names}
+        counts_joint: dict[str, int] = {}
         t0 = time.time()
         progress_interval = max(1, shots // 10)
 
@@ -175,8 +175,8 @@ class LOCCExecutionMixin:
 
         if noisy and has_measure:
             # Per-shot execution so noise fires independently each time
-            per_reg = {name: {} for name in self.locc.names}
-            counts_joint = {}
+            per_reg: dict[str, dict[str, int]] = {name: {} for name in self.locc.names}
+            counts_joint: dict[str, int] = {}
             for _shot in range(self.shots):
                 self.locc.reset()
                 try:
@@ -433,7 +433,7 @@ class LOCCExecutionMixin:
                 if info is None:
                     raise ValueError(f"UNKNOWN GATE: {inner_name}")
                 n_params, n_qubits_needed = info
-                params = [self.eval_expr(a) for a in inv_args[:n_params]]
+                params = tuple(self.eval_expr(a) for a in inv_args[:n_params])
                 qubits = [self._resolve_qubit(a, n_qubits=n_reg) for a in inv_args[n_params:n_params+n_qubits_needed]]
                 matrix = _np_gate_matrix(inner_name, tuple(params)).conj().T
                 self.locc.apply_matrix(reg, matrix, qubits)

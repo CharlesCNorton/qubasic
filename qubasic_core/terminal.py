@@ -6,6 +6,7 @@ import re
 import time
 import warnings as _warnings
 from collections import OrderedDict
+from typing import Any
 
 # Quiet the third-party dependency-version notice (urllib3/chardet) that
 # qiskit's transitive imports emit, so it doesn't precede the banner.
@@ -681,13 +682,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln("?USAGE: DELETE <line> or DELETE <start>-<end>")
             return
         if '-' in rest:
-            a, b = rest.split('-')
-            a, b = int(a.strip()), int(b.strip())
+            lo_s, hi_s = rest.split('-')
+            lo, hi = int(lo_s.strip()), int(hi_s.strip())
             for k in list(self.program.keys()):
-                if a <= k <= b:
+                if lo <= k <= hi:
                     del self.program[k]
                     self._parsed.pop(k, None)
-            self.io.writeln(f"DELETED {a}-{b}")
+            self.io.writeln(f"DELETED {lo}-{hi}")
         else:
             n = int(rest)
             if n in self.program:
@@ -857,6 +858,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     def _accumulate_type_field(self, line: str) -> None:
         """Accumulate a field for a pending TYPE definition, or finalize on END TYPE."""
         from qubasic_core.engine import RE_TYPE_FIELD, RE_END_TYPE
+        assert self._pending_type is not None  # only called while a TYPE is open
         stripped = line.strip()
         if RE_END_TYPE.match(stripped):
             # Finalize the type definition
@@ -2173,7 +2175,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if self.last_circuit is None:
             self.io.writeln("?NO CIRCUIT — RUN first")
             return
-        ops = {}
+        ops: dict[str, int] = {}
         for inst in self.last_circuit.data:
             name = inst.operation.name
             ops[name] = ops.get(name, 0) + 1

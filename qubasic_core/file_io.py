@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -99,7 +100,7 @@ class FileIOMixin:
                     else:
                         f.write(f"LET {name} = {val}\n")
                 # Save program (exclude lines injected by IMPORT)
-                imported = getattr(self, '_imported_lines', set())
+                imported: set[int] = getattr(self, '_imported_lines', set())
                 saved = [n for n in sorted(self.program.keys()) if n not in imported]
                 for num in saved:
                     f.write(f"{num} {self.program[num]}\n")

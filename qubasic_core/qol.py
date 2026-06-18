@@ -13,6 +13,13 @@ from typing import Any
 import numpy as np
 
 
+class _NullIO:
+    """IOPort that swallows output, used to silence inner runs (COMPARE/PLOT/ANIMATE)."""
+    def write(self, text: str) -> None: pass
+    def writeln(self, text: str) -> None: pass
+    def read_line(self, prompt: str) -> str: return ''
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Quantum spinner (#21)
 # ═══════════════════════════════════════════════════════════════════════
@@ -295,11 +302,6 @@ class QoLMixin:
         for m in [m1, m2]:
             self.sim_method = m
             old_io = self.io
-
-            class _NullIO:
-                def write(self, t: str) -> None: pass
-                def writeln(self, t: str) -> None: pass
-                def read_line(self, p: str) -> str: return ''
             self.io = _NullIO()
             try:
                 self.cmd_run()
@@ -371,11 +373,6 @@ class QoLMixin:
         steps = int(parts[3]) if len(parts) > 3 else 10
         delay = float(parts[4]) / 1000 if len(parts) > 4 else 0.3
         values = [start + (end - start) * i / max(1, steps - 1) for i in range(steps)]
-
-        class _NullIO:
-            def write(self, t: str) -> None: pass
-            def writeln(self, t: str) -> None: pass
-            def read_line(self, p: str) -> str: return ''
 
         for i, val in enumerate(values):
             self.variables[var] = val
@@ -485,11 +482,6 @@ class QoLMixin:
         end = self.eval_expr(parts[2])
         steps = int(parts[3]) if len(parts) > 3 else 20
         values = [start + (end - start) * i / max(1, steps - 1) for i in range(steps)]
-
-        class _NullIO:
-            def write(self, t: str) -> None: pass
-            def writeln(self, t: str) -> None: pass
-            def read_line(self, p: str) -> str: return ''
 
         xs, ys = [], []
         for val in values:

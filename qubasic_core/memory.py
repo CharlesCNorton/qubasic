@@ -197,14 +197,10 @@ class MemoryMixin:
                 p1 = max(0.0, min(1.0, v))
                 theta = 2 * math.asin(math.sqrt(p1))
                 # This requires a circuit context — store for next RUN
-                if not hasattr(self, '_poke_state_prep'):
-                    self._poke_state_prep = {}
                 self._poke_state_prep[qubit] = ('RY', theta)
                 self.io.writeln(f"POKE q{qubit}: P(1)={p1:.4f} -> RY({theta:.4f})")
             elif field in (1, 2, 3):
                 # Bloch x, y, z — store target vector
-                if not hasattr(self, '_poke_state_prep'):
-                    self._poke_state_prep = {}
                 labels = {1: 'Bx', 2: 'By', 3: 'Bz'}
                 self._poke_state_prep[(qubit, labels[field])] = v
                 self.io.writeln(f"POKE q{qubit}.{labels[field]} = {v:.4f}")

@@ -12,7 +12,7 @@ class ExecContext:
 
     sorted_lines: list[int]
     ip: int
-    run_vars: dict[str, Any]
+    run_vars: Any  # dict[str, Any] or a Scope wrapper
     loop_stack: list[dict[str, Any]] = field(default_factory=list)
     iteration_count: int = 0
     max_iterations: int = 100_000
