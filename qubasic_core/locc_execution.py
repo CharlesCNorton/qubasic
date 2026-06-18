@@ -53,9 +53,15 @@ class LOCCExecutionMixin:
         if the prefix contains jumps that could skip past the SEND.
         """
         from qubasic_core.scope import Scope
-        from qubasic_core.statements import SendStmt, GotoStmt, GosubStmt
+        from qubasic_core.statements import (
+            SendStmt, GotoStmt, GosubStmt, OnGotoStmt, OnGosubStmt,
+            ForStmt, WhileStmt, DoStmt, IfThenStmt,
+        )
 
-        # Check if prefix contains jumps — if so, fall back to full re-exec
+        # Any control transfer in the prefix could skip the SEND or re-enter,
+        # so the prefix/suffix split is unsafe and we fall back to full re-exec.
+        _jump_types = (GotoStmt, GosubStmt, OnGotoStmt, OnGosubStmt,
+                       ForStmt, WhileStmt, DoStmt)
         first_send_ip = None
         for i, ln in enumerate(sorted_lines):
             p = self._get_parsed(ln)
@@ -66,20 +72,25 @@ class LOCCExecutionMixin:
         if first_send_ip is not None and first_send_ip > 0:
             for i in range(first_send_ip):
                 p = self._get_parsed(sorted_lines[i])
-                if isinstance(p, (GotoStmt, GosubStmt)):
+                if isinstance(p, _jump_types):
                     has_prefix_jumps = True
                     break
+                if isinstance(p, IfThenStmt):
+                    _clauses = f"{p.then_clause or ''} {p.else_clause or ''}"
+                    if re.search(r'\b(GOTO|GOSUB)\b', _clauses, re.IGNORECASE):
+                        has_prefix_jumps = True
+                        break
 
         sizes_str = '+'.join(str(s) for s in self.locc.sizes)
         mode = "JOINT" if self.locc.joint else "SPLIT"
         shots = self.shots
         max_q = max(self.locc.sizes)
-        # Allow override via POKE $D006 (max_iterations doubles as shot cap override)
+        # Cap overridable via the LOCC SHOTCAP command.
         user_cap = getattr(self, '_locc_shot_cap', None)
         effective_cap = user_cap if user_cap else LOCC_SEND_SHOT_CAP
         if max_q > LOCC_SEND_QUBIT_THRESHOLD and shots > effective_cap and not user_cap:
             self.io.writeln(f"  WARNING: capping at {effective_cap} shots for "
-                            f"{max_q}-qubit LOCC w/ SEND (override: LET _locc_shot_cap = N)")
+                            f"{max_q}-qubit LOCC w/ SEND (override: LOCC SHOTCAP <n>)")
             shots = effective_cap
 
         # Execute deterministic prefix once (skip if jumps make it unsafe)

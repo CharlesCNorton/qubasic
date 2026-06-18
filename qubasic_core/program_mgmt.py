@@ -267,8 +267,7 @@ class ProgramMgmtMixin:
         except ValueError as e:
             self.io.writeln(f"?CHAIN ERROR: {e}")
             return
-        if not path.endswith('.qb'):
-            path += '.qb'
+        path = self._find_qb_file(path)
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
@@ -298,8 +297,7 @@ class ProgramMgmtMixin:
         except ValueError as e:
             self.io.writeln(f"?MERGE ERROR: {e}")
             return
-        if not path.endswith('.qb'):
-            path += '.qb'
+        path = self._find_qb_file(path)
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return

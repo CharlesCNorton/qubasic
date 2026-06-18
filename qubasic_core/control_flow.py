@@ -15,7 +15,7 @@ from qubasic_core.statements import (
     LetArrayStmt, LetStmt, PrintStmt, GotoStmt, GosubStmt,
     ForStmt, NextStmt, WhileStmt, IfThenStmt,
     DataStmt, ReadStmt, OnGotoStmt, OnGosubStmt,
-    SelectCaseStmt, CaseStmt, EndSelectStmt,
+    SelectCaseStmt, CaseStmt, EndSelectStmt, ElseStmt, EndIfStmt,
     DoStmt, LoopStmt, ExitStmt,
     SwapStmt, DefFnStmt, OptionBaseStmt,
     SubStmt, EndSubStmt, FunctionStmt, EndFunctionStmt, CallStmt,
@@ -43,8 +43,11 @@ class ControlFlowMixin:
     def _cf_let_array(self, stmt: str, run_vars: dict[str, Any],
                       parsed: LetArrayStmt) -> tuple[bool, ExecOutcome]:
         name, idx_expr, val_expr = parsed.name, parsed.index_expr, parsed.value_expr
-        idx = int(self._eval_with_vars(idx_expr, run_vars))
+        base = getattr(self, '_option_base', 0)
+        idx = int(self._eval_with_vars(idx_expr, run_vars)) - base
         val = self._eval_with_vars(val_expr, run_vars)
+        if idx < 0:
+            raise RuntimeError(f"ARRAY INDEX OUT OF RANGE: {name}({idx + base})")
         if name not in self.arrays:
             self.arrays[name] = [0.0] * (idx + 1)
         while idx >= len(self.arrays[name]):
@@ -126,6 +129,8 @@ class ControlFlowMixin:
         start = self._eval_with_vars(start_expr, run_vars)
         end = self._eval_with_vars(end_expr, run_vars)
         step = self._eval_with_vars(step_expr, run_vars) if step_expr else 1
+        if step == 0:
+            raise RuntimeError(f"FOR {var}: STEP 0 would never terminate")
         try:
             if start == int(start): start = int(start)
         except (OverflowError, ValueError):
@@ -146,22 +151,25 @@ class ControlFlowMixin:
 
     def _cf_next(self, stmt: str, run_vars: dict[str, Any], loop_stack: list[dict[str, Any]],
                  parsed: NextStmt) -> tuple[bool, ExecOutcome]:
-        var = parsed.var
-        if not loop_stack or loop_stack[-1].get('var') != var:
-            if loop_stack:
-                expected = loop_stack[-1].get('var', '?')
-                raise RuntimeError(f"NEXT {var} does not match current FOR {expected}")
-            raise RuntimeError(f"NEXT {var} without matching FOR")
-        loop = loop_stack[-1]
-        loop['current'] += loop['step']
-        if (loop['step'] > 0 and loop['current'] <= loop['end']) or \
-           (loop['step'] < 0 and loop['current'] >= loop['end']):
-            run_vars[var] = loop['current']
-            self.variables[var] = loop['current']
-            return True, loop['return_ip'] + 1
-        else:
+        # Supports bare ``NEXT`` (close the innermost FOR) and ``NEXT i, j``
+        # (close i, then j). Each named variable must match the FOR on top of
+        # the loop stack at that point.
+        names = [v.strip() for v in parsed.var.split(',')] if parsed.var.strip() else ['']
+        for name in names:
+            if not loop_stack or loop_stack[-1].get('var') is None:
+                raise RuntimeError(f"NEXT {name}".rstrip() + " without matching FOR")
+            loop = loop_stack[-1]
+            cur_var = loop['var']
+            if name and cur_var != name:
+                raise RuntimeError(f"NEXT {name} does not match current FOR {cur_var}")
+            loop['current'] += loop['step']
+            if (loop['step'] > 0 and loop['current'] <= loop['end']) or \
+               (loop['step'] < 0 and loop['current'] >= loop['end']):
+                run_vars[cur_var] = loop['current']
+                self.variables[cur_var] = loop['current']
+                return True, loop['return_ip'] + 1
             loop_stack.pop()
-            return True, ExecResult.ADVANCE
+        return True, ExecResult.ADVANCE
 
     def _find_matching_wend(self, sorted_lines: list[int], ip: int) -> int:
         """Find the ip after the WEND matching the WHILE at ip.
@@ -218,8 +226,21 @@ class ControlFlowMixin:
         cond_vars = run_vars
         if self.locc_mode and self.locc:
             cond_vars = {**run_vars, **self.locc.classical}
-        result = ExecResult.ADVANCE
-        if self._eval_condition(cond_str, cond_vars):
+        cond_true = self._eval_condition(cond_str, cond_vars)
+
+        # Block form: "IF cond THEN" with no inline THEN/ELSE clauses spans
+        # following lines up to a matching ELSE / END IF.
+        if not then_clause and else_clause is None:
+            else_ip, endif_ip = self._find_if_block(sorted_lines, ip)
+            if cond_true:
+                return True, ExecResult.ADVANCE  # fall into the THEN block
+            if else_ip is not None:
+                return True, else_ip + 1          # jump to the ELSE block
+            return True, endif_ip + 1             # no ELSE: skip past END IF
+
+        # Single-line form.
+        result: ExecOutcome = ExecResult.ADVANCE
+        if cond_true:
             if then_clause:
                 r = exec_fn(then_clause, loop_stack, sorted_lines, ip, run_vars)
                 if r is not None and r is not ExecResult.ADVANCE:
@@ -229,6 +250,52 @@ class ControlFlowMixin:
             if r is not None and r is not ExecResult.ADVANCE:
                 result = r
         return True, result
+
+    @staticmethod
+    def _is_block_if(line: str) -> bool:
+        """True for a block-opening ``IF ... THEN`` (nothing after THEN)."""
+        return re.match(r'IF\b.*\bTHEN\s*$', line.strip(), re.IGNORECASE) is not None
+
+    def _find_if_block(self, sorted_lines: list[int], ip: int) -> tuple[int | None, int]:
+        """From a block IF at ip, find (else_ip, endif_ip) handling nesting."""
+        depth = 1
+        else_ip: int | None = None
+        scan = ip + 1
+        while scan < len(sorted_lines):
+            s = self.program[sorted_lines[scan]].strip()
+            su = s.upper()
+            if self._is_block_if(s):
+                depth += 1
+            elif su == 'END IF':
+                depth -= 1
+                if depth == 0:
+                    return else_ip, scan
+            elif su == 'ELSE' and depth == 1 and else_ip is None:
+                else_ip = scan
+            scan += 1
+        raise RuntimeError(f"IF block at line {sorted_lines[ip]} has no matching END IF")
+
+    def _cf_else(self, sorted_lines: list[int], ip: int) -> tuple[bool, ExecOutcome]:
+        """ELSE reached while running a THEN block: skip past the END IF."""
+        depth = 1
+        scan = ip + 1
+        while scan < len(sorted_lines):
+            s = self.program[sorted_lines[scan]].strip()
+            su = s.upper()
+            if self._is_block_if(s):
+                depth += 1
+            elif su == 'END IF':
+                depth -= 1
+                if depth == 0:
+                    return True, scan + 1
+            scan += 1
+        return True, ExecResult.ADVANCE
+
+    def _cf_return(self) -> tuple[bool, ExecOutcome]:
+        """RETURN — pop the GOSUB stack, or error if there is nothing to return to."""
+        if not self._gosub_stack:
+            raise RuntimeError("RETURN WITHOUT GOSUB")
+        return True, self._gosub_stack.pop()
 
     # ── Type-based dispatch table ────────────────────────────────────
     # Maps parsed Stmt types to handler lambdas.  Each lambda receives
@@ -240,7 +307,7 @@ class ControlFlowMixin:
         RemStmt:         lambda s, st, p, ls, sl, ip, rv, ef: (True, ExecResult.ADVANCE),
         MeasureStmt:     lambda s, st, p, ls, sl, ip, rv, ef: (True, ExecResult.ADVANCE),
         EndStmt:         lambda s, st, p, ls, sl, ip, rv, ef: (True, ExecResult.END),
-        ReturnStmt:      lambda s, st, p, ls, sl, ip, rv, ef: (_ for _ in ()).throw(RuntimeError("RETURN WITHOUT GOSUB")) if not s._gosub_stack else (True, s._gosub_stack.pop()),
+        ReturnStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_return(),
         # Handlers defined in control_flow.py (parsed is positional)
         WendStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_wend(rv, ls, sl, ip),
         LetArrayStmt:    lambda s, st, p, ls, sl, ip, rv, ef: s._cf_let_array(st, rv, p),
@@ -260,6 +327,8 @@ class ControlFlowMixin:
         SelectCaseStmt:  lambda s, st, p, ls, sl, ip, rv, ef: s._cf_select_case(st, rv, sl, ip, parsed=p),
         CaseStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_case(st, sl, ip, parsed=p),
         EndSelectStmt:   lambda s, st, p, ls, sl, ip, rv, ef: s._cf_end_select(st, parsed=p),
+        ElseStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_else(sl, ip),
+        EndIfStmt:       lambda s, st, p, ls, sl, ip, rv, ef: (True, ExecResult.ADVANCE),
         DoStmt:          lambda s, st, p, ls, sl, ip, rv, ef: s._cf_do(st, rv, ls, sl, ip, parsed=p),
         LoopStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_loop(st, rv, ls, sl, ip, parsed=p),
         ExitStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_exit(st, ls, sl, ip, parsed=p),

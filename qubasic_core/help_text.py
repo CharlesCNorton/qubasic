@@ -92,7 +92,7 @@ LOCC MODE (dual-register distributed quantum simulation)
   BLOCH A 0 / BLOCH B 0     Bloch spheres per register
 
   SPLIT: max capacity (33 per register), no cross-register entanglement
-  JOINT: shared entanglement, limited to ~32 total qubits
+  JOINT: shared entanglement, limited to 33 total qubits
   LOCCINFO                  Protocol metrics after run
 
 BASIS MEASUREMENT
@@ -100,6 +100,8 @@ BASIS MEASUREMENT
   MEASURE_Y qubit         Measure in Y basis (SDG+H before measure)
   MEASURE_Z qubit         Measure in Z basis (standard)
   Results stored in mx_<q>, my_<q>, mz_<q> variables.
+  In standard (Aer) mode measurement is deferred, so the result variable
+  reads 0 during the run; use LOCC mode for live mid-circuit outcomes.
 
 ERROR CORRECTION
   SYNDROME ZZ 0 1 -> s0   Measure Pauli stabilizer non-destructively

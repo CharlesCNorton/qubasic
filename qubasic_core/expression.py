@@ -12,10 +12,19 @@ from typing import Any
 
 
 def _replace_dollar_outside_strings(expr_str: str) -> str:
-    """Apply $->_S_ replacement only outside quoted string literals.
+    """Rewrite numeric literals and the string sigil, only outside quoted strings.
 
-    Single pass: splits on quote boundaries, substitutes only in
-    unquoted segments.
+    Single pass: splits on quote boundaries and, in each unquoted segment,
+    applies (in order):
+      - ``&HFF``  -> ``0xFF``           (hex literal)
+      - ``&B101`` -> ``0b101``          (binary literal)
+      - ``$D000`` -> ``0xD000``         (leading-$ hex address, e.g. PEEK $D000)
+      - ``name$`` -> ``name_S_``        (trailing-$ string-variable sigil)
+
+    The ``$``-address rewrite uses a negative lookbehind so it never touches a
+    trailing string sigil; the two never collide because an address ``$`` is
+    always preceded by start/space/operator and a sigil ``$`` always follows a
+    word character.
     """
     parts: list[str] = []
     i = 0
@@ -34,7 +43,53 @@ def _replace_dollar_outside_strings(expr_str: str) -> str:
             while j < n and expr_str[j] not in ('"', "'"):
                 j += 1
             segment = expr_str[i:j]
-            parts.append(re.sub(r'(\w+)\$', r'\1_S_', segment))
+            segment = re.sub(r'&H([0-9A-Fa-f]+)', r'0x\1', segment)
+            segment = re.sub(r'&B([01]+)', r'0b\1', segment)
+            segment = re.sub(r'(?<![\w$])\$([0-9A-Fa-f]+)', r'0x\1', segment)
+            segment = re.sub(r'(\w+)\$', r'\1_S_', segment)
+            parts.append(segment)
+            i = j
+    return ''.join(parts)
+
+
+_LOGICAL_SUBS = [
+    (re.compile(r'<>|><'), '!='),
+    (re.compile(r'\bAND\b', re.IGNORECASE), ' and '),
+    (re.compile(r'\bOR\b', re.IGNORECASE), ' or '),
+    (re.compile(r'\bNOT\b', re.IGNORECASE), ' not '),
+    # XOR maps to bitwise ^, matching BASIC's bitwise logical operators;
+    # for 0/1 truth values this is exactly logical exclusive-or.
+    (re.compile(r'\bXOR\b', re.IGNORECASE), ' ^ '),
+]
+
+
+def _rewrite_logical_outside_strings(cond: str) -> str:
+    """Rewrite BASIC logical/relational operators to Python, only outside strings.
+
+    Word-boundary anchors already protect identifiers like NOTE or ANDY; this
+    additionally protects operator-like text inside quoted string literals
+    (e.g. ``IF s$ == "AND"``), which the old whole-string regex corrupted.
+    """
+    parts: list[str] = []
+    i = 0
+    n = len(cond)
+    while i < n:
+        ch = cond[i]
+        if ch in ('"', "'"):
+            quote = ch
+            j = i + 1
+            while j < n and cond[j] != quote:
+                j += 1
+            parts.append(cond[i:j + 1])
+            i = j + 1
+        else:
+            j = i
+            while j < n and cond[j] not in ('"', "'"):
+                j += 1
+            seg = cond[i:j]
+            for pat, repl in _LOGICAL_SUBS:
+                seg = pat.sub(repl, seg)
+            parts.append(seg)
             i = j
     return ''.join(parts)
 
@@ -100,7 +155,10 @@ class ExpressionMixin:
             op = self._AST_OPS.get(type(node.op))
             if op is None:
                 raise ValueError(f"UNSUPPORTED OP: {type(node.op).__name__}")
-            return op(self._ast_eval(node.left, ns), self._ast_eval(node.right, ns))
+            try:
+                return op(self._ast_eval(node.left, ns), self._ast_eval(node.right, ns))
+            except ZeroDivisionError:
+                raise ValueError("DIVISION BY ZERO") from None
         if isinstance(node, ast.BoolOp):
             op = self._AST_OPS.get(type(node.op))
             if op is None:
@@ -128,7 +186,12 @@ class ExpressionMixin:
             if not callable(func):
                 raise ValueError(f"NOT A FUNCTION: {fname}")
             args = [self._ast_eval(a, ns) for a in node.args]
-            return func(*args)
+            try:
+                return func(*args)
+            except ValueError as e:
+                raise ValueError(f"{fname}: {e}") from None
+            except ZeroDivisionError:
+                raise ValueError("DIVISION BY ZERO") from None
         if isinstance(node, ast.IfExp):
             if self._ast_eval(node.test, ns):
                 return self._ast_eval(node.body, ns)
@@ -140,6 +203,13 @@ class ExpressionMixin:
                 if name in self.arrays:
                     return self.arrays[name][idx]
             raise ValueError("UNSUPPORTED SUBSCRIPT")
+        if isinstance(node, ast.Attribute):
+            # Record field access for user TYPEs: p.x resolves the flat 'p.x' key.
+            if isinstance(node.value, ast.Name):
+                key = f"{node.value.id}.{node.attr}"
+                if key in ns:
+                    return ns[key]
+            raise ValueError(f"UNDEFINED FIELD: {getattr(node, 'attr', '?')}")
         raise ValueError(f"UNSUPPORTED EXPRESSION: {ast.dump(node)}")
 
     def _build_base_ns(self) -> dict[str, Any]:
@@ -182,21 +252,23 @@ class ExpressionMixin:
         if extra_ns:
             ns.update(extra_ns)
         _dims = getattr(self, '_array_dims', {})
+        _base = getattr(self, '_option_base', 0)
         for aname, adata in self.arrays.items():
-            def _array_accessor(*indices, d=adata, n=aname, dims=_dims.get(aname)):
+            def _array_accessor(*indices, d=adata, n=aname, dims=_dims.get(aname),
+                                base=_base):
                 if dims and len(indices) > 1:
                     # Multi-dimensional: compute flat index from (i, j, ...)
                     flat = 0
                     stride = 1
                     for k in range(len(indices) - 1, -1, -1):
-                        idx = int(indices[k])
+                        idx = int(indices[k]) - base
                         flat += idx * stride
                         stride *= dims[k] if k < len(dims) else 1
                     idx = flat
                 else:
-                    idx = int(indices[0]) if indices else 0
+                    idx = (int(indices[0]) - base) if indices else 0
                 if idx < 0 or idx >= len(d):
-                    raise ValueError(f"ARRAY INDEX OUT OF RANGE: {n}[{idx}]")
+                    raise ValueError(f"ARRAY INDEX OUT OF RANGE: {n}[{idx + base}]")
                 return d[idx]
             ns[aname] = _array_accessor
         # User-defined functions (DEF FN) — these can change at runtime
@@ -226,13 +298,11 @@ class ExpressionMixin:
         for k, v in list(ns.items()):
             if '$' in k:
                 ns[k.replace('$', '_S_')] = v
-        # Hex/bin prefix support
         expr_str = str(expr).strip()
-        expr_str = re.sub(r'&H([0-9A-Fa-f]+)', r'0x\1', expr_str)
-        expr_str = re.sub(r'&B([01]+)', r'0b\1', expr_str)
         # Normalize FN prefix: "FN square(x)" -> "square(x)"
         expr_str = re.sub(r'\bFN\s+(\w+)\s*\(', r'\1(', expr_str, flags=re.IGNORECASE)
-        # Normalize $ in identifiers for Python AST compatibility
+        # Rewrite numeric literals (&H, &B, $hex addresses) and the string
+        # sigil, each only outside quoted string literals.
         expr_str = _replace_dollar_outside_strings(expr_str)
         if not expr_str:
             raise ValueError("EMPTY EXPRESSION")
@@ -266,17 +336,23 @@ class ExpressionMixin:
         except Exception:
             raise ValueError(f"CANNOT EVALUATE: {expr}")
 
+    def _eval_int(self, expr: Any, run_vars: dict[str, Any] | None = None) -> int:
+        """Evaluate to an exact integer for qubit indices and memory addresses.
+
+        Avoids the float round-trip of eval_expr so large hex/bit values and
+        indices keep full integer precision.
+        """
+        val = self._safe_eval(expr, extra_ns=run_vars) if run_vars is not None \
+            else self._safe_eval(expr)
+        return int(val)
+
     def _eval_with_vars(self, expr: str, run_vars: dict[str, Any]) -> float:
         """Evaluate expression with runtime variables."""
         return float(self._safe_eval(expr, extra_ns=run_vars))
 
     def _eval_condition(self, cond: str, run_vars: dict[str, Any]) -> bool:
         """Evaluate a boolean condition."""
-        cond = cond.replace('<>', '!=').replace('><', '!=')
-        cond = re.sub(r'\bAND\b', ' and ', cond, flags=re.IGNORECASE)
-        cond = re.sub(r'\bOR\b', ' or ', cond, flags=re.IGNORECASE)
-        cond = re.sub(r'\bNOT\b', ' not ', cond, flags=re.IGNORECASE)
-        cond = re.sub(r'\bXOR\b', ' ^ ', cond, flags=re.IGNORECASE)
+        cond = _rewrite_logical_outside_strings(cond)
         return bool(self._safe_eval(cond, extra_ns=run_vars))
 
     def _run_timer(self) -> float:

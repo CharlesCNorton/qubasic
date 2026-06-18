@@ -28,7 +28,7 @@ __all__ = [
     'GATE_TABLE', 'GATE_ALIASES',
 ]
 
-__version__ = '0.5.1'
+__version__ = '0.6.0'
 
 def __getattr__(name):
     """Lazy import heavy modules on first access."""

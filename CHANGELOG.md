@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.0 (2026-06-18)
+
+Correctness, scalability, and usability pass (61 fixes).
+
+### Fixed
+- **Time-travel debugging now works**: STEP records statevector checkpoints, so REWIND/FORWARD/HISTORY operate (previously `_checkpoint_sv` was never called).
+- **TRON, breakpoints, ON TIMER, ON MEASURE now fire**: the debug hooks are wired into the execution loop instead of being dead code.
+- **PLOT and ANIMATE sweep correctly**: the transpiled-circuit cache key now includes variable bindings, so parameter sweeps no longer reuse the first circuit.
+- **`$XXXX` memory addresses parse**: PEEK/POKE/DUMP/SYS/WAIT accept the canonical hex-address notation, not only `0x`/decimal/`&H`.
+- **Multi-line IF/ELSE/END IF**: the untaken branch is properly skipped (previously both branches ran).
+- **ON ERROR** reports the real ERR/ERL for build-path errors and runs handler lines through the program executor (no spurious state dumps).
+- **OPTION BASE 1** is honored in array indexing; FOR with STEP 0 is rejected; bare `NEXT` and `NEXT i, j` are supported.
+- **CSV/EXPORT** report correctly when only a statevector (no counts) is present.
+
+### Performance / scalability
+- Stabilizer is chosen before MPS for large Clifford circuits, and the full 2^n statevector is no longer rebuilt after every measured run (a 30-qubit GHZ went from ~16s to <1s).
+- STEP evolves the statevector incrementally; DENSITY and EXPECT avoid building large matrices; HEATMAP and STATS reuse work.
+
+### Quantum / LOCC
+- LOCC depolarizing noise matches the Qiskit Aer convention; amplitude- and phase-damping channels are now simulated in the LOCC engine.
+- EXPECT/ENTROPY/DENSITY/BLOCH accept a register argument in SPLIT mode; `LOCC SHOTCAP` replaces the magic shot-cap variable; SEND prefix/suffix optimization detects all control transfers.
+- Per-qubit memory-mapped noise applies to multi-qubit gates; complex single-qubit amplitudes are exposed in the qubit-state block; POKE-driven state preparation is applied at build.
+
+### Language / interface
+- User-defined TYPE record fields can be read and assigned (`p.x`); ELSEIF chains and re-parsed clauses are memoized.
+- SAVE/LOAD round-trip noise, seed, screen mode, DEF FN, and TYPE definitions; CHAIN/MERGE/INCLUDE/IMPORT honor a `QUBASIC_PATH` search path; IMPORT no longer pollutes SAVE output.
+- CLI gains `--version` and `--agent`; `--json` output is enriched (statevector, variables, manifest) and emits structured errors; the agent write-sandbox engages under `--json`/`--agent`.
+- `SET_STATE` persists into the next RUN and warns when a named state cannot fit; per-command `HELP <name>`; dependency-version warnings are suppressed before the banner.
+
 ## 0.5.0 (2026-03-30)
 
 - **Colorized histograms**: bars colored green/yellow/dim by probability in terminal

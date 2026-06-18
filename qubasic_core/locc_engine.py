@@ -27,18 +27,21 @@ class LOCCEngine:
     """
 
     def __init__(self, sizes: list[int], joint: bool = False,
-                 noise_param: float = 0.0):
+                 noise_param: float = 0.0, noise_type: str = 'depolarizing'):
         """Initialize LOCC engine with given register sizes.
 
-        noise_param: depolarizing probability per gate (0 = noiseless).
-        When > 0, after each gate application a random Pauli (X, Y, or Z)
-        is applied to each target qubit with probability noise_param/3.
+        noise_param: per-gate noise strength (0 = noiseless).
+        noise_type: 'depolarizing', 'amplitude_damping', or 'phase_flip'.
+        Noise is applied as a Monte-Carlo trajectory after each gate, matching
+        the Qiskit Aer channel definitions (depolarizing uses the standard
+        1 - 3p/4 identity weighting).
         """
         self.sizes = list(sizes)
         self.n_regs = len(self.sizes)
         self.names = [chr(ord('A') + i) for i in range(self.n_regs)]
         self.joint = joint
         self.noise_param = noise_param
+        self.noise_type = noise_type
         self.classical = {}
         # Precompute offsets for JOINT mode
         self.offsets = []
@@ -101,33 +104,80 @@ class LOCCEngine:
                     f"Qubit {q} out of range for register {reg} (size {size})"
                 )
 
-    def _apply_depolarizing(self, reg: str, qubits: list[int]) -> None:
-        """Apply single-qubit depolarizing noise to each target qubit.
+    def _apply_single(self, reg: str, matrix: np.ndarray, q: int) -> None:
+        """Apply a single-qubit matrix (unitary or Kraus operator) to reg[q]."""
+        if self.joint:
+            actual = q + self.offsets[self._idx(reg)]
+            self.sv = _apply_gate_np(self.sv, matrix, [actual], self.n_total)
+        else:
+            size = self.sizes[self._idx(reg)]
+            self.svs[reg] = _apply_gate_np(self.svs[reg], matrix, [q], size)
 
-        For depolarizing parameter p, each qubit independently gets a random
-        Pauli (X, Y, or Z) with probability p/3 each, or identity with
-        probability 1-p. This is the Monte Carlo implementation of the
-        depolarizing channel.
+    def _marginal_p1(self, reg: str, q: int) -> float:
+        """Probability that reg[q] is measured |1> (non-destructive)."""
+        if self.joint:
+            sv, n, actual = self.sv, self.n_total, q + self.offsets[self._idx(reg)]
+        else:
+            n = self.sizes[self._idx(reg)]
+            sv, actual = self.svs[reg], q
+        t = np.moveaxis(np.ascontiguousarray(sv).reshape([2] * n), n - 1 - actual, 0)
+        return float(np.sum(np.abs(t[1]) ** 2))
+
+    def _renormalize(self, reg: str) -> None:
+        if self.joint:
+            nrm = float(np.linalg.norm(self.sv))
+            if nrm > 1e-15:
+                self.sv = self.sv / nrm
+        else:
+            nrm = float(np.linalg.norm(self.svs[reg]))
+            if nrm > 1e-15:
+                self.svs[reg] = self.svs[reg] / nrm
+
+    # Re-contiguate below this many amplitudes; above it the per-gate copy is
+    # skipped to avoid duplicating very large joint states.
+    _CONTIGUATE_MAX = 1 << 22
+
+    def _contiguate(self, reg: str) -> None:
+        """Collapse accumulated moveaxis views into a contiguous array."""
+        if self.joint:
+            if self.sv.size <= self._CONTIGUATE_MAX and not self.sv.flags.c_contiguous:
+                self.sv = np.ascontiguousarray(self.sv)
+        else:
+            arr = self.svs[reg]
+            if arr.size <= self._CONTIGUATE_MAX and not arr.flags.c_contiguous:
+                self.svs[reg] = np.ascontiguousarray(arr)
+
+    def _apply_noise(self, reg: str, qubits: list[int]) -> None:
+        """Apply the configured noise channel to each target qubit (Monte-Carlo).
+
+        Supported channels: depolarizing, amplitude_damping, phase_flip (phase
+        damping). Conventions match Qiskit Aer so a given parameter behaves the
+        same in the LOCC numpy path and the standard Aer path.
         """
-        if self.noise_param <= 0:
+        p = self.noise_param
+        if p <= 0 or self.noise_type in ('none', None):
             return
-        _paulis = [
-            _np_gate_matrix('X', ()),
-            _np_gate_matrix('Y', ()),
-            _np_gate_matrix('Z', ()),
-        ]
+        nt = self.noise_type
         for q in qubits:
-            r = np.random.random()
-            if r < self.noise_param:
-                # Pick a random Pauli
-                pauli = _paulis[np.random.randint(3)]
-                if self.joint:
-                    idx = self._idx(reg)
-                    actual_q = q + self.offsets[idx]
-                    self.sv = _apply_gate_np(self.sv, pauli, [actual_q], self.n_total)
+            if nt == 'depolarizing':
+                # Identity w.p. 1 - 3p/4; X/Y/Z each w.p. p/4 (Aer convention).
+                if np.random.random() < 0.75 * p:
+                    pauli = _np_gate_matrix('XYZ'[np.random.randint(3)], ())
+                    self._apply_single(reg, pauli, q)
+            elif nt == 'amplitude_damping':
+                g = p
+                if np.random.random() < g * self._marginal_p1(reg, q):
+                    self._apply_single(reg, np.array([[0, np.sqrt(g)], [0, 0]], dtype=complex), q)
                 else:
-                    size = self.sizes[self._idx(reg)]
-                    self.svs[reg] = _apply_gate_np(self.svs[reg], pauli, [q], size)
+                    self._apply_single(reg, np.array([[1, 0], [0, np.sqrt(1 - g)]], dtype=complex), q)
+                self._renormalize(reg)
+            elif nt in ('phase_flip', 'phase_damping'):
+                g = p
+                if np.random.random() < g * self._marginal_p1(reg, q):
+                    self._apply_single(reg, np.array([[0, 0], [0, np.sqrt(g)]], dtype=complex), q)
+                else:
+                    self._apply_single(reg, np.array([[1, 0], [0, np.sqrt(1 - g)]], dtype=complex), q)
+                self._renormalize(reg)
 
     def apply(self, reg: str, gate_name: str, params: tuple[float, ...], qubits: list[int]) -> None:
         """Apply a gate to a specific register, then apply noise if configured."""
@@ -140,7 +190,8 @@ class LOCCEngine:
         else:
             size = self.sizes[self._idx(reg)]
             self.svs[reg] = _apply_gate_np(self.svs[reg], matrix, qubits, size)
-        self._apply_depolarizing(reg, qubits)
+        self._apply_noise(reg, qubits)
+        self._contiguate(reg)
 
     def share(self, reg1: str, q1: int, reg2: str, q2: int) -> None:
         """Create Bell pair |Phi+> between reg1[q1] and reg2[q2]. JOINT only."""
@@ -153,10 +204,10 @@ class LOCCEngine:
         actual1 = q1 + self.offsets[self._idx(reg1)]
         actual2 = q2 + self.offsets[self._idx(reg2)]
         self.sv = _apply_gate_np(self.sv, h, [actual1], self.n_total)
-        self._apply_depolarizing(reg1, [q1])
+        self._apply_noise(reg1, [q1])
         self.sv = _apply_gate_np(self.sv, cx, [actual1, actual2], self.n_total)
-        self._apply_depolarizing(reg1, [q1])
-        self._apply_depolarizing(reg2, [q2])
+        self._apply_noise(reg1, [q1])
+        self._apply_noise(reg2, [q2])
 
     def send(self, reg: str, qubit: int) -> int:
         """Measure a qubit (Born rule) and return the classical outcome."""
@@ -224,7 +275,8 @@ class LOCCEngine:
         else:
             size = self.sizes[self._idx(reg)]
             self.svs[reg] = _apply_gate_np(self.svs[reg], matrix, qubits, size)
-        self._apply_depolarizing(reg, qubits)
+        self._apply_noise(reg, qubits)
+        self._contiguate(reg)
 
     def mem_gb(self) -> tuple[float, float]:  # (total_gb, peak_gb)
         """Return (total_gb, peak_gb) realistic memory estimates including overhead."""

@@ -50,11 +50,28 @@ class FileIOMixin:
                     f.write(f"METHOD {self.sim_method}\n")
                 if self.sim_device != 'CPU':
                     f.write(f"METHOD {self.sim_device}\n")
+                if getattr(self, '_screen_mode', 0):
+                    f.write(f"SCREEN {self._screen_mode}\n")
+                if getattr(self, '_seed', None) is not None:
+                    f.write(f"SEED {self._seed}\n")
+                if getattr(self, '_noise_spec', None):
+                    f.write(f"NOISE {self._noise_spec}\n")
                 # Save LOCC config if active
                 if self.locc_mode and self.locc:
                     mode = "JOINT" if self.locc.joint else "SPLIT"
                     sizes = ' '.join(str(s) for s in self.locc.sizes)
                     f.write(f"LOCC {mode} {sizes}\n")
+                # Save user-defined TYPEs (multi-line block, re-read on LOAD)
+                for tname, fields in getattr(self, '_user_types', {}).items():
+                    f.write(f"TYPE {tname}\n")
+                    for fname, ftype in fields:
+                        f.write(f"  {fname} AS {ftype}\n")
+                    f.write("END TYPE\n")
+                # Save DEF FN user functions
+                for fname, fdef in getattr(self, '_user_fns', {}).items():
+                    short = fname[2:] if fname.upper().startswith('FN') else fname
+                    params = ', '.join(fdef['params'])
+                    f.write(f"DEF FN {short}({params}) = {fdef['body']}\n")
                 # Save custom gates as executable UNITARY commands
                 for name, matrix in self._custom_gates.items():
                     rows = matrix.tolist()
@@ -73,13 +90,20 @@ class FileIOMixin:
                 # Save registers
                 for name, (start, size) in self.registers.items():
                     f.write(f"REG {name} {size}\n")
-                # Save variables
+                # Save variables (skip internal _vars and record dicts)
                 for name, val in self.variables.items():
-                    f.write(f"LET {name} = {val}\n")
-                # Save program
-                for num in sorted(self.program.keys()):
+                    if name.startswith('_') or isinstance(val, dict):
+                        continue
+                    if isinstance(val, str):
+                        f.write(f'LET {name} = "{val}"\n')
+                    else:
+                        f.write(f"LET {name} = {val}\n")
+                # Save program (exclude lines injected by IMPORT)
+                imported = getattr(self, '_imported_lines', set())
+                saved = [n for n in sorted(self.program.keys()) if n not in imported]
+                for num in saved:
                     f.write(f"{num} {self.program[num]}\n")
-            self.io.writeln(f"SAVED {len(self.program)} lines to {path}")
+            self.io.writeln(f"SAVED {len(saved)} lines to {path}")
         except Exception as e:
             self.io.writeln(f"?SAVE ERROR: {e}")
 
@@ -135,8 +159,7 @@ class FileIOMixin:
         except ValueError as e:
             self.io.writeln(f"?INCLUDE ERROR: {e}")
             return
-        if not path.endswith('.qb') and not os.path.isfile(path):
-            path += '.qb'
+        path = self._find_qb_file(path)
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
@@ -182,8 +205,7 @@ class FileIOMixin:
         except ValueError as e:
             self.io.writeln(f"?IMPORT ERROR: {e}")
             return
-        if not path.endswith('.qb') and not os.path.isfile(path):
-            path += '.qb'
+        path = self._find_qb_file(path)
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
@@ -191,7 +213,9 @@ class FileIOMixin:
         mod_name = os.path.splitext(os.path.basename(path))[0].upper()
         # Parse the file for DEF statements
         import_count = 0
-        _import_line_counter = 50000
+        # Reserved high range for injected SUB/FUNCTION lines, tracked so SAVE
+        # and listings can exclude them.
+        _import_line_counter = 900000
         with open(path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.rstrip('\n\r').strip()
@@ -209,16 +233,16 @@ class FileIOMixin:
                         qualified = f"{mod_name}.{name}"
                         self.subroutines[qualified] = {'body': body, 'params': params}
                         import_count += 1
-                # Also import SUB/FUNCTION definitions as numbered lines
+                # SUB/FUNCTION must live in self.program for _scan_subs and CALL
+                # to find them, so inject into a reserved high range and record
+                # the line numbers as imported (excluded from SAVE).
                 elif upper.startswith('SUB ') or upper.startswith('FUNCTION '):
-                    # Store the line for later _scan_subs to pick up.
-                    # Use a dedicated counter starting at 50000, incrementing
-                    # by 10, with collision avoidance against existing lines.
                     ln = _import_line_counter
                     while ln in self.program:
                         ln += 10
                     _import_line_counter = ln + 10
                     self.process(f"{ln} {line}", track_undo=False)
+                    self._imported_lines.add(ln)
                     import_count += 1
                 elif upper in ('END SUB', 'END FUNCTION') and import_count > 0:
                     ln = _import_line_counter
@@ -226,6 +250,7 @@ class FileIOMixin:
                         ln += 10
                     _import_line_counter = ln + 10
                     self.process(f"{ln} {line}", track_undo=False)
+                    self._imported_lines.add(ln)
                     import_count += 1
         self.io.writeln(f"IMPORTED {mod_name} ({import_count} definitions from {path})")
 
@@ -318,7 +343,8 @@ class FileIOMixin:
                 self.io.writeln(f"  (overwriting {path})")
             with open(path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
-            self.io.writeln(f"EXPORTED {len(self.last_counts)} states to {path}")
+            what = f"{len(self.last_counts)} states" if self.last_counts else "statevector"
+            self.io.writeln(f"EXPORTED {what} to {path}")
         else:
             for line in lines[:20]:
                 self.io.writeln(f"  {line}")
@@ -330,6 +356,26 @@ class FileIOMixin:
     def _init_file_handles(self) -> None:
         self._file_handles: dict[int, Any] = {}
         self._lprint_path: str | None = None
+        self._imported_lines: set[int] = set()
+
+    def _qb_search_dirs(self) -> list[str]:
+        """Directories searched for .qb files: cwd then QUBASIC_PATH entries."""
+        dirs = ['.']
+        env = os.environ.get('QUBASIC_PATH', '')
+        if env:
+            dirs += [d for d in env.split(os.pathsep) if d]
+        return dirs
+
+    def _find_qb_file(self, path: str) -> str:
+        """Resolve a sanitized relative .qb path against cwd then the library
+        search path. Returns the first existing match, else the cwd candidate."""
+        candidates = [path] + ([path + '.qb'] if not path.endswith('.qb') else [])
+        for d in self._qb_search_dirs():
+            for c in candidates:
+                full = c if d == '.' else os.path.join(d, c)
+                if os.path.isfile(full):
+                    return full
+        return candidates[-1]
 
     def _check_agent_path(self, path: str, cmd: str) -> str | None:
         """In agent mode, restrict paths to cwd. Returns resolved path or None on error.

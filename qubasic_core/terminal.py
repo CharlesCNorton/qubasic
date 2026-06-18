@@ -4,7 +4,12 @@ import sys
 import os
 import re
 import time
+import warnings as _warnings
 from collections import OrderedDict
+
+# Quiet the third-party dependency-version notice (urllib3/chardet) that
+# qiskit's transitive imports emit, so it doesn't precede the banner.
+_warnings.filterwarnings('ignore', message=r".*match a supported version.*")
 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
@@ -119,6 +124,14 @@ def _resolve_named_state(name: str, n_qubits: int) -> np.ndarray:
     return sv
 
 
+def _named_state_fits(name: str, n_qubits: int) -> bool:
+    """Whether a named SET_STATE target fits the current qubit count."""
+    dim = 2 ** n_qubits
+    need = {'|1>': 2, '|+>': 2, '|->': 2, '|GHZ3>': 8, '|GHZ4>': 16,
+            '|W>': 8, '|W3>': 8}
+    return dim >= need.get(name.upper(), 1)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # The Terminal
 # ═══════════════════════════════════════════════════════════════════════
@@ -128,7 +141,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                      SweepMixin, MemoryMixin, StringMixin, ScreenMixin, ClassicMixin,
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin,
                      NoiseMixin, StateDisplayMixin, QoLMixin):
-    # Architecture: QBasicTerminal composes Engine (state) + 16 mixins (behavior).
+    # Architecture: QBasicTerminal composes Engine (state) + 20 mixins (behavior).
     #
     # Mixin map (each provides specific methods; see TerminalProtocol for contract):
     #   ExecutorMixin     — build_circuit, _exec_line, _apply_gate_str, run_immediate
@@ -263,6 +276,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                          3: phase_damping_error}
             _1q_gates = ['h', 'x', 'y', 'z', 'rx', 'ry', 'rz', 'p', 'u',
                          'id', 's', 't', 'sdg', 'tdg', 'sx']
+            _2q_gates = ['cx', 'cy', 'cz', 'ch', 'swap', 'dcx', 'iswap',
+                         'crx', 'cry', 'crz', 'cp', 'rxx', 'ryy', 'rzz']
+            id1 = depolarizing_error(0.0, 1)  # identity channel for tensoring
             for q, (ntype, nparam) in self._qubit_noise.items():
                 if ntype in _type_map and nparam > 0 and q < self.num_qubits:
                     if ntype == 1:
@@ -270,6 +286,15 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     else:
                         err = _type_map[ntype](nparam)
                     nm.add_quantum_error(err, _1q_gates, [q])
+                    # Also fire the per-qubit error after any 2-qubit gate that
+                    # touches q (identity on the partner qubit).
+                    e_first = id1.tensor(err)   # err on qubit 0 of the pair
+                    e_second = err.tensor(id1)  # err on qubit 1 of the pair
+                    for j in range(self.num_qubits):
+                        if j == q:
+                            continue
+                        nm.add_quantum_error(e_first, _2q_gates, [q, j])
+                        nm.add_quantum_error(e_second, _2q_gates, [j, q])
             return nm
         except ImportError:
             return None
@@ -435,7 +460,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'HIST': 'cmd_hist', 'PROBS': 'cmd_probs', 'DEFS': 'cmd_defs',
         'REGS': 'cmd_regs', 'VARS': 'cmd_vars',
         'CIRCUIT': 'cmd_circuit', 'DECOMPOSE': 'cmd_decompose',
-        'DENSITY': 'cmd_density', 'LOCCINFO': 'cmd_loccinfo',
+        'LOCCINFO': 'cmd_loccinfo',
         'UNDO': 'cmd_undo', 'RAM': 'cmd_ram',
         'BYE': '_quit', 'QUIT': '_quit', 'EXIT': '_quit',
         # Memory
@@ -460,7 +485,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'SAVE': 'cmd_save', 'LOAD': 'cmd_load', 'SWEEP': 'cmd_sweep',
         'INCLUDE': 'cmd_include', 'EXPORT': 'cmd_export',
         'NOISE': 'cmd_noise', 'EXPECT': 'cmd_expect',
-        'ENTROPY': 'cmd_entropy', 'CSV': 'cmd_csv', 'LOCC': 'cmd_locc',
+        'ENTROPY': 'cmd_entropy', 'DENSITY': 'cmd_density',
+        'CSV': 'cmd_csv', 'LOCC': 'cmd_locc',
         'SEND': 'cmd_send', 'SHARE': 'cmd_share', 'DIR': 'cmd_dir',
         'CLEAR': 'cmd_clear',
         # Memory
@@ -738,7 +764,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         # target remapping.
         self.program = new_prog
         self._parsed = {num: parse_stmt(s) for num, s in new_prog.items()}
+        # Move breakpoints to their renumbered lines.
+        if getattr(self, '_breakpoints', None):
+            self._breakpoints = {line_map.get(b, b) for b in self._breakpoints}
         self.io.writeln(f"RENUMBERED {len(new_prog)} LINES (start={start}, step={step})")
+        # Computed jumps (ON <var> GOTO via runtime values) can't be remapped statically.
+        if any(re.search(r'\bON\b.*\bGO(TO|SUB)\b', s, re.IGNORECASE)
+               for s in new_prog.values()):
+            self.io.writeln("  (note: verify any computed ON..GOTO/GOSUB targets)")
 
     # cmd_save, cmd_load provided by FileIOMixin.
 
@@ -890,15 +923,20 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self.io.writeln(f"REG {name} = qubits {start}-{start+size-1}")
 
     def cmd_let(self, rest: str) -> None:
-        """LET <var> = <expr> — assign a computed value to a variable."""
-        # LET angle = PI/4
-        m = re.match(r'(\w+)\s*=\s*(.*)', rest)
+        """LET <var> = <expr> — assign a computed value to a variable.
+        Supports record fields, e.g. LET p.x = 3.14 (see TYPE)."""
+        m = re.match(r'(\w+(?:\.\w+)?)\s*=\s*(.*)', rest)
         if not m:
             self.io.writeln("?USAGE: LET <var> = <expr>")
             return
         name = m.group(1)
         val = self.eval_expr(m.group(2))
         self.variables[name] = val
+        if '.' in name:  # mirror into the record dict for LIST VARS
+            base, field = name.split('.', 1)
+            rec = self.variables.get(base)
+            if isinstance(rec, dict):
+                rec[field] = val
         self.io.writeln(f"{name} = {val}")
 
     # cmd_defs, cmd_regs, cmd_vars provided by ProgramMgmtMixin.
@@ -913,13 +951,20 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         return kw
 
     def _select_method(self, qc) -> str:
-        """Choose simulation method, auto-selecting for automatic."""
+        """Choose simulation method, auto-selecting for automatic.
+
+        Clifford detection comes first so large Clifford circuits use the
+        polynomial-time stabilizer simulator instead of MPS. Stabilizer is
+        only chosen when no noise (global or per-qubit) is active, since the
+        stabilizer backend cannot carry a noise model.
+        """
         method = self.sim_method
         if method == 'automatic':
-            if self.num_qubits > 28:
-                method = 'matrix_product_state'
-            elif not self._noise_model and self._is_clifford(qc):
+            noiseless = not self._noise_model and not getattr(self, '_qubit_noise', None)
+            if noiseless and self._is_clifford(qc):
                 method = 'stabilizer'
+            elif self.num_qubits > 28:
+                method = 'matrix_product_state'
         return method
 
     def _build_backend_opts(self, method: str) -> dict:
@@ -951,13 +996,25 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     self.arrays[var] = [complex(v) for v in val]
                 self.variables[var] = val
 
+    # Above this qubit count, a full 2^n statevector is too large to
+    # reconstruct for STATE/BLOCH and would dominate runtime (and risk OOM),
+    # defeating the point of the stabilizer/MPS backends. Measured runs above
+    # it skip extraction; STATE/BLOCH then report no state.
+    _SV_EXTRACT_MAX_QUBITS = 24
+
     def _extract_statevector(self, qc_sv) -> None:
         """Run the measurement-free circuit copy to get last_sv.
 
         Includes noise when active so STATE/BLOCH/DENSITY reflect the
         same noisy state as the histogram.  The SV is from one sample of
         the noise channel (stochastic), which is physically correct.
+
+        Skipped above ``_SV_EXTRACT_MAX_QUBITS`` to avoid materializing a
+        2^n statevector that cannot be displayed anyway.
         """
+        if self.num_qubits > self._SV_EXTRACT_MAX_QUBITS:
+            self.last_sv = None
+            return
         try:
             qc_sv.save_statevector()
             sv_backend = self._make_backend('statevector', include_noise=True)
@@ -996,15 +1053,19 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     def _run_no_measure(self, qc, qc_sv, t0: float) -> None:
         """Execute the no-MEASURE path: statevector only, no shots."""
-        try:
-            qc_sv.save_statevector()
-            sv_backend = self._make_backend('statevector', include_noise=True)
-            sv_result = sv_backend.run(
-                transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level)).result()
-            self.last_sv = np.array(sv_result.get_statevector())
-            self._extract_save_results(sv_result)
-        except (RuntimeError, ValueError, TypeError, KeyError):
+        too_large = self.num_qubits > self._SV_EXTRACT_MAX_QUBITS
+        if too_large:
             self.last_sv = None
+        else:
+            try:
+                qc_sv.save_statevector()
+                sv_backend = self._make_backend('statevector', include_noise=True)
+                sv_result = sv_backend.run(
+                    transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level)).result()
+                self.last_sv = np.array(sv_result.get_statevector())
+                self._extract_save_results(sv_result)
+            except (RuntimeError, ValueError, TypeError, KeyError):
+                self.last_sv = None
         self.last_counts = None
         self._finalize_run(qc, self.sim_method, t0)
         depth = qc.depth()
@@ -1012,15 +1073,27 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         dt = time.time() - t0
         self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits "
                         f"in {dt:.2f}s  [depth={depth}, gates={n_gates}]")
-        self.io.writeln("(no MEASURE — use STATE, PROBS, or BLOCH to inspect)")
+        if too_large:
+            self.io.writeln(f"(no MEASURE; {self.num_qubits} qubits exceeds the "
+                            f"{self._SV_EXTRACT_MAX_QUBITS}-qubit statevector display limit)")
+        else:
+            self.io.writeln("(no MEASURE — use STATE, PROBS, or BLOCH to inspect)")
 
     def _run_with_fallback(self, qc, backend_opts: dict, method: str) -> 'Any':
         """Run the circuit with shots, handling GPU and stabilizer fallbacks."""
         _noise_key = str(self._noise_model) if self._noise_model else None
+        # Numeric variable bindings affect gate parameters baked into the
+        # transpiled circuit, so they must be part of the cache key. Without
+        # this, parameter sweeps that re-run via cmd_run (PLOT, ANIMATE) reuse
+        # the first circuit and the swept variable has no effect.
+        _var_key = tuple(sorted(
+            (k, v) for k, v in self.variables.items()
+            if isinstance(v, (int, float, bool)) and not k.startswith('_')
+        ))
         cache_key = (
             tuple(sorted(self.program.items())),
             self.num_qubits, method, self.sim_device,
-            _noise_key,
+            _noise_key, _var_key,
             getattr(self, '_fusion_enable', None),
             getattr(self, '_mps_truncation', None),
             getattr(self, '_sv_parallel_threshold', None),
@@ -1090,27 +1163,41 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             return
         except Exception as e:
             self.last_circuit = None
-            if hasattr(self, '_error_target') and self._error_target is not None:
-                self._err_code = 1
-                self._err_line = 0
-                self._in_error_handler = True
+            if self._error_target is not None:
+                # Build errors are wrapped as "LINE N: <original>"; recover the
+                # failing line and any "ERROR <code>" the program raised so that
+                # ERR/ERL carry the real values instead of defaulting to 1/0.
                 msg = str(e)
-                if msg.startswith('ERROR '):
-                    try:
-                        self._err_code = int(msg.split()[1])
-                    except (IndexError, ValueError):
-                        pass
+                _lm = re.match(r'LINE (\d+):\s*(.*)', msg, re.DOTALL)
+                self._err_line = int(_lm.group(1)) if _lm else 0
+                _inner = _lm.group(2) if _lm else msg
+                _cm = re.search(r'\bERROR (\d+)', _inner)
+                self._err_code = int(_cm.group(1)) if _cm else 1
+                self._in_error_handler = True
                 self.variables['ERR'] = self._err_code
                 self.variables['ERL'] = self._err_line
+                # Run handler lines through the program executor (not dispatch),
+                # so PRINT/LET behave as in a program and no immediate state
+                # dump is emitted. Stops at END or RESUME.
+                from qubasic_core.exec_context import ExecContext
+                from qubasic_core.scope import Scope
                 handler_lines = sorted(ln for ln in self.program if ln >= self._error_target)
+                qc_h = QuantumCircuit(self.num_qubits)
+                h_ctx = ExecContext(sorted_lines=handler_lines, ip=0,
+                                    run_vars=Scope(self.variables),
+                                    max_iterations=self._max_iterations, qc=qc_h)
                 for _hi, ln in enumerate(handler_lines):
                     if _hi >= 200:
                         self.io.writeln("?ERROR HANDLER LIMIT (200 lines)")
                         break
-                    stmt = self.program[ln].strip().upper()
-                    if stmt == 'END' or stmt.startswith('RESUME'):
+                    up = self.program[ln].strip().upper()
+                    if up == 'END' or up.startswith('RESUME'):
                         break
-                    self.dispatch(self.program[ln].strip())
+                    try:
+                        self._exec_line(self.program[ln].strip(),
+                                        parsed=self._get_parsed(ln), ctx=h_ctx)
+                    except Exception:
+                        pass
                 self._in_error_handler = False
             else:
                 self.io.writeln(f"?BUILD ERROR: {e}")
@@ -1219,6 +1306,33 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if m['time_s'] > 2.0 and sys.stdout.isatty():
             self.io.write('\a')
 
+    def result(self) -> dict:
+        """Structured result of the last run, for headless/agent/JSON callers.
+
+        JSON-serializable: counts, qubit/shot config, user variables, the
+        statevector (when small enough), and key run-manifest fields.
+        """
+        out: dict = {
+            'counts': self.last_counts or {},
+            'num_qubits': self.num_qubits,
+            'shots': self.shots,
+        }
+        uvars = {k: v for k, v in self.variables.items()
+                 if not k.startswith('_') and isinstance(v, (int, float, str, bool))}
+        if uvars:
+            out['variables'] = uvars
+        sv = self.last_sv
+        if sv is not None:
+            svf = np.ascontiguousarray(sv).ravel()
+            if svf.size <= 256:  # keep JSON output bounded
+                out['statevector'] = [[float(a.real), float(a.imag)] for a in svf]
+        manifest = getattr(self, '_run_manifest', None)
+        if manifest:
+            out['method'] = manifest.get('method')
+            out['depth'] = manifest.get('depth')
+            out['gates'] = manifest.get('gates')
+        return out
+
     def cmd_sample(self, rest: str = '') -> None:
         """SAMPLE [shots] — sample the current circuit using SamplerV2 primitive."""
         if not self.program:
@@ -1304,6 +1418,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             run_vars=Scope(self.variables),
             max_iterations=self._max_iterations, qc=qc,
         )
+        # Evolve the statevector incrementally: each step applies only the
+        # gates newly appended to qc, instead of re-simulating the whole
+        # circuit (O(total gates) rather than O(lines^2)).
+        from qubasic_core.gates import _apply_gate_np
+        step_sv = np.zeros(2 ** self.num_qubits, dtype=complex)
+        step_sv[0] = 1.0
+        prev_len = 0
 
         self.io.writeln(f"STEP MODE \u2014 {len(sorted_lines)} lines, {self.num_qubits} qubits")
         self.io.writeln("Press ENTER to advance, A for auto-play, Q to quit\n")
@@ -1322,13 +1443,29 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             # Execute it
             result = self._exec_line(stmt, parsed=parsed, ctx=ctx)
 
-            # Show state
+            # Show state — apply only the gates appended on this step.
             try:
-                qc_tmp = qc.copy()
-                qc_tmp.save_statevector()
-                sv_b = self._make_backend('statevector', include_noise=True)
-                sv_r = sv_b.run(transpile(qc_tmp, sv_b, optimization_level=self._transpile_opt_level)).result()
-                sv = np.array(sv_r.get_statevector())
+                for instr in qc.data[prev_len:]:
+                    op = instr.operation
+                    nm = op.name.lower()
+                    if nm in ('measure', 'barrier', 'save_statevector', 'snapshot', 'reset'):
+                        continue
+                    q_idx = [qc.find_bit(q).index for q in instr.qubits]
+                    gate_key = GATE_ALIASES.get(nm.upper(), nm.upper())
+                    if gate_key in GATE_TABLE:
+                        mat = _np_gate_matrix(gate_key, tuple(float(p) for p in op.params))
+                    else:
+                        try:
+                            mat = np.asarray(op.to_matrix(), dtype=complex)
+                            q_idx = list(reversed(q_idx))  # qiskit LSB-first -> MSB-first
+                        except Exception:
+                            continue
+                    step_sv = _apply_gate_np(step_sv, mat, q_idx, self.num_qubits)
+                prev_len = len(qc.data)
+                sv = np.ascontiguousarray(step_sv).ravel()
+                step_sv = sv
+                self.last_sv = sv
+                self._checkpoint_sv(line_num)
                 self._print_sv_compact(sv)
             except Exception:
                 self.io.writeln("   (state unavailable)")
@@ -1397,15 +1534,15 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 for_depth += 1
                 for_var_stack.append(parsed.var.upper())
             elif isinstance(parsed, NextStmt):
-                for_depth -= 1
-                # Check FOR/NEXT variable name matching
-                if parsed.var and for_var_stack:
-                    expected = for_var_stack[-1]
-                    if parsed.var.upper() != expected:
+                # A NEXT may close one loop (NEXT / NEXT i) or several (NEXT i, j).
+                names = [v.strip() for v in parsed.var.split(',')] if parsed.var.strip() else ['']
+                for nm in names:
+                    for_depth -= 1
+                    if nm and for_var_stack and nm.upper() != for_var_stack[-1]:
                         raise RuntimeError(
-                            f"LINE {ln}: NEXT {parsed.var} does not match FOR {expected}")
-                if for_var_stack:
-                    for_var_stack.pop()
+                            f"LINE {ln}: NEXT {nm} does not match FOR {for_var_stack[-1]}")
+                    if for_var_stack:
+                        for_var_stack.pop()
             elif isinstance(parsed, WhileStmt):
                 while_depth += 1
             elif isinstance(parsed, WendStmt):
@@ -1891,6 +2028,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             # Try named states first
             if sv_expr.upper() in ('|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>',
                                   '|GHZ3>', '|GHZ4>', '|W>', '|W3>'):
+                if not _named_state_fits(sv_expr.upper(), self.num_qubits):
+                    self.io.writeln(f"  (warning: {sv_expr.upper()} needs more qubits than "
+                                    f"{self.num_qubits}; falling back to |0...0>)")
                 sv_flat = _resolve_named_state(sv_expr.upper(), self.num_qubits)
             else:
                 sv_list = self._parse_matrix(sv_expr)
@@ -1919,6 +2059,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             dim = 2 ** self.num_qubits
             if sv_expr.upper() in ('|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>',
                                   '|GHZ3>', '|GHZ4>', '|W>', '|W3>'):
+                if not _named_state_fits(sv_expr.upper(), self.num_qubits):
+                    self.io.writeln(f"  (warning: {sv_expr.upper()} needs more qubits than "
+                                    f"{self.num_qubits}; falling back to |0...0>)")
                 sv_flat = _resolve_named_state(sv_expr.upper(), self.num_qubits)
             else:
                 sv_flat = np.array(self._parse_matrix(sv_expr), dtype=complex).ravel()
@@ -1928,7 +2071,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             if abs(norm - 1.0) > 1e-6:
                 sv_flat = sv_flat / np.sqrt(norm)
             self.last_sv = sv_flat
-            self.io.writeln(f"STATE SET ({self.num_qubits} qubits)")
+            # Persist so the next RUN starts from this state (prepended at build).
+            self._pending_set_state = sv_flat
+            self.io.writeln(f"STATE SET ({self.num_qubits} qubits) — applied on next RUN")
         except Exception as e:
             self.io.writeln(f"?SET_STATE ERROR: {e}")
 
@@ -2065,7 +2210,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     })
 
     def cmd_help(self, rest: str = '') -> None:
-        if rest.strip().upper() == 'STATUS':
+        arg = rest.strip().upper()
+        if arg == 'STATUS':
             self.io.writeln("\n  Command Implementation Status:")
             all_cmds = sorted(set(self._CMD_NO_ARG.keys()) | set(self._CMD_WITH_ARG.keys()))
             for cmd in all_cmds:
@@ -2077,6 +2223,22 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     tag = 'native'
                 self.io.writeln(f"    {cmd:20s} [{tag}]")
             self.io.writeln(f"\n  {len(all_cmds)} commands registered")
+            return
+        # HELP <command> / HELP <gate> — show one entry's description.
+        if arg:
+            method_name = self._CMD_WITH_ARG.get(arg) or self._CMD_NO_ARG.get(arg)
+            if method_name:
+                method = getattr(type(self), method_name, None)
+                doc = (getattr(method, '__doc__', '') or '').strip()
+                self.io.writeln(f"\n  {arg}: {doc or '(no description)'}\n")
+                return
+            gate_key = GATE_ALIASES.get(arg, arg)
+            if gate_key in GATE_TABLE:
+                n_params, n_qubits = GATE_TABLE[gate_key]
+                self.io.writeln(f"\n  {arg}: gate — {n_params} parameter(s), {n_qubits} qubit(s)\n")
+                return
+            self.io.writeln(f"  No help entry for '{arg}'. Type HELP for the full reference.")
+            self._suggest_command(arg)
             return
         self.io.writeln(HELP_TEXT)
         all_cmds = sorted(set(self._CMD_NO_ARG.keys()) | set(self._CMD_WITH_ARG.keys()))

@@ -8,6 +8,8 @@ import sys
 import time
 from typing import Any
 
+import numpy as np
+
 MAX_STATS_RUNS = 10000
 
 
@@ -111,26 +113,40 @@ class ProfilerMixin:
             self.io.writeln("?STATS needs at least 1 run")
             return
         self.io.writeln(f"\nRunning {n} trials...")
-        for trial in range(n):
-            old_io = self.io
-            old_stdout = sys.stdout
-            self.io = _NullIOPort()
-            sys.stdout = open(os.devnull, 'w')
-            try:
-                self.cmd_run()
-            finally:
-                sys.stdout.close()
-                sys.stdout = old_stdout
-                self.io = old_io
-            if self.last_counts:
-                if len(self._stats_runs) >= MAX_STATS_RUNS:
-                    self.io.writeln(f"?STATS: run limit ({MAX_STATS_RUNS}) reached, stopping collection")
-                    break
-                self._stats_runs.append(dict(self.last_counts))
-            if n > 10 and (trial + 1) % (n // 10) == 0:
-                from qubasic_core.qol import quantum_spin
-                spin = quantum_spin(trial)
-                self.io.write(f"  {spin} {100 * (trial + 1) // n}%..." + '\r')
+        old_io = self.io
+        old_stdout = sys.stdout
+        devnull = open(os.devnull, 'w')  # opened once for all trials
+        base_seed = self._seed
+        try:
+            for trial in range(n):
+                # A fixed SEED would make every trial identical, so vary it per
+                # trial (and invalidate the cache) while keeping reproducibility.
+                if base_seed is not None:
+                    self._seed = base_seed + trial
+                    np.random.seed(base_seed + trial)
+                    self._circuit_cache_key = None
+                self.io = _NullIOPort()
+                sys.stdout = devnull
+                try:
+                    self.cmd_run()
+                finally:
+                    sys.stdout = old_stdout
+                    self.io = old_io
+                if self.last_counts:
+                    if len(self._stats_runs) >= MAX_STATS_RUNS:
+                        self.io.writeln(f"?STATS: run limit ({MAX_STATS_RUNS}) reached, stopping collection")
+                        break
+                    self._stats_runs.append(dict(self.last_counts))
+                if n > 10 and (trial + 1) % (n // 10) == 0:
+                    from qubasic_core.qol import quantum_spin
+                    spin = quantum_spin(trial)
+                    self.io.write(f"  {spin} {100 * (trial + 1) // n}%..." + '\r')
+        finally:
+            sys.stdout = old_stdout
+            self.io = old_io
+            devnull.close()
+            if base_seed is not None:
+                self._seed = base_seed
         if n > 10:
             self.io.write(" " * 30 + '\r')
         self.io.writeln(f"Collected {len(self._stats_runs)} runs ({n} trials)")

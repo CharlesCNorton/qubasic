@@ -297,6 +297,7 @@ class DemoMixin:
 
     def _demo_stress(self):
         self.cmd_new()
+        self.io.writeln("  (note: STRESS builds a highly entangled 20-qubit state; this can take a while)")
         n = 20
         self.num_qubits = n
         self.program = {

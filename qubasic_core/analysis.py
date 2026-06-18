@@ -22,24 +22,48 @@ class AnalysisMixin:
     self.locc, self.locc_mode.
     """
 
+    def _resolve_analysis_target(self, rest: str):
+        """Return (sv, n_qubits, remaining_rest) for a state-analysis command.
+
+        In LOCC SPLIT mode a leading register letter selects that register
+        (e.g. ``EXPECT A Z 0``); otherwise the active statevector is used.
+        """
+        parts = rest.split()
+        if self.locc_mode and self.locc and not self.locc.joint and parts:
+            cand = parts[0].upper()
+            if cand in self.locc.names:
+                sv, n = self._active_sv_for_reg(cand)
+                return sv, n, ' '.join(parts[1:])
+        return self._active_sv, self._active_nqubits, rest
+
     def cmd_expect(self, rest: str) -> None:
-        """EXPECT <pauli> [qubits] — compute expectation value.
-        Examples: EXPECT Z 0, EXPECT ZZ 0 1, EXPECT X 0"""
-        sv = self._active_sv
+        """EXPECT [reg] <pauli> [qubits] — compute expectation value.
+        Examples: EXPECT Z 0, EXPECT ZZ 0 1, EXPECT A Z 0 (SPLIT register A)"""
+        sv, n, rest = self._resolve_analysis_target(rest)
         if sv is None:
             if self.locc_mode and self.locc and not self.locc.joint:
-                self.io.writeln("?SPLIT mode: use STATE A / STATE B for per-register inspection")
+                self.io.writeln("?SPLIT mode: prefix a register, e.g. EXPECT A Z 0")
             else:
                 self.io.writeln("?NO STATE — RUN first")
             return
         parts = rest.split()
         if not parts:
-            self.io.writeln("?USAGE: EXPECT <Z|X|Y|ZZ|...> [qubits]")
+            self.io.writeln("?USAGE: EXPECT [reg] <Z|X|Y|ZZ|...> [qubits]")
             return
         pauli_str = parts[0].upper()
         qubits = [int(q) for q in parts[1:]] if len(parts) > 1 else list(range(len(pauli_str)))
-
-        n = self._active_nqubits
+        # Fast numpy path for diagonal (Z/I-only) observables — no qiskit copy.
+        if set(pauli_str) <= {'Z', 'I'}:
+            svf = np.ascontiguousarray(sv).ravel()
+            probs = np.abs(svf) ** 2
+            idx = np.arange(svf.size)
+            sign = np.ones(svf.size)
+            for i, p in enumerate(pauli_str):
+                if p == 'Z' and i < len(qubits):
+                    sign = sign * np.where(((idx >> qubits[i]) & 1) == 1, -1.0, 1.0)
+            val = float(np.sum(probs * sign))
+            self.io.writeln(f"  <{pauli_str}> on qubits {qubits} = {val:.6f}")
+            return
         try:
             from qiskit.quantum_info import Statevector, SparsePauliOp
             sv_q = Statevector(np.ascontiguousarray(sv).ravel())
@@ -54,17 +78,19 @@ class AnalysisMixin:
             self.io.writeln(f"?EXPECT ERROR: {e}")
 
     def cmd_entropy(self, rest: str = '') -> None:
-        """ENTROPY [qubits] — entanglement entropy of specified qubits vs rest.
-        Examples: ENTROPY 0  |  ENTROPY 0 1  |  ENTROPY (defaults to qubit 0)"""
-        sv = self._active_sv
+        """ENTROPY [reg] [qubits] — entanglement entropy of qubits vs rest.
+        Examples: ENTROPY 0 | ENTROPY 0 1 | ENTROPY A 0 (SPLIT register A)"""
+        sv, n, rest = self._resolve_analysis_target(rest)
         if sv is None:
-            self.io.writeln("?NO STATE — RUN first")
+            if self.locc_mode and self.locc and not self.locc.joint:
+                self.io.writeln("?SPLIT mode: prefix a register, e.g. ENTROPY A 0")
+            else:
+                self.io.writeln("?NO STATE — RUN first")
             return
         if rest.strip():
             partition_a = [int(q) for q in rest.replace(',', ' ').split() if q.strip()]
         else:
             partition_a = [0]
-        n = self._active_nqubits
         try:
             from qiskit.quantum_info import Statevector, entropy, partial_trace
             sv_obj = Statevector(np.ascontiguousarray(sv).ravel())
@@ -81,25 +107,27 @@ class AnalysisMixin:
         except Exception as e:
             self.io.writeln(f"?ENTROPY ERROR: {e}")
 
-    def cmd_density(self) -> None:
-        """Show density matrix (or partial trace for small systems)."""
-        sv = self._active_sv
+    def cmd_density(self, rest: str = '') -> None:
+        """Show density matrix (DENSITY [reg]); summarizes for large systems."""
+        sv, n, rest = self._resolve_analysis_target(rest)
         if sv is None:
-            self.io.writeln("?NO STATE — RUN first")
+            if self.locc_mode and self.locc and not self.locc.joint:
+                self.io.writeln("?SPLIT mode: prefix a register, e.g. DENSITY A")
+            else:
+                self.io.writeln("?NO STATE — RUN first")
             return
         sv = np.ascontiguousarray(sv).ravel()
-        rho = np.outer(sv, sv.conj())
-        n = self._active_nqubits
         dim = 2**n
         if dim > 16:
+            # |psi><psi| is rank-1, so purity is ||psi||^4 and the von Neumann
+            # entropy is 0; report directly instead of building a 2^n x 2^n matrix.
+            norm2 = float(np.vdot(sv, sv).real)
             self.io.writeln(f"  Density matrix: {dim}x{dim} (too large to display)")
-            self.io.writeln(f"  Purity: {np.real(np.trace(rho @ rho)):.6f}")
-            self.io.write(f"  Von Neumann entropy: ")
-            eigvals = np.linalg.eigvalsh(rho)
-            eigvals = eigvals[eigvals > 1e-15]
-            ent = -np.sum(eigvals * np.log2(eigvals))
-            self.io.writeln(f"{ent:.6f} bits")
+            self.io.writeln(f"  Pure state |psi><psi|: purity {norm2 ** 2:.6f}")
+            self.io.writeln(f"  Von Neumann entropy: 0.000000 bits")
+            self.io.writeln(f"  (use ENTROPY <qubits> for reduced-state entanglement)")
             return
+        rho = np.outer(sv, sv.conj())
         self.io.writeln(f"\n  Density matrix ({dim}x{dim}):\n")
         for i in range(dim):
             row = []

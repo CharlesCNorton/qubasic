@@ -335,6 +335,7 @@ class QoLMixin:
         header = '     ' + ''.join(f'{q:>4}' for q in range(n_show))
         self.io.writeln(header)
         sv_flat = np.ascontiguousarray(sv).ravel()
+        psi_t = sv_flat.reshape([2] * n)  # reshape once, reuse across all pairs
         for qi in range(n_show):
             row = f'  {qi:>2} '
             for qj in range(n_show):
@@ -343,7 +344,6 @@ class QoLMixin:
                     continue
                 keep = sorted({qi, qj})
                 trace_out = [q for q in range(n) if q not in keep]
-                psi_t = sv_flat.reshape([2] * n)
                 if trace_out:
                     rho = np.tensordot(psi_t, psi_t.conj(), axes=(trace_out, trace_out))
                 else:

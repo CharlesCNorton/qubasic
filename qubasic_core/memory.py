@@ -110,14 +110,21 @@ class MemoryMixin:
         rho_00 = float(np.sum(np.abs(t0) ** 2))
         rho_11 = float(np.sum(np.abs(t1) ** 2))
         rho_01 = complex(np.sum(np.conj(t0) * t1))
+        # Recover amplitudes with alpha as the real phase reference; beta then
+        # carries the relative phase (real and imaginary parts both exposed).
+        alpha = np.sqrt(max(0.0, rho_00))
+        if alpha > 1e-12:
+            beta = rho_01 / alpha
+        else:
+            beta = complex(np.sqrt(max(0.0, rho_11)))
         return [rho_11,
                 float(2 * rho_01.real),
                 float(-2 * rho_01.imag),
                 float(rho_00 - rho_11),
-                float(np.sqrt(max(0, rho_00))),
+                float(alpha),
                 0.0,
-                float(np.sqrt(max(0, rho_11))),
-                0.0][field] if field < 8 else 0.0
+                float(beta.real),
+                float(beta.imag)][field] if field < 8 else 0.0
 
     def _peek_config(self, addr: int) -> float:
         n = CFG_NAMES[addr]
@@ -206,14 +213,24 @@ class MemoryMixin:
 
     # ── Commands ───────────────────────────────────────────────────────
 
+    # Address ranges that PEEK/POKE actually back with state.
+    _MAPPED_RANGES = ((0x0000, 0x003F), (0x0100, 0x01FF), (0xD000, 0xD01F),
+                      (0xD100, 0xD1FF), (0xE000, 0xFFFF))
+
+    def _is_mapped(self, addr: float) -> bool:
+        a = int(addr)
+        return any(lo <= a <= hi for lo, hi in self._MAPPED_RANGES)
+
     def cmd_peek(self, rest: str) -> None:
         """PEEK addr — read from memory-mapped address."""
         if not rest.strip():
             self.io.writeln("?USAGE: PEEK <addr>")
             return
-        addr = self.eval_expr(rest.strip())
+        addr = self._eval_int(rest.strip())
         val = self._peek(addr)
         self.io.writeln(f"  ${int(addr):04X} = {val}")
+        if not self._is_mapped(addr):
+            self.io.writeln(f"  (note: ${int(addr):04X} is unmapped — reads as 0)")
 
     def cmd_poke(self, rest: str) -> None:
         """POKE addr, value — write to memory-mapped address."""
@@ -222,9 +239,46 @@ class MemoryMixin:
         if not m:
             self.io.writeln("?USAGE: POKE <addr>, <value>")
             return
-        addr = self.eval_expr(m.group(1))
+        addr = self._eval_int(m.group(1))
         val = self.eval_expr(m.group(2))
+        if not self._is_mapped(addr):
+            self.io.writeln(f"  (note: ${int(addr):04X} is unmapped — write ignored)")
+            return
         self._poke(addr, val)
+
+    def _emit_poke_state_prep(self, qc) -> None:
+        """Apply qubit state preparation requested via POKE to the $0100 block.
+
+        Field 0 (P(|1>)) stored an RY angle; Bloch fields stored a target
+        (x, y, z), prepared here as the closest pure single-qubit state. Called
+        at the start of circuit build so a poked qubit starts in that state.
+        """
+        prep = getattr(self, '_poke_state_prep', None)
+        if not prep:
+            return
+        import numpy as np
+        bloch: dict = {}
+        for key, val in prep.items():
+            if isinstance(key, int):
+                if key < qc.num_qubits and isinstance(val, tuple) and val[0] == 'RY':
+                    qc.ry(float(val[1]), key)
+            elif isinstance(key, tuple):
+                q, axis = key
+                bloch.setdefault(q, {})[axis] = float(val)
+        for q, comps in bloch.items():
+            if q >= qc.num_qubits:
+                continue
+            x = comps.get('Bx', 0.0)
+            y = comps.get('By', 0.0)
+            z = comps.get('Bz', 0.0)
+            r = (x * x + y * y + z * z) ** 0.5
+            if r < 1e-9:
+                continue
+            theta = float(np.arccos(max(-1.0, min(1.0, z / r))))
+            phi = float(np.arctan2(y, x))
+            qc.ry(theta, q)
+            if abs(phi) > 1e-12:
+                qc.rz(phi, q)
 
     def cmd_sys(self, rest: str) -> None:
         """SYS addr — execute a built-in or user routine."""
@@ -242,8 +296,10 @@ class MemoryMixin:
             self._user_sys[addr] = name
             self.io.writeln(f"INSTALLED {name} AT ${addr:04X}")
             return
-        addr = int(self.eval_expr(rest))
+        addr = self._eval_int(rest)
         if addr in SYS_ROUTINES:
+            if SYS_ROUTINES[addr] == 'STRESS':
+                self.io.writeln("  (note: STRESS runs a 20-qubit circuit; this can take a while)")
             self.cmd_demo(SYS_ROUTINES[addr])
         elif addr in self._user_sys:
             name = self._user_sys[addr]

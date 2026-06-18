@@ -25,6 +25,21 @@ class DisplayMixin:
     Requires: TerminalProtocol — uses self.num_qubits, self.arrays.
     """
 
+    def _rich_print(self, *renderables) -> None:
+        """Render rich content to a string and emit it through the IOPort.
+
+        Routing rich output through self.io (instead of straight to stdout)
+        means headless/agent callers with a custom IOPort capture tables and
+        statevectors too, and the IOPort's encoding fallback applies uniformly.
+        ANSI colour is kept only when stdout is a real terminal.
+        """
+        import io as _io
+        from rich.console import Console
+        buf = _io.StringIO()
+        force = bool(sys.stdout and sys.stdout.isatty())
+        Console(file=buf, highlight=False, force_terminal=force).print(*renderables)
+        self.io.write(buf.getvalue())
+
     def print_histogram(self, counts: dict[str, int]) -> None:
         """Measurement histogram with optional rich-table formatting."""
         total = sum(counts.values())
@@ -48,11 +63,11 @@ class DisplayMixin:
 
         max_count = max(c for _, c in display) if display else 1
         if len(sorted_counts) > MAX_HISTOGRAM_STATES:
-            _get_console().print(
+            self._rich_print(
                 f"\n  [dim]Showing top {MAX_HISTOGRAM_STATES} of "
                 f"{len(sorted_counts)} outcomes:[/dim]\n")
         else:
-            _get_console().print()
+            self._rich_print()
 
         for state, count in display:
             pct = 100 * count / total
@@ -72,8 +87,8 @@ class DisplayMixin:
                 f"{100*rest_count/total:5.1f}%", "[dim](remaining)[/dim]")
 
         try:
-            _get_console().print(table)
-            _get_console().print()
+            self._rich_print(table)
+            self._rich_print()
         except UnicodeEncodeError:
             self._print_histogram_plain(display, sorted_counts, total)
 
@@ -122,7 +137,7 @@ class DisplayMixin:
             table.add_column("State", justify="right", style="bold")
             table.add_column("Amplitude", justify="right")
             table.add_column("P", justify="right")
-            _get_console().print(f"\n  [bold]Statevector ({n} qubits):[/bold]")
+            self._rich_print(f"\n  [bold]Statevector ({n} qubits):[/bold]")
             count = 0
             for i, amp in enumerate(sv):
                 if abs(amp) > AMPLITUDE_THRESHOLD:
@@ -140,8 +155,8 @@ class DisplayMixin:
                             table.add_row("...", "", f"+{remaining} more")
                         break
             try:
-                _get_console().print(table)
-                _get_console().print()
+                self._rich_print(table)
+                self._rich_print()
                 return
             except UnicodeEncodeError:
                 pass  # fall through to plain-text path below

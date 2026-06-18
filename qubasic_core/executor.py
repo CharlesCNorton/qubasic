@@ -74,6 +74,15 @@ class ExecutorMixin:
         from qubasic_core.backend import QiskitBackend
 
         qc = QuantumCircuit(self.num_qubits)
+        # Apply any qubit state preparation requested via POKE to $0100.
+        if getattr(self, '_poke_state_prep', None):
+            self._emit_poke_state_prep(qc)
+        # Apply a pending immediate SET_STATE so it persists into this RUN.
+        _pend = getattr(self, '_pending_set_state', None)
+        if _pend is not None and len(_pend) == 2 ** self.num_qubits:
+            from qiskit.quantum_info import Statevector
+            from qiskit_aer.library import SetStatevector
+            qc.append(SetStatevector(Statevector(_pend)), list(range(self.num_qubits)))
         backend = QiskitBackend(qc, self._apply_gate)
         ctx = ExecContext(
             sorted_lines=sorted(self.program.keys()),
@@ -84,6 +93,7 @@ class ExecutorMixin:
             backend=backend,
         )
         has_measure = False
+        self._on_measure_fired = False
 
         while ctx.ip < len(ctx.sorted_lines):
             ctx.iteration_count += 1
@@ -93,8 +103,29 @@ class ExecutorMixin:
             stmt = self.program[line_num].strip()
             parsed = self._get_parsed(line_num)
 
+            # Debug instrumentation — each is a no-op unless explicitly enabled.
+            if self._trace_mode:
+                self._trace_line(line_num)
+            if self._breakpoints and self._check_breakpoint(line_num, ctx.sorted_lines, ctx.ip):
+                break
+            if self._on_timer_target is not None:
+                _timer_tgt = self._check_timer_callback(ctx.sorted_lines, ctx.ip)
+                if _timer_tgt is not None:
+                    ctx.ip = _timer_tgt
+                    continue
+
             if isinstance(parsed, MeasureStmt):
                 has_measure = True
+                if self._on_measure_target is not None and not self._on_measure_fired:
+                    self._on_measure_fired = True
+                    self._gosub_stack.append(ctx.ip + 1)
+                    for _i, _ln in enumerate(ctx.sorted_lines):
+                        if _ln == self._on_measure_target:
+                            ctx.ip = _i
+                            break
+                    else:
+                        ctx.ip += 1
+                    continue
                 ctx.ip += 1
                 continue
             if isinstance(parsed, CompoundStmt):
@@ -305,6 +336,10 @@ class ExecutorMixin:
             if tok in protected or tok.upper() in protected or tok.lower() in protected:
                 continue
             if tok in merged:
+                # Don't expand record bases (dicts) — leave p in p.x intact so
+                # the expression evaluator can resolve the field.
+                if isinstance(merged[tok], dict):
+                    continue
                 tokens[i] = str(merged[tok])
         return ''.join(tokens)
 

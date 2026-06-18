@@ -46,6 +46,14 @@ class EndSelectStmt(Stmt):
     pass
 
 @dataclass(frozen=True, slots=True)
+class ElseStmt(Stmt):
+    pass
+
+@dataclass(frozen=True, slots=True)
+class EndIfStmt(Stmt):
+    pass
+
+@dataclass(frozen=True, slots=True)
 class EndSubStmt(Stmt):
     pass
 

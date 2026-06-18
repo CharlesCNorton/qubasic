@@ -32,6 +32,7 @@ class DebugMixin:
         self._breakpoints: set[int] = set()
         self._watches: list[str] = []
         self._on_measure_target: int | None = None
+        self._on_measure_fired: bool = False
         self._on_timer_target: int | None = None
         self._on_timer_interval: float = 0.0
         self._on_timer_last: float = 0.0

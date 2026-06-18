@@ -1783,11 +1783,23 @@ class TestLOCCNoise(unittest.TestCase):
         self.assertGreater(errors / total, 0.05)
 
     def test_non_depolarizing_warns(self):
-        """Non-depolarizing noise + LOCC should warn."""
+        """Noise the LOCC numpy path cannot reproduce should warn.
+
+        depolarizing/amplitude_damping/phase_flip are now supported in LOCC;
+        thermal is not, so it should still warn-and-ignore.
+        """
         t = QBasicTerminal()
-        t.cmd_noise('amplitude_damping 0.1')
+        t.cmd_noise('thermal 50e-6 70e-6 1e-6')
         _, out = capture(t.cmd_locc, 'JOINT 1 1')
         self.assertIn('WARNING', out)
+
+    def test_amplitude_damping_locc_supported(self):
+        """Amplitude damping now propagates into the LOCC engine."""
+        t = QBasicTerminal()
+        t.cmd_noise('amplitude_damping 0.2')
+        t.cmd_locc('JOINT 1 1')
+        self.assertEqual(t.locc.noise_type, 'amplitude_damping')
+        self.assertAlmostEqual(t.locc.noise_param, 0.2)
 
 
 @pytest.mark.real_sim
@@ -2404,6 +2416,82 @@ def _capture_io(terminal):
     buf = BufferIOPort()
     terminal.io = buf
     return buf
+
+
+@pytest.mark.real_sim
+class TestCuredBehaviors(unittest.TestCase):
+    """Real-simulation checks for behaviors fixed in this round."""
+
+    def test_multiline_if_executes_only_taken_branch(self):
+        t = QBasicTerminal(); t.num_qubits = 1; t.shots = 100
+        t.program = {10: 'IF 1==1 THEN', 20: 'X 0', 30: 'ELSE',
+                     40: 'H 0', 50: 'END IF', 60: 'MEASURE'}
+        capture(t.cmd_run)
+        self.assertEqual(t.last_counts.get('1', 0), 100)  # X taken, H skipped
+        t2 = QBasicTerminal(); t2.num_qubits = 1; t2.shots = 100
+        t2.program = {10: 'IF 1==2 THEN', 20: 'X 0', 30: 'ELSE',
+                      40: 'H 0', 50: 'END IF', 60: 'MEASURE'}
+        capture(t2.cmd_run)
+        self.assertGreater(len(t2.last_counts), 1)  # H taken -> superposition
+
+    def test_dollar_address_peek(self):
+        t = QBasicTerminal(); t.num_qubits = 3
+        _, out = capture(t.cmd_peek, '$D000')
+        self.assertNotIn('SYNTAX', out)
+        self.assertIn('3', out)
+
+    def test_option_base_one_indexing(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.program = {10: 'OPTION BASE 1', 20: 'DIM a(3)',
+                     30: 'LET a(1) = 7', 40: 'PRINT a(1)', 50: 'END'}
+        _, out = capture(t.cmd_run)
+        self.assertIn('7', out)
+
+    def test_set_state_persists_into_run(self):
+        t = QBasicTerminal(); t.num_qubits = 1; t.shots = 400
+        capture(t.cmd_set_state, '|+>')
+        t.program = {10: 'MEASURE'}
+        capture(t.cmd_run)
+        self.assertGreater(t.last_counts.get('0', 0), 100)
+        self.assertGreater(t.last_counts.get('1', 0), 100)
+
+    def test_expect_zz_numpy_fastpath(self):
+        t = QBasicTerminal(); t.num_qubits = 2; t.shots = 50
+        t.program = {10: 'H 0', 20: 'CX 0,1', 30: 'MEASURE'}
+        capture(t.cmd_run)
+        _, out = capture(t.cmd_expect, 'ZZ 0 1')
+        self.assertIn('1.000000', out)
+
+    def test_amplitude_damping_decays_in_locc(self):
+        t = QBasicTerminal()
+        t.cmd_noise('amplitude_damping 0.6')
+        t.cmd_locc('JOINT 1 1')
+        t.shots = 400
+        t.program = {10: '@A X 0', 20: 'MEASURE'}
+        capture(t.cmd_run)
+        a0 = sum(c for s, c in t.last_counts.items() if s.split('|')[0] == '0')
+        self.assertGreater(a0, 0)  # |1> decayed toward |0>
+
+    def test_large_clifford_uses_stabilizer(self):
+        t = QBasicTerminal(); t.num_qubits = 30; t.shots = 20
+        prog = {10: 'H 0'}
+        ln = 20
+        for i in range(1, 30):
+            prog[ln] = f'CX 0,{i}'
+            ln += 10
+        prog[ln] = 'MEASURE'
+        t.program = prog
+        capture(t.cmd_run)
+        for s in t.last_counts:
+            self.assertIn(s, ('0' * 30, '1' * 30))
+        self.assertEqual(t._run_manifest['method'], 'stabilizer')
+
+    def test_multi_next_closes_both_loops(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.program = {10: 'LET c = 0', 20: 'FOR i = 1 TO 2', 30: 'FOR j = 1 TO 2',
+                     40: 'LET c = c + 1', 50: 'NEXT j, i', 60: 'PRINT c', 70: 'END'}
+        _, out = capture(t.cmd_run)
+        self.assertIn('4', out)
 
 
 # =====================================================================

@@ -36,9 +36,13 @@ class NoiseMixin:
         if not rest or rest.strip().upper() == 'OFF':
             self._noise_model = None
             self._noise_depol_p = 0.0
+            self._noise_locc_type = 'none'
+            self._noise_locc_param = 0.0
+            self._noise_spec = None
             # Update LOCC engine if active
             if getattr(self, 'locc', None) is not None:
                 self.locc.noise_param = 0.0
+                self.locc.noise_type = 'none'
             self.io.writeln("NOISE OFF")
             return
         parts = rest.split()
@@ -108,13 +112,21 @@ class NoiseMixin:
                 self.io.writeln("         readout, combined, pauli, reset")
                 return
             self._noise_model = nm
-            # Store scalar depolarizing param for LOCC numpy path
-            if ntype == 'depolarizing':
-                self._noise_depol_p = float(parts[1]) if len(parts) > 1 else 0.01
+            self._noise_spec = rest.strip()  # for SAVE round-tripping
+            # Channels the numpy LOCC engine can reproduce, with their scalar
+            # parameter. Others propagate as 'none' (LOCC runs noiseless + warns).
+            _locc_supported = {'depolarizing', 'amplitude_damping', 'phase_flip'}
+            if ntype in _locc_supported:
+                self._noise_locc_type = ntype
+                self._noise_locc_param = float(parts[1]) if len(parts) > 1 else 0.01
             else:
-                self._noise_depol_p = 0.0
+                self._noise_locc_type = 'none'
+                self._noise_locc_param = 0.0
+            # Back-compat scalar (depolarizing only).
+            self._noise_depol_p = self._noise_locc_param if ntype == 'depolarizing' else 0.0
             # Propagate to LOCC engine if active
             if getattr(self, 'locc', None) is not None:
-                self.locc.noise_param = self._noise_depol_p
+                self.locc.noise_type = self._noise_locc_type
+                self.locc.noise_param = self._noise_locc_param
         except ImportError:
             self.io.writeln("?Noise model requires qiskit-aer noise module")

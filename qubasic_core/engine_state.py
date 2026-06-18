@@ -24,7 +24,7 @@ class Engine:
     """Standalone execution state container.
 
     Holds all program state that was previously scattered across
-    QBasicTerminal's __init__ and 16 mixin _init_* methods.
+    QBasicTerminal's __init__ and the mixin _init_* methods.
     """
 
     def __init__(self, *, io: IOPort | None = None) -> None:
@@ -40,6 +40,12 @@ class Engine:
         self.sim_device: str = 'CPU'
         self._noise_model: Any = None
         self._noise_depol_p: float = 0.0
+        # Noise channel propagated to the numpy LOCC engine (depolarizing,
+        # amplitude_damping, or phase_flip; 'none' if unsupported there).
+        self._noise_locc_type: str = 'none'
+        self._noise_locc_param: float = 0.0
+        # The original NOISE command args, for SAVE round-tripping.
+        self._noise_spec: str | None = None
         self._seed: int | None = None
         self._max_iterations: int = MAX_LOOP_ITERATIONS
         self._include_depth: int = 0
@@ -64,6 +70,7 @@ class Engine:
         self.last_circuit: Any = None
         self._circuit_cache_key: Any = None
         self._circuit_cache: Any = None
+        self._pending_set_state: Any = None  # immediate SET_STATE for next RUN
 
         # LOCC
         self.locc: Any = None
@@ -109,3 +116,5 @@ class Engine:
         self.last_circuit = None
         self._circuit_cache_key = None
         self._circuit_cache = None
+        self._pending_set_state = None
+        self._poke_state_prep = {}

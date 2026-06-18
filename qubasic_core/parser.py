@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from qubasic_core.gates import GATE_TABLE, GATE_ALIASES
 from qubasic_core.patterns import (
@@ -25,7 +26,7 @@ from qubasic_core.patterns import (
 from qubasic_core.statements import (
     Stmt, RawStmt, GateStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt,
     BarrierStmt, WendStmt, RestoreStmt, EndSelectStmt, EndSubStmt,
-    EndFunctionStmt, StopStmt,
+    EndFunctionStmt, StopStmt, ElseStmt, EndIfStmt,
     GotoStmt, GosubStmt, ForStmt, NextStmt, WhileStmt, IfThenStmt,
     DoStmt, LoopStmt, ExitStmt,
     OnGotoStmt, OnGosubStmt, SelectCaseStmt, CaseStmt,
@@ -73,7 +74,7 @@ def _handle_for(text, raw):
 def _handle_next(text, raw):
     m = RE_NEXT.match(text)
     if m:
-        return NextStmt(raw=raw, var=m.group(1))
+        return NextStmt(raw=raw, var=m.group(1) or '')
     return None
 
 def _handle_while(text, raw):
@@ -497,10 +498,13 @@ def _split_colon_stmts(stmt: str) -> list[str]:
     return parts
 
 
+@lru_cache(maxsize=8192)
 def parse_stmt(raw: str) -> Stmt:
     """Parse a raw statement string into a typed Stmt.
 
     Returns RawStmt only for gate applications and truly unrecognized input.
+    Memoized: Stmt objects are frozen, so identical text (e.g. an ELSEIF chain's
+    nested clause re-evaluated each loop iteration) is parsed only once.
     """
     text = raw.strip()
     if not text:
@@ -516,9 +520,9 @@ def parse_stmt(raw: str) -> Stmt:
     if upper == 'END':
         return EndStmt(raw=raw)
     if upper == 'END IF':
-        return RawStmt(raw=raw)  # handled by multi-line IF block scanning
+        return EndIfStmt(raw=raw)
     if upper == 'ELSE':
-        return RawStmt(raw=raw)  # handled by multi-line IF block scanning
+        return ElseStmt(raw=raw)
     if upper == 'RETURN':
         return ReturnStmt(raw=raw)
     if upper == 'BARRIER':

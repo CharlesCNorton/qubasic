@@ -435,15 +435,9 @@ BLOCH A 0                Bloch sphere for register A, qubit 0
 LOCCINFO                 Protocol metrics
 ```
 
-SPLIT: max capacity (31+31+...), no cross-register entanglement. Use SEND/IF for classical coordination.
+SPLIT: max capacity (up to 33 qubits per register), no cross-register entanglement. Use SEND/IF for classical coordination.
 
-JOINT: shared entanglement via SHARE. Limited to ~32 total qubits.
-
-### Network LOCC
-```
-CONNECT "host:port" AS C   Attach remote register (local simulation stand-in)
-DISCONNECT C               Detach
-```
+JOINT: shared entanglement via SHARE. Limited to 33 total qubits.
 
 ### LOCC optimization
 Programs with SEND execute the deterministic prefix (before first SEND) once, snapshot the statevector, then re-execute only the suffix per shot. Complexity: O(prefix + shots * suffix) instead of O(shots * total).
@@ -704,7 +698,7 @@ qubasic_core/
   mock_backend.py        MockAerSimulator for fast testing
 ```
 
-`Engine` holds all program state. `QBasicTerminal` inherits `Engine` + 16 mixins. `Engine` can be used independently for headless/agent execution.
+`Engine` holds all program state. `QBasicTerminal` inherits `Engine` + 20 mixins. Execution methods live on `QBasicTerminal`, so headless/agent use should instantiate `QBasicTerminal` (the `Engine` base is a state container only).
 
 ## License
 

@@ -25,6 +25,12 @@ class LOCCCommandsMixin:
         return getattr(self, '_noise_depol_p', 0.0)
 
     def cmd_locc(self, rest: str) -> None:
+        """LOCC [JOINT|SPLIT] <n1> <n2> [...] | OFF | STATUS | SHOTCAP <n>.
+
+        Enter multi-register distributed mode: SPLIT for independent registers
+        (max capacity, coordinate via SEND/IF), JOINT for shared entanglement
+        via SHARE. SHOTCAP bounds shots for SEND-based protocols.
+        """
         args = rest.upper().split()
         if not args:
             if self.locc_mode:
@@ -44,6 +50,24 @@ class LOCCCommandsMixin:
             self.locc = None
             self.locc_mode = False
             self.io.writeln("LOCC OFF — back to normal Aer mode")
+            return
+
+        if args[0] == 'SHOTCAP':
+            # LOCC SHOTCAP <n> | OFF — cap shots for SEND-based protocols on
+            # large registers (replaces the old _locc_shot_cap magic variable).
+            if len(args) < 2:
+                cur = getattr(self, '_locc_shot_cap', None)
+                self.io.writeln(f"LOCC SHOTCAP = {cur if cur else 'auto'}")
+                return
+            if args[1] == 'OFF':
+                self._locc_shot_cap = None
+                self.io.writeln("LOCC SHOTCAP OFF (auto)")
+                return
+            try:
+                self._locc_shot_cap = max(1, int(args[1]))
+                self.io.writeln(f"LOCC SHOTCAP = {self._locc_shot_cap}")
+            except ValueError:
+                self.io.writeln("?USAGE: LOCC SHOTCAP <n> | OFF")
             return
 
         if args[0] == 'STATUS':
@@ -101,8 +125,9 @@ class LOCCCommandsMixin:
 
         # Pre-check RAM before allocating
         mode = "JOINT" if joint else "SPLIT"
-        noise_p = self._locc_noise_param()
-        temp_eng = LOCCEngine(sizes, joint=joint, noise_param=noise_p)
+        noise_p = getattr(self, '_noise_locc_param', 0.0)
+        noise_t = getattr(self, '_noise_locc_type', 'none')
+        temp_eng = LOCCEngine(sizes, joint=joint, noise_param=noise_p, noise_type=noise_t)
         tot, peak = temp_eng.mem_gb()
         ram = _get_ram_gb()
         if ram and tot > ram[1]:
@@ -131,8 +156,9 @@ class LOCCCommandsMixin:
         if peak > 30:
             self.io.writeln(f"  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
         if self._noise_model and noise_p == 0:
-            self.io.writeln(f"  WARNING: non-depolarizing noise model active but not supported "
-                           f"in LOCC numpy path. Only NOISE depolarizing propagates to LOCC.")
+            self.io.writeln(f"  WARNING: active noise model is not supported in the LOCC numpy "
+                           f"path and will be ignored. Supported: depolarizing, "
+                           f"amplitude_damping, phase_flip.")
 
     def cmd_send(self, rest: str) -> None:
         if not self.locc_mode:
