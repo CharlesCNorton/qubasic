@@ -2486,6 +2486,20 @@ class TestCuredBehaviors(unittest.TestCase):
             self.assertIn(s, ('0' * 30, '1' * 30))
         self.assertEqual(t._run_manifest['method'], 'stabilizer')
 
+    def test_noise_strength_change_invalidates_cache(self):
+        # str(NoiseModel) ignores channel parameters, so a strength change must
+        # still rebuild the cached circuit (X|0> under amplitude damping p).
+        t = QBasicTerminal(); t.num_qubits = 1; t.shots = 2000
+        t.program = {10: 'X 0', 20: 'MEASURE'}
+        t.cmd_noise('amplitude_damping 0.1')
+        capture(t.cmd_run)
+        p0_low = t.last_counts.get('0', 0) / 2000
+        t.cmd_noise('amplitude_damping 0.9')
+        capture(t.cmd_run)
+        p0_high = t.last_counts.get('0', 0) / 2000
+        self.assertLess(p0_low, 0.25)
+        self.assertGreater(p0_high, 0.70)
+
     def test_multi_next_closes_both_loops(self):
         t = QBasicTerminal(); t.num_qubits = 1
         t.program = {10: 'LET c = 0', 20: 'FOR i = 1 TO 2', 30: 'FOR j = 1 TO 2',

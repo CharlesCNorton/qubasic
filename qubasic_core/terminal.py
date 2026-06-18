@@ -1083,7 +1083,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     def _run_with_fallback(self, qc, backend_opts: dict, method: str) -> 'Any':
         """Run the circuit with shots, handling GPU and stabilizer fallbacks."""
-        _noise_key = str(self._noise_model) if self._noise_model else None
+        # str(NoiseModel) does not vary with channel parameters (amplitude_damping
+        # 0.1 and 0.9 stringify identically), so fingerprint noise by the exact
+        # NOISE command and the per-qubit memory-mapped noise instead — otherwise
+        # changing noise strength between runs reuses the first circuit.
+        _noise_key = (
+            getattr(self, '_noise_spec', None),
+            tuple(sorted(getattr(self, '_qubit_noise', {}).items())),
+        )
         # Numeric variable bindings affect gate parameters baked into the
         # transpiled circuit, so they must be part of the cache key. Without
         # this, parameter sweeps that re-run via cmd_run (PLOT, ANIMATE) reuse
