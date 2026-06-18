@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 (2026-06-18)
+
+### Fixed
+- Changing noise strength between runs (for example `NOISE amplitude_damping 0.1` then `0.9`) now rebuilds the circuit instead of reusing the first noise level, so sequential noise comparisons are correct.
+
+### Changed
+- The CLI now lives in `qubasic_core/cli.py`; the `qubasic` console script and `python -m qubasic_core` are unchanged, but the former top-level `qubasic` module is removed. Test suites moved under `tests/`.
+
 ## 0.6.0 (2026-06-18)
 
 Correctness, scalability, and usability improvements.
