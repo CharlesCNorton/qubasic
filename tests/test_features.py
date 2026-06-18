@@ -27,7 +27,10 @@ import builtins
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(__file__))
+# Repo root is one level up from tests/; put it on the path for imports and
+# use it for subprocess working directories and example file paths.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 from qubasic_core.terminal import QBasicTerminal
 from qubasic_core.errors import (
     QBasicError, QBasicSyntaxError, QBasicRuntimeError,
@@ -1448,8 +1451,8 @@ class TestIntegration(unittest.TestCase):
 
         # bell.qb
         r = subprocess.run(
-            [sys.executable, '-X', 'utf8', 'qubasic.py', '--json', 'examples/bell.qb'],
-            capture_output=True, text=True, cwd=os.path.dirname(__file__), timeout=30)
+            [sys.executable, '-X', 'utf8', '-m', 'qubasic_core', '--json', 'examples/bell.qb'],
+            capture_output=True, text=True, cwd=_ROOT, timeout=30)
         self.assertEqual(r.returncode, 0)
         data = json.loads(r.stdout)
         self.assertIn('counts', data)
@@ -1459,8 +1462,8 @@ class TestIntegration(unittest.TestCase):
 
         # grover3.qb
         r = subprocess.run(
-            [sys.executable, '-X', 'utf8', 'qubasic.py', '--json', 'examples/grover3.qb'],
-            capture_output=True, text=True, cwd=os.path.dirname(__file__), timeout=30)
+            [sys.executable, '-X', 'utf8', '-m', 'qubasic_core', '--json', 'examples/grover3.qb'],
+            capture_output=True, text=True, cwd=_ROOT, timeout=30)
         self.assertEqual(r.returncode, 0)
         data = json.loads(r.stdout)
         self.assertGreater(data['counts'].get('101', 0), 900)
@@ -1477,7 +1480,7 @@ class TestIntegration(unittest.TestCase):
              't.process("30 MEASURE", track_undo=False); '
              'import io,sys; sys.stdout=io.StringIO(); t.cmd_run(); sys.stdout=sys.__stdout__; '
              'print(json.dumps(t.last_counts))'],
-            capture_output=True, text=True, cwd=os.path.dirname(__file__), timeout=30)
+            capture_output=True, text=True, cwd=_ROOT, timeout=30)
         self.assertEqual(r.returncode, 0, f"stderr: {r.stderr}")
         counts = json.loads(r.stdout.strip())
         # Bell state: only 00 and 11
@@ -2014,7 +2017,7 @@ class TestGapCoverage(unittest.TestCase):
     def test_cli_help_output(self):
         """--help prints usage and exits with 0."""
         from unittest.mock import patch
-        from qubasic import main
+        from qubasic_core.cli import main
         with patch('sys.argv', ['qubasic', '--help']):
             _, out = capture(lambda: None)  # reset
             buf = io.StringIO()
@@ -2034,7 +2037,7 @@ class TestGapCoverage(unittest.TestCase):
     # 2 quiet mode
     def test_cli_quiet_mode(self):
         """Running a script with --quiet suppresses banner output."""
-        from qubasic import run_script
+        from qubasic_core.cli import run_script
         with tempfile.NamedTemporaryFile(mode='w', suffix='.qb', delete=False) as f:
             f.write('10 QUBITS 1\n20 H 0\n30 MEASURE\n40 END\n')
             path = f.name
@@ -2059,7 +2062,7 @@ class TestGapCoverage(unittest.TestCase):
         """--json flag produces valid JSON with expected keys."""
         import json as _json
         from unittest.mock import patch
-        from qubasic import main
+        from qubasic_core.cli import main
         with tempfile.NamedTemporaryFile(mode='w', suffix='.qb', delete=False) as f:
             f.write('10 QUBITS 1\n20 H 0\n30 MEASURE\n40 END\n')
             path = f.name
@@ -2085,10 +2088,10 @@ class TestGapCoverage(unittest.TestCase):
 
     # 4 module entry point
     def test_module_entry_point(self):
-        """Importing __main__ module does not crash."""
+        """Importing __main__ module does not crash and exposes main()."""
         import importlib
         mod = importlib.import_module('qubasic_core.__main__')
-        self.assertTrue(hasattr(mod, 'QBasicTerminal'))
+        self.assertTrue(callable(mod.main))
 
     # 5 EOF function
     def test_eof_function(self):
@@ -2391,10 +2394,10 @@ class TestCLIIntegration(unittest.TestCase):
         """--seed flag should be accepted by CLI."""
         import subprocess, json
         result = subprocess.run(
-            [sys.executable, os.path.join(os.path.dirname(__file__), 'qubasic.py'),
+            [sys.executable, '-m', 'qubasic_core',
              '--seed', '42', '--json',
-             os.path.join(os.path.dirname(__file__), 'examples', 'bell.qb')],
-            capture_output=True, text=True, timeout=30)
+             os.path.join('examples', 'bell.qb')],
+            capture_output=True, text=True, cwd=_ROOT, timeout=30)
         if result.returncode == 0:
             data = json.loads(result.stdout)
             self.assertIn('counts', data)
@@ -2403,9 +2406,9 @@ class TestCLIIntegration(unittest.TestCase):
         """--help should exit 0."""
         import subprocess
         result = subprocess.run(
-            [sys.executable, os.path.join(os.path.dirname(__file__), 'qubasic.py'),
+            [sys.executable, '-m', 'qubasic_core',
              '--help'],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, cwd=_ROOT, timeout=10)
         self.assertEqual(result.returncode, 0)
         self.assertIn('QUBASIC', result.stdout)
 

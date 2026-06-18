@@ -17,15 +17,15 @@ import unittest
 import tempfile
 import numpy as np
 
-# Ensure qbasic package is importable
-sys.path.insert(0, os.path.dirname(__file__))
+# Ensure the package (one level up from tests/) is importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qubasic_core.engine import (
     GATE_TABLE, GATE_ALIASES,
     _np_gate_matrix, _apply_gate_np, _measure_np, _sample_np,
 )
 from qubasic_core.terminal import QBasicTerminal
 from qubasic_core.engine import LOCCEngine
-from qubasic import run_script
+from qubasic_core.cli import run_script
 from conftest import capture
 
 

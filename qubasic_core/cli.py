@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-QUBASIC — Quantum BASIC Interactive Terminal
+QUBASIC — command-line entry point.
 
 Usage:
-    python qubasic.py             Interactive REPL
-    python qubasic.py script.qb   Run a script file
+    qubasic                       Interactive REPL (installed console script)
+    python -m qubasic_core        Same, run as a module
+    qubasic script.qb             Run a script file
 """
 
 import sys

@@ -40,11 +40,12 @@ Requires Python >= 3.10, Qiskit >= 1.0, qiskit-aer >= 0.13.
 ## Usage
 
 ```
-python qubasic.py                  Interactive REPL
-python qubasic.py script.qb        Run a script file
-python qubasic.py --quiet script    Suppress banner, output results only
-python qubasic.py --json script     Machine-readable JSON output
-python qubasic.py --help            Show CLI help
+qubasic                       Interactive REPL (installed console script)
+python -m qubasic_core         Same, without installing
+qubasic script.qb             Run a script file
+qubasic --quiet script         Suppress banner, output results only
+qubasic --json script          Machine-readable JSON output
+qubasic --help                Show CLI help
 ```
 
 Headless (no REPL):
@@ -652,7 +653,7 @@ Programs with SEND use prefix/suffix splitting: the deterministic prefix (before
 ## JSON output
 
 ```
-python qubasic.py --json examples/bell.qb
+qubasic --json examples/bell.qb
 ```
 
 ```json
@@ -666,8 +667,9 @@ python qubasic.py --json examples/bell.qb
 ## Architecture
 
 ```
-qubasic.py              CLI entry point
 qubasic_core/
+  cli.py                 CLI entry point (qubasic / python -m qubasic_core)
+  __main__.py            Module entry point
   engine_state.py        Engine: standalone state container
   terminal.py            QBasicTerminal: REPL + command dispatch
   engine.py              Constants, gate tables, numpy simulation, LOCCEngine
@@ -696,6 +698,8 @@ qubasic_core/
   demos.py               Built-in demo circuits
   protocol.py            TerminalProtocol (mixin contract)
   mock_backend.py        MockAerSimulator for fast testing
+tests/                   Test suites (test_qubasic.py, test_features.py)
+examples/                Sample .qb programs
 ```
 
 `Engine` holds all program state. `QBasicTerminal` inherits `Engine` + 20 mixins. Execution methods live on `QBasicTerminal`, so headless/agent use should instantiate `QBasicTerminal` (the `Engine` base is a state container only).

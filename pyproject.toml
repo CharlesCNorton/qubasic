@@ -42,10 +42,9 @@ charts = ["plotille>=5.0"]
 readline = ["pyreadline3>=3.4; sys_platform == 'win32'"]
 
 [project.scripts]
-qubasic = "qubasic:main"
+qubasic = "qubasic_core.cli:main"
 
 [tool.setuptools]
-py-modules = ["qubasic"]
 packages = ["qubasic_core"]
 
 [tool.setuptools.package-data]

@@ -1,6 +1,6 @@
-"""Allow running qubasic_core as a module: python -m qubasic_core."""
+"""Run the CLI as a module: python -m qubasic_core [args]."""
 
-from qubasic_core.terminal import QBasicTerminal
+from qubasic_core.cli import main
 
 if __name__ == '__main__':
-    QBasicTerminal().repl()
+    main()
