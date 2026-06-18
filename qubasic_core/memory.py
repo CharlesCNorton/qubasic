@@ -103,7 +103,10 @@ class MemoryMixin:
         qubit, field = off // QUBIT_BLOCK, off % QUBIT_BLOCK
         if self.last_sv is None or qubit >= self.num_qubits:
             return 0.0
-        sv = np.ascontiguousarray(self.last_sv).ravel().reshape([2] * self.num_qubits)
+        sv_flat = np.ascontiguousarray(self.last_sv).ravel()
+        if sv_flat.size != 2 ** self.num_qubits:
+            return 0.0  # stale statevector from a different qubit count
+        sv = sv_flat.reshape([2] * self.num_qubits)
         ax = self.num_qubits - 1 - qubit
         t = np.moveaxis(sv, ax, 0)
         t0, t1 = t[0].flatten(), t[1].flatten()
@@ -155,7 +158,10 @@ class MemoryMixin:
             self._zero_page[a] = v
             return
         if a == 0xD000:
-            self.num_qubits = max(1, min(32, int(v)))
+            new_n = max(1, min(32, int(v)))
+            if new_n != self.num_qubits:
+                self._invalidate_run_state()
+            self.num_qubits = new_n
         elif a == 0xD001:
             self.shots = max(1, int(v))
         elif a == 0xD002:

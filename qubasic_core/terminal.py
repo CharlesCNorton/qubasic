@@ -571,6 +571,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             from qubasic_core.errors import QBasicRangeError
             raise QBasicRangeError(f"RANGE: 1-{MAX_QUBITS}")
 
+        if n != self.num_qubits:
+            self._invalidate_run_state()
         self.num_qubits = n
         self.registers.clear()
         est = _estimate_gb(n)

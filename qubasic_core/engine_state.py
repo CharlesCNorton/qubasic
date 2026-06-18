@@ -119,3 +119,17 @@ class Engine:
         self._circuit_cache = None
         self._pending_set_state = None
         self._poke_state_prep = {}
+
+    def _invalidate_run_state(self) -> None:
+        """Drop cached results that describe a now-stale configuration.
+
+        Called when the qubit count changes: last_sv, last_counts,
+        last_circuit, and the transpile cache all assume the previous
+        num_qubits, so reading them afterwards would mislabel (or, for
+        the reshape in _peek_qubit/_bloch_vector, crash) the state.
+        """
+        self.last_counts = None
+        self.last_sv = None
+        self.last_circuit = None
+        self._circuit_cache_key = None
+        self._circuit_cache = None

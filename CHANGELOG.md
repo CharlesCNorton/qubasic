@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2 (2026-06-18)
+
+### Fixed
+- Changing the qubit count after a run (via `QUBITS n` or `POKE $D000`) now invalidates the cached statevector, so `MAP`, a `PEEK` of the qubit-state block, and `BLOCH` no longer reshape a stale statevector to the new qubit count and crash.
+
 ## 0.6.1 (2026-06-18)
 
 ### Fixed

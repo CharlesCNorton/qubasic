@@ -359,6 +359,42 @@ class TestMemoryMap(unittest.TestCase):
         self.assertEqual(ntype, 2)
         self.assertAlmostEqual(nparam, 0.1)
 
+    def test_qubit_count_change_invalidates_stale_state(self):
+        """Changing the qubit count after a run must not leave a stale last_sv
+        that MAP/PEEK/BLOCH then reshape to the wrong size and crash."""
+        import numpy as np
+
+        # Run a 1-qubit circuit so last_sv has size 2.
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.process('10 H 0')
+        t.process('20 MEASURE')
+        capture(t.cmd_run)
+
+        # QUBITS grows the count: the size-2 statevector no longer applies.
+        capture(t.cmd_qubits, '2')
+        self.assertIsNone(t.last_sv)
+        self.assertIsNone(t._circuit_cache_key)
+        self.assertEqual(t._peek(0x0100), 0.0)   # would have crashed on reshape
+        capture(t.cmd_map)                        # MAP walks the qubit block
+        capture(t.cmd_bloch, '0')                 # BLOCH reshapes too
+
+        # The $D000 POKE path invalidates the same way.
+        t2 = QBasicTerminal()
+        t2.num_qubits = 1
+        t2.process('10 H 0')
+        t2.process('20 MEASURE')
+        capture(t2.cmd_run)
+        t2._poke(0xD000, 3)
+        self.assertIsNone(t2.last_sv)
+        self.assertEqual(t2._peek(0x0100), 0.0)
+
+        # Defensive guard: even a hand-set mismatched last_sv reads as 0, not a crash.
+        t3 = QBasicTerminal()
+        t3.num_qubits = 2
+        t3.last_sv = np.array([1.0, 0.0], dtype=complex)  # size 2, but 2 qubits
+        self.assertEqual(t3._peek(0x0100), 0.0)
+
     def test_sys(self):
         """SYS builtin BELL, SYS unmapped, SYS in program, SYS INSTALL."""
         # SYS 0xE000 BELL demo
