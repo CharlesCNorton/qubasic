@@ -112,17 +112,19 @@ class MemoryMixin:
         t0, t1 = t[0].flatten(), t[1].flatten()
         rho_00 = float(np.sum(np.abs(t0) ** 2))
         rho_11 = float(np.sum(np.abs(t1) ** 2))
-        rho_01 = complex(np.sum(np.conj(t0) * t1))
+        # conj(t0)*t1 sums to rho_10 = <1|rho|0>. Bloch X = 2 Re(rho_10) and
+        # Bloch Y = -2 Im(rho_01) = +2 Im(rho_10).
+        rho_10 = complex(np.sum(np.conj(t0) * t1))
         # Recover amplitudes with alpha as the real phase reference; beta then
         # carries the relative phase (real and imaginary parts both exposed).
         alpha = np.sqrt(max(0.0, rho_00))
         if alpha > 1e-12:
-            beta = rho_01 / alpha
+            beta = rho_10 / alpha
         else:
             beta = complex(np.sqrt(max(0.0, rho_11)))
         return [rho_11,
-                float(2 * rho_01.real),
-                float(-2 * rho_01.imag),
+                float(2 * rho_10.real),
+                float(2 * rho_10.imag),
                 float(rho_00 - rho_11),
                 float(alpha),
                 0.0,

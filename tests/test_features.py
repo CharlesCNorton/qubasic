@@ -2595,6 +2595,31 @@ class TestCommandSurfaceCoverage(unittest.TestCase):
         self.assertIsInstance(t._status_prompt(), str)
         capture(t._suggest_command, 'XYZ')
 
+    def test_bloch_vector_axes(self):
+        """_bloch_vector and the $0100 By field carry the right sign on every
+        axis. Regression: the Y component was inverted (|+i> read as -Y)."""
+        import numpy as np
+        from qubasic_core.terminal import QBasicTerminal
+        t = QBasicTerminal()
+        r2 = 1.0 / np.sqrt(2)
+        cases = [
+            (np.array([1, 0], dtype=complex),       (0.0, 0.0, +1.0)),   # |0>  +Z
+            (np.array([0, 1], dtype=complex),       (0.0, 0.0, -1.0)),   # |1>  -Z
+            (np.array([r2, r2], dtype=complex),     (+1.0, 0.0, 0.0)),   # |+>  +X
+            (np.array([r2, -r2], dtype=complex),    (-1.0, 0.0, 0.0)),   # |->  -X
+            (np.array([r2, 1j * r2], dtype=complex),  (0.0, +1.0, 0.0)), # |+i> +Y
+            (np.array([r2, -1j * r2], dtype=complex), (0.0, -1.0, 0.0)), # |-i> -Y
+        ]
+        for sv, (ex, ey, ez) in cases:
+            x, y, z = t._bloch_vector(sv, 0, 1)
+            self.assertAlmostEqual(x, ex, places=6)
+            self.assertAlmostEqual(y, ey, places=6)
+            self.assertAlmostEqual(z, ez, places=6)
+        # Memory-mapped Bloch Y for q0 ($0102) must agree for |+i>.
+        t.num_qubits = 1
+        t.last_sv = np.array([r2, 1j * r2], dtype=complex)
+        self.assertAlmostEqual(t._peek(0x0102), +1.0, places=6)
+
     def test_program_and_io_surface(self):
         import builtins
         t = self._ready()

@@ -292,10 +292,12 @@ class DisplayMixin:
 
         rho_00 = np.sum(np.abs(t0)**2)
         rho_11 = np.sum(np.abs(t1)**2)
-        rho_01 = np.sum(np.conj(t0) * t1)
+        # conj(t0)*t1 sums to rho_10 = <1|rho|0>. <X> = 2 Re(rho_10) (Re is
+        # symmetric in rho_01/rho_10), and <Y> = -2 Im(rho_01) = +2 Im(rho_10).
+        rho_10 = np.sum(np.conj(t0) * t1)
 
-        x = float(2 * rho_01.real)
-        y = float(-2 * rho_01.imag)
+        x = float(2 * rho_10.real)
+        y = float(2 * rho_10.imag)
         z = float(rho_00 - rho_11)
 
         return x, y, z

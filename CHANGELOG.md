@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.5 (2026-06-19)
+
+### Fixed
+- The Bloch sphere Y component had an inverted sign, so a qubit in |+i> was reported at -Y (and |-i> at +Y). `BLOCH`, `DRAW`, `PRINT QUBIT(n)`, and the memory-mapped Bloch-Y field (`$0100 + q*8 + 2`) were all affected, and `BLOCH` mislabeled |+i> as "|-i>". X and Z were already correct. Y now matches the standard convention (`<Y> = +2 Im(<1|rho|0>)`), verified against Qiskit expectation values.
+
 ## 0.6.4 (2026-06-19)
 
 ### Fixed
