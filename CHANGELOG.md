@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3 (2026-06-18)
+
+### Fixed
+- Colon-compound `@register` lines in LOCC mode now apply every gate. `@A H 0 : @A CX 0,1` (and the inherited form `@A H 0 : CX 0,1`) were captured as a single statement and mis-tokenized, so all but the first gate were silently dropped. The parser now splits them into per-statement parts with register inheritance, and the immediate-mode REPL path does the same.
+- `SAVE_EXPECT`, `SAVE_PROBS`, and `SAVE_AMPS` no longer overwrite their target variable with 0 at circuit-build time. The placeholder keeps any prior value, so a program that re-runs with the SAVE line still present can read the previous result during the build pass (the post-run extraction then fills in the fresh value).
+- `PRINT` honors `;` and `,` between multiple items: `PRINT "S ="; x` concatenates and `PRINT a, b` advances to the next 14-column zone. Separators inside quoted strings and inside call parentheses (`PRINT LEFT$(s$, 3)`) are no longer treated as item breaks.
+- `PRINT` variable substitution no longer rewrites identifiers inside quoted string literals, so a label such as `PRINT "value of S"` is emitted verbatim even when `S` is a defined variable.
+
 ## 0.6.2 (2026-06-18)
 
 ### Fixed

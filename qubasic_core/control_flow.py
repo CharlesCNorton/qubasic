@@ -63,46 +63,86 @@ class ControlFlowMixin:
         self.variables[name] = val
         return True, ExecResult.ADVANCE
 
+    @staticmethod
+    def _split_print_items(expr: str) -> list[tuple[str, str]]:
+        """Split a PRINT argument list into (item, trailing-separator) pairs.
+
+        ';' and ',' are recognized only at top level (outside quotes and
+        parentheses/brackets), so PRINT LEFT$(s$, 3) stays one item and a comma
+        inside a quoted literal is preserved. The separator recorded with each
+        item is the one that follows it; '' marks the final item / no trailing
+        separator.
+        """
+        items: list[tuple[str, str]] = []
+        buf = ''
+        depth = 0
+        quote: str | None = None
+        for ch in expr:
+            if quote:
+                buf += ch
+                if ch == quote:
+                    quote = None
+            elif ch in ('"', "'"):
+                quote = ch
+                buf += ch
+            elif ch in '([':
+                depth += 1
+                buf += ch
+            elif ch in ')]':
+                depth = max(0, depth - 1)
+                buf += ch
+            elif ch in ';,' and depth == 0:
+                items.append((buf.strip(), ch))
+                buf = ''
+            else:
+                buf += ch
+        if buf.strip():
+            items.append((buf.strip(), ''))
+        return items
+
+    def _eval_print_item(self, item: str, run_vars: dict[str, Any]) -> str:
+        """Evaluate a single PRINT item to its display string."""
+        item = item.strip()
+        if not item:
+            return ''
+        # Quoted literal: emit verbatim (no substitution, no SPC/TAB).
+        if (item[0] == '"' and item[-1] == '"') or (item[0] == "'" and item[-1] == "'"):
+            return item[1:-1]
+        text = self._substitute_vars(item, run_vars)
+
+        def _spaces(m):
+            try:
+                return ' ' * max(0, int(self._eval_with_vars(m.group(1), run_vars)))
+            except Exception:
+                return ''
+        text = re.sub(r'\bSPC\s*\(([^)]+)\)', _spaces, text, flags=re.IGNORECASE)
+        text = re.sub(r'\bTAB\s*\(([^)]+)\)', _spaces, text, flags=re.IGNORECASE)
+        if not text.strip():
+            return text                      # standalone SPC/TAB -> whitespace
+        try:
+            ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else (
+                run_vars if isinstance(run_vars, dict) else dict(run_vars))
+            return str(self._safe_eval(text, extra_ns=ns))
+        except Exception:
+            return text
+
     def _cf_print(self, stmt: str, run_vars: dict[str, Any],
                   parsed: PrintStmt) -> tuple[bool, ExecOutcome]:
-        raw_expr = parsed.expr
-        text = self._substitute_vars(raw_expr.strip(), run_vars)
-        # Determine trailing separator: ; suppresses newline, , advances to tab
-        suppress_newline = raw_expr.rstrip().endswith(';')
-        tab_advance = raw_expr.rstrip().endswith(',')
-        if suppress_newline:
-            text = text.rstrip().removesuffix(';').rstrip()
-        elif tab_advance:
-            text = text.rstrip().removesuffix(',').rstrip()
-        # Evaluate SPC(n) and TAB(n) inline
-        def _replace_spc(m_spc):
-            n = int(self._eval_with_vars(m_spc.group(1), run_vars))
-            return ' ' * max(0, n)
-        def _replace_tab(m_tab):
-            n = int(self._eval_with_vars(m_tab.group(1), run_vars))
-            return ' ' * max(0, n)
-        text = re.sub(r'\bSPC\s*\(([^)]+)\)', _replace_spc, text, flags=re.IGNORECASE)
-        text = re.sub(r'\bTAB\s*\(([^)]+)\)', _replace_tab, text, flags=re.IGNORECASE)
-        # Evaluate the expression
-        if (text.startswith('"') and text.endswith('"')) or \
-           (text.startswith("'") and text.endswith("'")):
-            output = text[1:-1]
+        items = self._split_print_items(parsed.expr)
+        if not items:
+            self.io.writeln('')             # bare PRINT -> blank line
+            return True, ExecResult.ADVANCE
+        out = ''
+        for item, sep in items:
+            out += self._eval_print_item(item, run_vars)
+            if sep == ',':                  # advance to next 14-column zone
+                col = len(out) % 14
+                out += ' ' * (14 - col if col else 14)
+        # A trailing ';' or ',' suppresses the newline (cursor stays on line).
+        if items[-1][1] in (';', ','):
+            self.io.write(out)
         else:
-            try:
-                ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else dict(run_vars) if not isinstance(run_vars, dict) else run_vars
-                result = self._safe_eval(text, extra_ns=ns)
-                output = str(result)
-            except Exception:
-                output = text
-        # Output with separator behavior
-        if suppress_newline:
-            self.io.write(output)
-        elif tab_advance:
-            col = len(output) % 14
-            padding = 14 - col if col > 0 else 14
-            self.io.write(output + ' ' * padding)
-        else:
-            self.io.writeln(output)
+            self.io.writeln(out)
         return True, ExecResult.ADVANCE
 
     def _cf_goto(self, stmt: str, sorted_lines: list[int],

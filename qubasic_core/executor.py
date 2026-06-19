@@ -328,20 +328,42 @@ class ExecutorMixin:
             set(self.subroutines.keys()) |
             set(self._custom_gates.keys())
         )
-        # Tokenize: split on word boundaries, preserving delimiters
-        tokens = re.split(r'(\b\w+\b)', stmt)
-        for i, tok in enumerate(tokens):
-            if not tok or not tok[0].isalpha():
-                continue
-            if tok in protected or tok.upper() in protected or tok.lower() in protected:
-                continue
-            if tok in merged:
-                # Don't expand record bases (dicts) — leave p in p.x intact so
-                # the expression evaluator can resolve the field.
-                if isinstance(merged[tok], dict):
+
+        def _sub_segment(seg: str) -> str:
+            # Tokenize: split on word boundaries, preserving delimiters
+            tokens = re.split(r'(\b\w+\b)', seg)
+            for i, tok in enumerate(tokens):
+                if not tok or not tok[0].isalpha():
                     continue
-                tokens[i] = str(merged[tok])
-        return ''.join(tokens)
+                if tok in protected or tok.upper() in protected or tok.lower() in protected:
+                    continue
+                if tok in merged:
+                    # Don't expand record bases (dicts) — leave p in p.x intact
+                    # so the expression evaluator can resolve the field.
+                    if isinstance(merged[tok], dict):
+                        continue
+                    tokens[i] = str(merged[tok])
+            return ''.join(tokens)
+
+        # Substitute only outside quoted string literals: a variable named in a
+        # PRINT label (PRINT "S ="; S) must survive verbatim inside the quotes.
+        out: list[str] = []
+        i, n = 0, len(stmt)
+        while i < n:
+            ch = stmt[i]
+            if ch in ('"', "'"):
+                j = i + 1
+                while j < n and stmt[j] != ch:
+                    j += 1
+                out.append(stmt[i:j + 1])           # quoted span, verbatim
+                i = j + 1
+            else:
+                j = i
+                while j < n and stmt[j] not in ('"', "'"):
+                    j += 1
+                out.append(_sub_segment(stmt[i:j]))  # unquoted span
+                i = j
+        return ''.join(out)
 
     def _expand_statement(self, stmt, _call_stack: set[str] | None = None):
         """Expand subroutines. Returns list of gate strings.
@@ -636,18 +658,24 @@ class ExecutorMixin:
 
         Uses the same _exec_line pipeline as cmd_run for consistency.
         """
-        # In LOCC mode, handle @register prefix via the numpy engine
-        if self.locc_mode and self.locc:
-            m = RE_AT_REG_LINE.match(line)
-            if m:
+        # In LOCC mode, handle @register prefix via the numpy engine. Split
+        # colon-compound @REG lines so each gate is applied (a single @REG line
+        # is just the one-part case); a bare @REG line keeps prior behavior.
+        if self.locc_mode and self.locc and line.strip().startswith('@'):
+            parts = self._split_colon_stmts(line) if ':' in line else [line.strip()]
+            for part in parts:
+                m = RE_AT_REG_LINE.match(part)
+                if not m:
+                    self.io.writeln(f"?BAD @register statement: {part}")
+                    continue
                 reg = m.group(1).upper()
                 gate_stmt = m.group(2).strip()
                 if reg not in self.locc.names:
                     self.io.writeln(f"?UNKNOWN REGISTER: {reg} (have {', '.join(self.locc.names)})")
                     return
                 self._locc_apply_gate(reg, gate_stmt)
-                self._locc_state()
-                return
+            self._locc_state()
+            return
         if line.strip().startswith('@'):
             self.io.writeln("?@register syntax requires LOCC mode (try: LOCC <n1> <n2>)")
             return

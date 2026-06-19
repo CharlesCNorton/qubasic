@@ -1432,6 +1432,92 @@ class TestAdditionalCoverage(unittest.TestCase):
         self.assertEqual(t4.last_counts.get('1', 0), 100)
 
 
+# ---------------------------------------------------------------------------
+# TestBugFixes063 — regressions fixed in 0.6.3
+# ---------------------------------------------------------------------------
+class TestBugFixes063(unittest.TestCase):
+    """Regression tests for the 0.6.3 fixes."""
+
+    def _ghz3(self):
+        v = np.zeros(8, dtype=complex)
+        v[0] = v[7] = 1 / np.sqrt(2)
+        return v
+
+    def test_locc_colon_compound_at_register(self):
+        """LOCC: colon-compound @REG lines apply every gate (explicit and inherited)."""
+        for line in ('@A H 0 : @A CX 0,1 : @A CX 0,2',   # explicit @A per clause
+                     '@A H 0 : CX 0,1 : CX 0,2'):         # @A inherited
+            t = QBasicTerminal()
+            t.locc = LOCCEngine([3], joint=True)
+            t.locc_mode = True
+            t.shots = 1
+            t.process(f'10 {line}', track_undo=False)
+            t.process('20 MEASURE', track_undo=False)
+            capture(t.cmd_run)
+            sv = np.ascontiguousarray(t.locc.sv).ravel()
+            fid = abs(np.vdot(self._ghz3(), sv)) ** 2
+            self.assertGreater(fid, 0.999, f"GHZ not built by: {line}")
+
+    def test_save_expect_preserved_across_rerun(self):
+        """SAVE_EXPECT keeps prior values on re-run instead of zeroing them."""
+        t = QBasicTerminal()
+        t.num_qubits = 2
+        t.shots = 64
+        t.process('10 H 0', track_undo=False)
+        t.process('20 CX 0,1', track_undo=False)
+        t.process('30 SAVE_EXPECT ZZ 0,1 -> zz', track_undo=False)
+        t.process('40 SAVE_EXPECT XX 0,1 -> xx', track_undo=False)
+        capture(t.cmd_run)
+        self.assertAlmostEqual(t.variables['zz'], 1.0, places=6)
+        self.assertAlmostEqual(t.variables['xx'], 1.0, places=6)
+        # A second run that still contains the SAVE lines must not zero zz/xx
+        # before the LET on line 50 reads them.
+        t.process('50 LET chsh = SQRT2 * (zz + xx)', track_undo=False)
+        capture(t.cmd_run)
+        self.assertAlmostEqual(t.variables['chsh'], 2 * math.sqrt(2), places=6)
+
+    def test_print_multi_item_separators(self):
+        """PRINT concatenates ';' items and tab-aligns ',' items."""
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.variables['S'] = 2.8284271247
+        t.process('10 PRINT "S ="; S', track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertIn('S =2.8284', out)
+
+        t2 = QBasicTerminal()
+        t2.num_qubits = 1
+        t2.process('10 PRINT "a", "b"', track_undo=False)
+        _, out2 = capture(t2.cmd_run)
+        line = next(l for l in out2.splitlines() if 'a' in l and 'b' in l)
+        self.assertGreaterEqual(line.index('b') - line.index('a'), 14)
+
+    def test_print_does_not_substitute_inside_quotes(self):
+        """A variable name inside a quoted PRINT literal is emitted verbatim."""
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.variables['S'] = 99.0
+        t.process('10 PRINT "value of S here"', track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertIn('value of S here', out)
+        self.assertNotIn('99', out)
+
+    def test_print_preserves_commas_in_quotes_and_calls(self):
+        """Top-level split skips commas inside quotes and inside call parens."""
+        t = QBasicTerminal()
+        t.num_qubits = 1
+        t.process('10 PRINT "x,y,z"', track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertIn('x,y,z', out)
+
+        t2 = QBasicTerminal()
+        t2.num_qubits = 1
+        t2.process('10 LET name$ = "hello"', track_undo=False)
+        t2.process('20 PRINT LEFT$(name$, 3)', track_undo=False)
+        _, out2 = capture(t2.cmd_run)
+        self.assertIn('hel', out2)
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')

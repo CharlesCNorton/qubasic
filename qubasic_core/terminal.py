@@ -1982,8 +1982,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     full_pauli[self.num_qubits - 1 - qubits[i]] = p
             op = SparsePauliOp(''.join(full_pauli))
             qc.save_expectation_value(op, list(range(self.num_qubits)), label=f'exp_{var}')
-            run_vars[var] = 0  # actual value available after simulation
-            self.variables[var] = 0
+            # Placeholder until the run fills the real value via
+            # _extract_save_results. Preserve any prior value instead of
+            # zeroing it, so a re-run that re-includes this SAVE line leaves
+            # earlier results readable to LET/PRINT during the build pass.
+            _prev = self.variables.get(var, 0)
+            run_vars[var] = _prev
+            self.variables[var] = _prev
         except Exception as e:
             self.io.writeln(f"?SAVE_EXPECT ERROR: {e}")
         return True
@@ -1998,8 +2003,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         var = m.group(2)
         try:
             qc.save_probabilities(qubits, label=f'prob_{var}')
-            run_vars[var] = 0
-            self.variables[var] = 0
+            _prev = self.variables.get(var, 0)   # preserve prior value (see SAVE_EXPECT)
+            run_vars[var] = _prev
+            self.variables[var] = _prev
         except Exception as e:
             self.io.writeln(f"?SAVE_PROBS ERROR: {e}")
         return True
@@ -2014,8 +2020,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         var = m.group(2)
         try:
             qc.save_amplitudes(indices, label=f'amp_{var}')
-            run_vars[var] = 0
-            self.variables[var] = 0
+            _prev = self.variables.get(var, 0)   # preserve prior value (see SAVE_EXPECT)
+            run_vars[var] = _prev
+            self.variables[var] = _prev
         except Exception as e:
             self.io.writeln(f"?SAVE_AMPS ERROR: {e}")
         return True

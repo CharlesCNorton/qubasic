@@ -554,6 +554,14 @@ def parse_stmt(raw: str) -> Stmt:
 
     # ── @REG lines ────────────────────────────────────────────────
     if text.startswith('@'):
+        # A colon-compound @REG line (e.g. "@A H 0 : @A CX 0,1" or
+        # "@A H 0 : CX 0,1") must split into per-statement parts with
+        # @register inheritance; otherwise the whole tail is captured as one
+        # AtRegStmt.inner and the LOCC executor mis-tokenizes it.
+        if ':' in text:
+            parts = _split_colon_stmts(text)
+            if len(parts) > 1:
+                return CompoundStmt(raw=raw, parts=tuple(parts))
         m = RE_AT_REG_LINE.match(text)
         if m:
             return AtRegStmt(raw=raw, reg=m.group(1).upper(),
