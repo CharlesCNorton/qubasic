@@ -40,11 +40,32 @@ class DisplayMixin:
         Console(file=buf, highlight=False, force_terminal=force).print(*renderables)
         self.io.write(buf.getvalue())
 
+    def _bit_order_note(self, display: list) -> str | None:
+        """Human-facing reminder of which bit is which qubit.
+
+        Bitstrings are little-endian (qubit 0 is the rightmost character), the
+        most common source of off-by-reverse mistakes when reading a histogram.
+        When the result covers the whole register the positions are labelled
+        q(n-1) ... q1 q0; for a measured subset only the convention is shown.
+        """
+        if not display:
+            return None
+        nbits = len(display[0][0])
+        nq = getattr(self, 'num_qubits', nbits)
+        if nbits == nq and nbits <= 16:
+            labels = ' '.join(f'q{i}' for i in range(nbits - 1, -1, -1))
+            return f"  bit order  {labels}   (qubit 0 = rightmost)"
+        return "  bit order  qubit 0 = rightmost bit"
+
     def print_histogram(self, counts: dict[str, int]) -> None:
         """Measurement histogram with optional rich-table formatting."""
         total = sum(counts.values())
         sorted_counts = sorted(counts.items(), key=lambda x: -x[1])
         display = sorted_counts[:MAX_HISTOGRAM_STATES]
+
+        note = self._bit_order_note(display)
+        if note:
+            self.io.writeln(note)
 
         if _RICH:
             self._print_histogram_rich(display, sorted_counts, total)

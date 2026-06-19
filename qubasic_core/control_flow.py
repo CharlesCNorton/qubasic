@@ -73,6 +73,7 @@ class ControlFlowMixin:
     def _cf_let_array(self, stmt: str, run_vars: dict[str, Any],
                       parsed: LetArrayStmt) -> tuple[bool, ExecOutcome]:
         name, idx_expr, val_expr = parsed.name, parsed.index_expr, parsed.value_expr
+        self._assert_assignable(name)
         base = getattr(self, '_option_base', 0)
         val = self._eval_with_vars(val_expr, run_vars)
         parts = self._split_arg_list(idx_expr)
@@ -106,6 +107,7 @@ class ControlFlowMixin:
     def _cf_let_var(self, stmt: str, run_vars: dict[str, Any],
                     parsed: LetStmt) -> tuple[bool, ExecOutcome]:
         name, expr = parsed.name, parsed.expr
+        self._assert_assignable(name)
         raw = self._safe_eval(expr, extra_ns=run_vars)
         if isinstance(raw, str):
             raise RuntimeError(

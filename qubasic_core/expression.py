@@ -135,7 +135,9 @@ class ExpressionMixin:
         'asin': math.asin, 'acos': math.acos, 'atan': math.atan,
         'atan2': math.atan2,
         'sqrt': math.sqrt, 'log': math.log, 'exp': math.exp,
-        'abs': abs, 'int': int, 'float': float,
+        # INT floors toward negative infinity, as in QBASIC (INT(-3.2) = -4).
+        # FIX truncates toward zero (FIX(-3.2) = -3) for the other convention.
+        'abs': abs, 'int': math.floor, 'fix': math.trunc, 'float': float,
         'min': min, 'max': max, 'round': round, 'len': len,
         'ceil': math.ceil, 'floor': math.floor,
     }
@@ -405,6 +407,16 @@ class ExpressionMixin:
         so conditions and ordinary expressions share one consistent path.
         """
         return bool(self._safe_eval(cond, extra_ns=run_vars))
+
+    # Built-in constant names that may not be used as variable/array names, so a
+    # value like E never silently shadows (or is shadowed by) the constant.
+    _RESERVED_CONST_NAMES = frozenset({'PI', 'TAU', 'E', 'SQRT2', 'TRUE', 'FALSE'})
+
+    def _assert_assignable(self, name: str) -> None:
+        """Reject assignment to a built-in constant name (case-insensitive)."""
+        if name.upper() in self._RESERVED_CONST_NAMES:
+            raise ValueError(
+                f"RESERVED: '{name}' is a built-in constant; choose another name")
 
     def _run_timer(self) -> float:
         """Return elapsed time since terminal start."""

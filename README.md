@@ -176,6 +176,8 @@ QUBITS 8             Set qubit count (1-32)
 SHOTS 2048           Set measurement shots
 METHOD statevector   Set simulation method
 METHOD GPU           Set simulation device
+STATUS               Show every active mode (qubits, method, LOCC, noise, ...)
+STATUS JSON          Same, as machine-readable JSON
 ```
 
 ### Simulation methods
@@ -187,17 +189,19 @@ Automatic selection: stabilizer for Clifford-only circuits, MPS for >28 qubits, 
 
 ```
 LET angle = PI/4
-LET x = sin(angle) * 2
+x = sin(angle) * 2       LET is optional (x = 5 also works)
 10 RX angle, 0           Use in gate parameters
 VARS                     List all variables
 CLEAR x                  Remove a variable
 ```
 
+Functions and keywords are case-insensitive (`SQRT` and `sqrt` both work).
+
 ### Constants
-`PI`, `TAU`, `E`, `SQRT2`, `True`, `False`
+`PI`, `TAU`, `E`, `SQRT2`, `True`, `False` (reserved; not usable as variable names)
 
 ### Math functions
-`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`, `log`, `exp`, `abs`, `int`, `float`, `min`, `max`, `round`, `ceil`, `floor`, `len`
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`, `log`, `exp`, `abs`, `int` (floors), `fix` (truncates), `float`, `min`, `max`, `round`, `ceil`, `floor`, `len`
 
 ### Runtime functions
 `RND(x)` random, `TIMER` elapsed seconds, `FRE(0)` free RAM bytes, `POS(0)` cursor column, `PEEK(addr)` memory read, `USR(addr)` call routine
@@ -330,6 +334,8 @@ CIRCUIT                  Circuit diagram (text)
 DECOMPOSE                Gate count breakdown
 DENSITY                  Density matrix
 ```
+
+Bitstrings are little-endian: qubit 0 is the rightmost character. Histograms print a `q(n-1) ... q1 q0` header so the mapping is explicit.
 
 ### Screen modes
 ```

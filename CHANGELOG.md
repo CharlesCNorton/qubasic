@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.0 (2026-06-19)
+
+Convention-conformance and observability pass: make the language behave the way
+a Qiskit/Python/BASIC user already expects, and make hidden state legible. The
+quantum engine is unchanged.
+
+### Added
+- `STATUS` (and `STATUS JSON`): dumps every active mode (qubits, shots, method, device, seed, `OPTION BASE`, LOCC mode, noise, coupling/basis, pending `SET_STATE`/`SET_DENSITY`, bank) so behavior can be read instead of inferred.
+- Implicit `LET`: a bare assignment works without the keyword (`x = 5`, `s$ = "hi"`, `a(1) = 5`), as in every BASIC.
+- `FIX(x)` truncates toward zero, complementing `INT`.
+- Histograms print a `q(n-1) ... q1 q0` bit-order header and the JSON result carries a `bit_order` field, making the little-endian convention (qubit 0 = rightmost) explicit.
+
+### Changed
+- `INT(x)` floors toward negative infinity (`INT(-3.2)` = -4), matching QBASIC; use `FIX` for truncation toward zero.
+- Built-in constants (`PI`, `E`, `TAU`, `SQRT2`) are reserved: a same-named variable can no longer silently shadow them, and assigning one is an error.
+- `MEAS` without a target bit reports a clear error distinguishing it from `MEASURE` (mid-circuit measurement into a classical bit vs collapse into the histogram) instead of `UNKNOWN GATE`.
+
 ## 0.10.1 (2026-06-19)
 
 Expression, string, and PRINT fixes in the classic-BASIC layer. The quantum

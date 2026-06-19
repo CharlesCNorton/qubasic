@@ -1963,7 +1963,8 @@ class TestExpressionStringRegressions(unittest.TestCase):
         self.assertAlmostEqual(self.t.eval_expr('SQRT(2)'), self.t.eval_expr('sqrt(2)'))
         self.assertAlmostEqual(self.t.eval_expr('SIN(0)'), 0.0)
         self.assertEqual(self.t.eval_expr('ABS(-5)'), 5.0)
-        self.assertEqual(self.t.eval_expr('INT(-3.2)'), self.t.eval_expr('int(-3.2)'))
+        self.assertEqual(self.t.eval_expr('INT(-3.2)'), -4.0)   # BASIC INT floors
+        self.assertEqual(self.t.eval_expr('FIX(-3.2)'), -3.0)   # FIX truncates toward zero
 
     def test_rnd_case_insensitive(self):
         for expr in ('RND(1)', 'rnd(1)'):
@@ -2014,6 +2015,68 @@ class TestExpressionStringRegressions(unittest.TestCase):
         # A genuine error is raised, not silently printed as raw text.
         with self.assertRaises(Exception):
             self.t._eval_print_item('GARBAGEFUNC(3)', {})
+
+
+class TestConventionAndStateRegressions(unittest.TestCase):
+    """Convention-conformance and hidden-state fixes: INT floors, implicit LET,
+    MEAS/MEASURE disambiguation, reserved constants, STATUS, bit-order labels."""
+
+    def setUp(self):
+        self.t = QBasicTerminal()
+        self.t.num_qubits = 2
+
+    def test_int_floors_fix_truncates(self):
+        self.assertEqual(self.t.eval_expr('INT(-3.2)'), -4.0)
+        self.assertEqual(self.t.eval_expr('INT(3.7)'), 3.0)
+        self.assertEqual(self.t.eval_expr('FIX(-3.2)'), -3.0)
+        self.assertEqual(self.t.eval_expr('FIX(3.7)'), 3.0)
+
+    def test_implicit_let_parses_as_assignment(self):
+        from qubasic_core.parser import parse_stmt
+        from qubasic_core.statements import LetStmt, LetStrStmt, LetArrayStmt
+        self.assertIsInstance(parse_stmt('x = 5'), LetStmt)
+        self.assertIsInstance(parse_stmt('s$ = "hi"'), LetStrStmt)
+        self.assertIsInstance(parse_stmt('a(1) = 5'), LetArrayStmt)
+        # '==' is a comparison, never an implicit assignment.
+        self.assertNotIsInstance(parse_stmt('x == 5'), LetStmt)
+
+    def test_implicit_let_runs(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.program = {10: 'x = 5', 20: 's$ = "ok"', 30: 'y = x + 1'}
+        capture(t.cmd_run)
+        self.assertEqual(t.variables['x'], 5.0)
+        self.assertEqual(t.variables['s$'], 'ok')
+        self.assertEqual(t.variables['y'], 6.0)
+
+    def test_meas_bare_form_errors_measure_does_not(self):
+        # MEAS without a target bit raises a helpful error...
+        with self.assertRaises(ValueError):
+            self.t._try_exec_meas('MEAS 0', None, {})
+        # ...while MEASURE is a different statement and is left untouched here.
+        self.assertFalse(self.t._try_exec_meas('MEASURE 0', None, {}))
+
+    def test_reserved_constants_not_assignable(self):
+        for name in ('E', 'e', 'PI', 'pi', 'TAU', 'SQRT2'):
+            with self.assertRaises(ValueError):
+                self.t._assert_assignable(name)
+        self.t._assert_assignable('x')      # ordinary names are fine
+        self.t._assert_assignable('e1')
+
+    def test_status_dict_reports_modes(self):
+        t = QBasicTerminal(); t.num_qubits = 3; t.shots = 128
+        d = t._status_dict()
+        self.assertEqual(d['qubits'], 3)
+        self.assertEqual(d['shots'], 128)
+        self.assertIn('rightmost', d['bit_order'])
+        self.assertFalse(d['noise_active'])
+        self.assertIn('option_base', d)
+
+    def test_bit_order_label_and_result(self):
+        t = QBasicTerminal(); t.num_qubits = 3
+        note = t._bit_order_note([('001', 5)])
+        self.assertIn('q2 q1 q0', note)
+        self.assertIn('rightmost', note)
+        self.assertIn('bit_order', t.result())
 
 
 if __name__ == '__main__':

@@ -102,6 +102,11 @@ RE_ON_MEASURE = re.compile(r'ON\s+MEASURE\s+GOSUB\s+(\d+)', re.IGNORECASE)
 RE_ON_TIMER = re.compile(r'ON\s+TIMER\s*\((\d+)\)\s+GOSUB\s+(\d+)', re.IGNORECASE)
 RE_DIM_MULTI = re.compile(r'DIM\s+(\w+)\((\d+(?:\s*,\s*\d+)*)\)', re.IGNORECASE)
 RE_LET_STR = re.compile(r'LET\s+(\w+\$)\s*=\s*(.*)', re.IGNORECASE)
+# Implicit LET: an assignment written without the LET keyword (x = 5, s$ = "hi",
+# a(1) = 5, p.x = 3). Anchored lvalue followed by a single '=' that is not part
+# of '==' / '<=' / '>=' / '!=' / '<>'. Routed through the LET handlers.
+RE_IMPLICIT_ASSIGN = re.compile(
+    r'[A-Za-z_]\w*\$?(?:\.\w+)?(?:\([^)]*\))?\s*=(?!=)', re.IGNORECASE)
 
 __all__ = [
     "RE_LINE_NUM",
@@ -185,4 +190,5 @@ __all__ = [
     "RE_ON_TIMER",
     "RE_DIM_MULTI",
     "RE_LET_STR",
+    "RE_IMPLICIT_ASSIGN",
 ]

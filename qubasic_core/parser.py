@@ -22,6 +22,7 @@ from qubasic_core.patterns import (
     RE_LPRINT, RE_SCREEN, RE_COLOR, RE_LOCATE,
     RE_ON_MEASURE, RE_ON_TIMER, RE_IMPORT, RE_CHAIN, RE_MERGE,
     RE_LET_STR, RE_DIM_MULTI, RE_MEASURE_BASIS, RE_SYNDROME,
+    RE_IMPLICIT_ASSIGN,
 )
 from qubasic_core.statements import (
     Stmt, RawStmt, GateStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt,
@@ -577,6 +578,15 @@ def parse_stmt(raw: str) -> Stmt:
         parts = _split_colon_stmts(text)
         if len(parts) > 1:
             return CompoundStmt(raw=raw, parts=tuple(parts))
+
+    # ── Implicit LET (assignment without the LET keyword) ──────────
+    # A line whose lvalue is followed by a single '=' is an assignment, even
+    # when it collides with a gate name (X = 5 is "assign X", not the X gate).
+    # Tried before gate dispatch so bare assignment works as in every BASIC.
+    if RE_IMPLICIT_ASSIGN.match(text):
+        result = _handle_let(f"LET {text}", raw)
+        if result is not None:
+            return result
 
     # ── Gate application ────────────────────────────────────────────
     canonical = GATE_ALIASES.get(first_word, first_word)

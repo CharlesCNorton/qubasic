@@ -508,6 +508,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'LIST': 'cmd_list', 'QUBITS': 'cmd_qubits', 'SHOTS': 'cmd_shots',
         'METHOD': 'cmd_method', 'DEF': 'cmd_def', 'REG': 'cmd_reg',
         'LET': 'cmd_let', 'STATE': 'cmd_state', 'BLOCH': 'cmd_bloch',
+        'STATUS': 'cmd_status',
         'DEMO': 'cmd_demo', 'DELETE': 'cmd_delete', 'RENUM': 'cmd_renum',
         'SAVE': 'cmd_save', 'LOAD': 'cmd_load', 'SWEEP': 'cmd_sweep',
         'INCLUDE': 'cmd_include', 'EXPORT': 'cmd_export',
@@ -593,6 +594,17 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             except Exception as e:
                 self.io.writeln(f"?ERROR: {e}")
         else:
+            # Implicit LET: a bare assignment (x = 5, s$ = "hi") routed to the
+            # LET handler so it works without the keyword, as in every BASIC.
+            from qubasic_core.patterns import RE_IMPLICIT_ASSIGN
+            if RE_IMPLICIT_ASSIGN.match(line.strip()):
+                try:
+                    self.cmd_let(line.strip())
+                except QBasicError as e:
+                    self.io.writeln(f"?{e.message}")
+                except Exception as e:
+                    self.io.writeln(f"?ERROR: {e}")
+                return
             # Try as immediate gate / subroutine
             try:
                 self.run_immediate(line)
@@ -1066,6 +1078,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln("?USAGE: LET <var> = <expr>")
             return
         name = m.group(1)
+        self._assert_assignable(name)
         raw = self._safe_eval(m.group(2))
         if isinstance(raw, str):
             self.io.writeln(
@@ -1079,6 +1092,78 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             if isinstance(rec, dict):
                 rec[field] = val
         self.io.writeln(f"{name} = {val}")
+
+    def _status_dict(self) -> dict:
+        """Snapshot every active mode that silently changes how a line behaves.
+
+        Returned as plain JSON-serializable values so a caller can read context
+        instead of inferring it from prior commands.
+        """
+        cmap = getattr(self, '_coupling_map', None)
+        return {
+            'qubits': self.num_qubits,
+            'shots': self.shots,
+            'method': self.sim_method,
+            'device': self.sim_device,
+            'seed': getattr(self, '_seed', None),
+            'bit_order': 'little-endian (qubit 0 = rightmost bit)',
+            'option_base': getattr(self, '_option_base', 0),
+            'locc_mode': bool(getattr(self, 'locc_mode', False)),
+            'locc_registers': (list(self.locc.names)
+                               if getattr(self, 'locc_mode', False) and getattr(self, 'locc', None)
+                               else []),
+            'noise_active': getattr(self, '_noise_model', None) is not None,
+            'noise_spec': getattr(self, '_noise_spec', None),
+            'coupling_map': ([list(e) for e in cmap] if cmap else None),
+            'basis_gates': getattr(self, '_basis_gates', None),
+            'pending_set_state': getattr(self, '_pending_set_state', None) is not None,
+            'pending_set_density': getattr(self, '_pending_set_density', None) is not None,
+            'screen_mode': getattr(self, '_screen_mode', 0),
+            'trace_mode': bool(getattr(self, '_trace_mode', False)),
+            'bank': getattr(self, '_current_slot', 0),
+            'program_lines': len(self.program),
+            'variables': len(self.variables),
+            'arrays': len(self.arrays),
+            'subroutines': len(self.subroutines),
+            'custom_gates': sorted(self._custom_gates.keys()),
+        }
+
+    def cmd_status(self, rest: str = '') -> None:
+        """STATUS [JSON] — show every active mode (qubits, method, LOCC, noise,
+        OPTION BASE, pending state injections, bank, ...) so behavior is readable
+        rather than inferred. STATUS JSON emits the same data as JSON."""
+        d = self._status_dict()
+        if rest.strip().upper() == 'JSON':
+            import json
+            self.io.writeln(json.dumps(d, indent=2, default=str))
+            return
+        w = self.io.writeln
+        w("  QUBASIC status")
+        w(f"    qubits       {d['qubits']}    shots {d['shots']}    "
+          f"method {d['method']}    device {d['device']}")
+        w(f"    seed         {d['seed']}")
+        w(f"    bit order    {d['bit_order']}")
+        w(f"    option base  {d['option_base']}")
+        if d['locc_mode']:
+            w(f"    LOCC mode    on    registers {d['locc_registers']}")
+        w(f"    noise        {('on  ' + str(d['noise_spec'])) if d['noise_active'] else 'off'}")
+        if d['coupling_map']:
+            w(f"    coupling     {d['coupling_map']}")
+        if d['basis_gates']:
+            w(f"    basis gates  {d['basis_gates']}")
+        if d['pending_set_state']:
+            w("    pending      SET_STATE applies on next RUN")
+        if d['pending_set_density']:
+            w("    pending      SET_DENSITY applies on next RUN")
+        if d['screen_mode']:
+            w(f"    screen mode  {d['screen_mode']}")
+        if d['trace_mode']:
+            w("    trace        on")
+        w(f"    bank         {d['bank']}")
+        w(f"    program      {d['program_lines']} lines, {d['variables']} vars, "
+          f"{d['arrays']} arrays, {d['subroutines']} subs")
+        if d['custom_gates']:
+            w(f"    custom gates {d['custom_gates']}")
 
     # cmd_defs, cmd_regs, cmd_vars provided by ProgramMgmtMixin.
 
@@ -1500,6 +1585,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             'counts': self.last_counts or {},
             'num_qubits': self.num_qubits,
             'shots': self.shots,
+            # Bitstrings are little-endian: the rightmost character is qubit 0.
+            'bit_order': 'little-endian (qubit 0 = rightmost bit)',
         }
         uvars = {k: v for k, v in self.variables.items()
                  if not k.startswith('_') and isinstance(v, (int, float, str, bool))}
@@ -1760,6 +1847,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         """
         m = RE_MEAS.match(stmt)
         if not m:
+            # Bare MEAS (no "-> bit") is the classic confusion with MEASURE:
+            # MEAS is a mid-circuit measurement that must name a classical bit,
+            # MEASURE collapses qubits into the result histogram.
+            if re.match(r'MEAS\b', stmt, re.IGNORECASE):
+                raise ValueError(
+                    "MEAS needs a target bit: MEAS <qubit> -> <bit> "
+                    "(mid-circuit measurement used by IF). To collapse qubits "
+                    "into the result histogram, use MEASURE <qubit>.")
             return False
         qubit = int(self._eval_with_vars(m.group(1), run_vars))
         var = m.group(2)
