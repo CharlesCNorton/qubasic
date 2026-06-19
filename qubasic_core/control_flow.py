@@ -40,12 +40,60 @@ class ControlFlowMixin:
     # signature for compatibility with _exec_control_flow's argument
     # passing but is not used by the methods themselves.
 
+    @staticmethod
+    def _split_arg_list(s: str) -> list[str]:
+        """Split a comma list at top level (outside quotes and brackets)."""
+        parts: list[str] = []
+        buf = ''
+        depth = 0
+        quote: str | None = None
+        for ch in s:
+            if quote:
+                buf += ch
+                if ch == quote:
+                    quote = None
+            elif ch in ('"', "'"):
+                quote = ch
+                buf += ch
+            elif ch in '([':
+                depth += 1
+                buf += ch
+            elif ch in ')]':
+                depth = max(0, depth - 1)
+                buf += ch
+            elif ch == ',' and depth == 0:
+                parts.append(buf)
+                buf = ''
+            else:
+                buf += ch
+        if buf.strip():
+            parts.append(buf)
+        return [p.strip() for p in parts if p.strip()]
+
     def _cf_let_array(self, stmt: str, run_vars: dict[str, Any],
                       parsed: LetArrayStmt) -> tuple[bool, ExecOutcome]:
         name, idx_expr, val_expr = parsed.name, parsed.index_expr, parsed.value_expr
         base = getattr(self, '_option_base', 0)
-        idx = int(self._eval_with_vars(idx_expr, run_vars)) - base
         val = self._eval_with_vars(val_expr, run_vars)
+        parts = self._split_arg_list(idx_expr)
+        if len(parts) > 1:
+            # Multi-dimensional write: flatten with the same stride convention
+            # the expression-side accessor uses, so reads and writes agree.
+            dims = getattr(self, '_array_dims', {}).get(name)
+            indices = [int(self._eval_with_vars(p, run_vars)) - base for p in parts]
+            if any(i < 0 for i in indices):
+                raise RuntimeError(f"ARRAY INDEX OUT OF RANGE: {name}({idx_expr})")
+            flat, stride = 0, 1
+            for k in range(len(indices) - 1, -1, -1):
+                flat += indices[k] * stride
+                stride *= dims[k] if dims and k < len(dims) else 1
+            if name not in self.arrays:
+                raise RuntimeError(f"ARRAY NOT DIMENSIONED: {name} (use DIM first)")
+            if flat < 0 or flat >= len(self.arrays[name]):
+                raise RuntimeError(f"ARRAY INDEX OUT OF RANGE: {name}({idx_expr})")
+            self.arrays[name][flat] = val
+            return True, ExecResult.ADVANCE
+        idx = int(self._eval_with_vars(idx_expr, run_vars)) - base
         if idx < 0:
             raise RuntimeError(f"ARRAY INDEX OUT OF RANGE: {name}({idx + base})")
         if name not in self.arrays:

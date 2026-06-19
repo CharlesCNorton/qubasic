@@ -33,8 +33,7 @@ class LOCCExecutionMixin:
         if not sorted_lines:
             self.io.writeln("NOTHING TO RUN")
             return
-        has_measure = any(self.program[l].strip().upper() == 'MEASURE'
-                         for l in sorted_lines)
+        has_measure = self._program_has_measure(sorted_lines)
         has_send = any(re.search(r'\bSEND\b', self.program[l], re.IGNORECASE)
                        for l in sorted_lines)
         if has_send:

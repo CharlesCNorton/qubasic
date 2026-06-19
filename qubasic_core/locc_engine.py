@@ -180,7 +180,13 @@ class LOCCEngine:
                 self._renormalize(reg)
 
     def apply(self, reg: str, gate_name: str, params: tuple[float, ...], qubits: list[int]) -> None:
-        """Apply a gate to a specific register, then apply noise if configured."""
+        """Apply a gate to a register, then apply noise if configured.
+
+        Qubit indices are register-LOCAL (0..size-1); the register offset into
+        the joint statevector is added internally. Callers that index the raw
+        statevector (e.g. for fidelity/inspection) must convert with
+        ``offsets[reg] + local`` themselves.
+        """
         self._check_qubits(reg, qubits)
         matrix = _np_gate_matrix(gate_name, tuple(params))
         if self.joint:
@@ -194,7 +200,10 @@ class LOCCEngine:
         self._contiguate(reg)
 
     def share(self, reg1: str, q1: int, reg2: str, q2: int) -> None:
-        """Create Bell pair |Phi+> between reg1[q1] and reg2[q2]. JOINT only."""
+        """Create Bell pair |Phi+> between reg1[q1] and reg2[q2]. JOINT only.
+
+        ``q1``/``q2`` are register-LOCAL indices; offsets are added internally.
+        """
         if not self.joint:
             raise RuntimeError("SHARE requires LOCC JOINT mode")
         self._check_qubits(reg1, [q1])
@@ -210,7 +219,10 @@ class LOCCEngine:
         self._apply_noise(reg2, [q2])
 
     def send(self, reg: str, qubit: int) -> int:
-        """Measure a qubit (Born rule) and return the classical outcome."""
+        """Measure a qubit (Born rule) and return the classical outcome.
+
+        ``qubit`` is register-LOCAL (0..size-1); the offset is added internally.
+        """
         self._check_qubits(reg, [qubit])
         if self.joint:
             actual = qubit + self.offsets[self._idx(reg)]
@@ -266,7 +278,10 @@ class LOCCEngine:
             return per_reg, {}
 
     def apply_matrix(self, reg: str, matrix: np.ndarray, qubits: list[int]) -> None:
-        """Apply a raw unitary matrix to qubits in a register."""
+        """Apply a raw unitary matrix to qubits in a register.
+
+        ``qubits`` are register-LOCAL indices; offsets are added internally.
+        """
         self._check_qubits(reg, qubits)
         if self.joint:
             idx = self._idx(reg)

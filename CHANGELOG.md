@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.4 (2026-06-19)
+
+### Fixed
+- Immediate-mode `PRINT` at the REPL no longer prints a spurious statevector after its output. `PRINT` is not a dispatch-table command, so it fell through to the immediate gate path, which always dumped `|psi>`. That path now skips the dump when the typed line added no circuit operations, so gate and subroutine entries still show state while `PRINT`, `MEASURE`, and other classical statements do not.
+- `--quiet` now prints results with the banner suppressed, as documented. The results branch was unreachable (guarded by `elif not quiet` inside an `if quiet or json_mode` block), so `--quiet` previously produced no output at all.
+- A `MEASURE` reachable only inside a `DEF`/`SUB` body, an `IF ... THEN/ELSE` clause, or a colon compound is now detected, so the program takes the shots path (and `qubasic script.qb` auto-runs) instead of the no-measure statevector path.
+- `LET m(i, j) = x` writes a multi-dimensional array element using the same flat-stride convention the expression-side accessor reads, so multi-dimensional reads and writes agree.
+- Immediate-mode `LET a(i) = <expr>` at the REPL assigns the array element, matching the in-program `LET` (previously only the in-program form handled array targets).
+
 ## 0.6.3 (2026-06-18)
 
 ### Fixed

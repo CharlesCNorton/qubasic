@@ -928,7 +928,18 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     def cmd_let(self, rest: str) -> None:
         """LET <var> = <expr> — assign a computed value to a variable.
-        Supports record fields, e.g. LET p.x = 3.14 (see TYPE)."""
+        Supports record fields (LET p.x = 3.14) and array elements
+        (LET a(0) = PI, LET m(i, j) = x), matching the in-program LET."""
+        from qubasic_core.patterns import RE_LET_ARRAY
+        am = RE_LET_ARRAY.match(f"LET {rest}")
+        if am:
+            from qubasic_core.statements import LetArrayStmt
+            name, idx_expr, val_expr = am.group(1), am.group(2), am.group(3)
+            parsed = LetArrayStmt(raw=f"LET {rest}", name=name,
+                                  index_expr=idx_expr, value_expr=val_expr)
+            self._cf_let_array(f"LET {rest}", self.variables, parsed)
+            self.io.writeln(f"{name}({idx_expr.strip()}) = {self.eval_expr(val_expr)}")
+            return
         m = re.match(r'(\w+(?:\.\w+)?)\s*=\s*(.*)', rest)
         if not m:
             self.io.writeln("?USAGE: LET <var> = <expr>")

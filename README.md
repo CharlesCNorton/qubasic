@@ -628,7 +628,7 @@ QBASIC detects available RAM, estimates per-instance memory, and reports maximum
 ### Simulation method selection
 - **automatic**: stabilizer for Clifford-only circuits, MPS for >28 qubits, statevector otherwise
 - **stabilizer**: polynomial-time for Clifford circuits (H, S, CX, SWAP, etc.)
-- **matrix_product_state**: scales to 50+ qubits for low-entanglement circuits
+- **matrix_product_state**: memory-efficient for low-entanglement circuits; handles the full 32-qubit range that would exhaust statevector
 - **extended_stabilizer**: approximate simulation for near-Clifford circuits
 - **statevector**: exact, limited by RAM (~28 qubits on 16GB)
 - **density_matrix**: includes mixed states, ~14 qubits on 16GB

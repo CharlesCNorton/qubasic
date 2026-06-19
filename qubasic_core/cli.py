@@ -38,12 +38,8 @@ def run_script(path: str, terminal: 'QBasicTerminal') -> None:
     ProgramMgmtMixin._load_lines_with_defs(
         lines, lambda line: terminal.process(line, track_undo=False))
 
-    # Auto-run if the program has a MEASURE statement
-    has_measure = any(
-        terminal.program.get(ln, '').strip().upper() == 'MEASURE'
-        for ln in terminal.program
-    )
-    if terminal.program and has_measure:
+    # Auto-run if the program has a reachable MEASURE (incl. in subs / IF clauses)
+    if terminal.program and terminal._program_has_measure(sorted(terminal.program)):
         terminal.cmd_run()
 
 
@@ -125,8 +121,12 @@ def main():
                     print(_json.dumps({'error': err}, indent=2))
                     sys.exit(1)
                 print(_json.dumps(term.result(), indent=2))
-            elif not quiet:
-                print(buf.getvalue())
+            else:
+                # --quiet (no --json): the banner was never emitted into the
+                # buffer (only the non-captured path calls print_banner), so the
+                # captured text is exactly the results. Print them, matching the
+                # documented "suppress banner, output results only" behavior.
+                print(buf.getvalue(), end='')
                 if err is not None:
                     print(f"?ERROR: {err}")
                     sys.exit(1)
@@ -134,9 +134,8 @@ def main():
             term.print_banner()
             run_script(path, term)
         # Exit 0 on success; 1 if a measured program produced no counts.
-        sys.exit(0 if term.last_counts is not None or not any(
-            term.program.get(ln, '').strip().upper() == 'MEASURE'
-            for ln in term.program) else 1)
+        expects_measure = bool(term.program) and term._program_has_measure(sorted(term.program))
+        sys.exit(0 if term.last_counts is not None or not expects_measure else 1)
     else:
         term.repl()
 

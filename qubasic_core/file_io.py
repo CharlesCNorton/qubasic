@@ -195,8 +195,6 @@ class FileIOMixin:
         DEFs in the imported file are prefixed with the module name.
         E.g., IMPORT "math.qb" makes DEF ROT available as MATH.ROT.
         """
-        from qubasic_core.engine import RE_IMPORT
-        m = RE_IMPORT.match(f"IMPORT {rest}") if not rest.startswith('IMPORT') else RE_IMPORT.match(rest)
         path = rest.strip().strip('"').strip("'")
         if not path:
             self.io.writeln('?USAGE: IMPORT "filename"')

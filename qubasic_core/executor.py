@@ -66,6 +66,41 @@ class ExecutorMixin:
 
     # ── Circuit Building ──────────────────────────────────────────────
 
+    def _program_has_measure(self, sorted_lines) -> bool:
+        """True if any reachable statement measures.
+
+        The plain per-line scan misses a MEASURE that only appears inside a DEF
+        subroutine body or an IF/THEN-ELSE clause, which left the run on the
+        no-measure path with no counts. This recursion-guarded walk follows
+        colon compounds, IF clauses, and subroutine bodies so the shots path
+        fires whenever a measurement is actually reachable.
+        """
+        from qubasic_core.statements import MeasureStmt, CompoundStmt, IfThenStmt
+        from qubasic_core.parser import parse_stmt
+
+        def scan(text: str, seen: frozenset) -> bool:
+            p = parse_stmt(text)
+            if isinstance(p, MeasureStmt):
+                return True
+            if isinstance(p, CompoundStmt):
+                return any(scan(part, seen) for part in p.parts)
+            if isinstance(p, IfThenStmt):
+                if p.then_clause and scan(p.then_clause, seen):
+                    return True
+                if p.else_clause and scan(p.else_clause, seen):
+                    return True
+                return False
+            words = text.strip().split()
+            if words:
+                word = words[0].upper().split('(')[0]
+                if word in self.subroutines and word not in seen:
+                    sub = self.subroutines[word]
+                    body = sub['body'] if isinstance(sub, dict) else sub
+                    return any(scan(b, seen | {word}) for b in body)
+            return False
+
+        return any(scan(self.program[ln], frozenset()) for ln in sorted_lines)
+
     def build_circuit(self) -> tuple['QuantumCircuit', bool]:
         """Compile program lines into a QuantumCircuit. Returns (circuit, has_measure)."""
         from qubasic_core.exec_context import ExecContext
@@ -92,7 +127,9 @@ class ExecutorMixin:
             qc=qc,
             backend=backend,
         )
-        has_measure = False
+        # Reachability scan catches MEASURE inside subroutines and IF clauses,
+        # not just literal top-level MEASURE lines.
+        has_measure = self._program_has_measure(ctx.sorted_lines)
         self._on_measure_fired = False
 
         while ctx.ip < len(ctx.sorted_lines):
@@ -685,6 +722,12 @@ class ExecutorMixin:
         imm_ctx = ExecContext(sorted_lines=[0], ip=0,
                               run_vars=dict(self.variables), qc=qc)
         self._exec_line(line, ctx=imm_ctx)
+        # A classical statement typed at the prompt (PRINT, MEASURE, an IF whose
+        # clause printed, ...) adds no circuit operations and has already emitted
+        # its own output via _exec_line. Simulating an empty circuit just to print
+        # an unchanged |psi> would be spurious, so skip the statevector dump.
+        if qc.size() == 0:
+            return
         qc.save_statevector()
         backend = self._make_backend('statevector')
         result = backend.run(transpile(qc, backend)).result()
