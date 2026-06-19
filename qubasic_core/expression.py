@@ -94,6 +94,36 @@ def _rewrite_logical_outside_strings(cond: str) -> str:
     return ''.join(parts)
 
 
+def _as_int(x: Any) -> int:
+    """Coerce a BASIC value to int for bitwise AND/OR/XOR.
+
+    QBasic rounds non-integers; truth values and non-numerics fold to 1/0 so
+    ``(a > 0) AND (b > 0)`` works the same as ``6 AND 3``.
+    """
+    if isinstance(x, bool):
+        return int(x)
+    if isinstance(x, int):
+        return x
+    if isinstance(x, float):
+        return int(round(x))
+    return 1 if x else 0
+
+
+def _basic_and(a: Any, b: Any) -> int:
+    """BASIC AND — bitwise on integers, and correct for truth values
+    (1 & 1 == 1, 1 & 0 == 0). Parsed from ``and`` so precedence stays below
+    comparison: ``a > b AND c > d`` groups as ``(a>b) AND (c>d)``."""
+    return _as_int(a) & _as_int(b)
+
+
+def _basic_or(a: Any, b: Any) -> int:
+    return _as_int(a) | _as_int(b)
+
+
+def _basic_xor(a: Any, b: Any) -> int:
+    return _as_int(a) ^ _as_int(b)
+
+
 class ExpressionMixin:
     """AST-based safe expression evaluation. No eval().
 
@@ -126,11 +156,14 @@ class ExpressionMixin:
         ast.Eq: operator.eq, ast.NotEq: operator.ne,
         ast.Lt: operator.lt, ast.LtE: operator.le,
         ast.Gt: operator.gt, ast.GtE: operator.ge,
-        ast.And: lambda a, b: a and b,
-        ast.Or: lambda a, b: a or b,
-        ast.BitAnd: operator.and_,
-        ast.BitOr: operator.or_,
-        ast.BitXor: operator.xor,
+        # AND/OR/XOR are BASIC's bitwise-logical operators (6 AND 3 == 2),
+        # robust to float operands; NOT stays logical so IF NOT flag works
+        # with 0/1 truth values.
+        ast.And: _basic_and,
+        ast.Or: _basic_or,
+        ast.BitAnd: _basic_and,
+        ast.BitOr: _basic_or,
+        ast.BitXor: _basic_xor,
         ast.Invert: operator.invert,
     }
 
@@ -237,6 +270,13 @@ class ExpressionMixin:
             ns['FRE'] = lambda x=0: psutil.virtual_memory().available
         except ImportError:
             ns['FRE'] = lambda x=0: 0
+        # BASIC is case-insensitive for built-in functions and constants, so
+        # register upper- and lower-case aliases for every builtin (SQRT and
+        # sqrt, RND and rnd, LEFT$ and left$). Variables are merged with their
+        # own case in _safe_eval and shadow these.
+        for _name in list(ns.keys()):
+            ns.setdefault(_name.upper(), ns[_name])
+            ns.setdefault(_name.lower(), ns[_name])
         self._base_ns = ns
         return ns
 
@@ -301,9 +341,17 @@ class ExpressionMixin:
         expr_str = str(expr).strip()
         # Normalize FN prefix: "FN square(x)" -> "square(x)"
         expr_str = re.sub(r'\bFN\s+(\w+)\s*\(', r'\1(', expr_str, flags=re.IGNORECASE)
+        # Rewrite BASIC logical/relational operators (AND, OR, NOT, XOR, <>) to
+        # the Python forms the AST understands, only outside quoted strings.
+        # Applied to every expression (LET, PRINT, gate params), not just IF
+        # conditions, so the documented operators work everywhere.
+        expr_str = _rewrite_logical_outside_strings(expr_str)
         # Rewrite numeric literals (&H, &B, $hex addresses) and the string
         # sigil, each only outside quoted string literals.
         expr_str = _replace_dollar_outside_strings(expr_str)
+        # The operator rewrite can pad a leading token (NOT x -> " not x"); strip
+        # so ast.parse(mode='eval') does not reject it as an unexpected indent.
+        expr_str = expr_str.strip()
         if not expr_str:
             raise ValueError("EMPTY EXPRESSION")
         try:
@@ -351,8 +399,11 @@ class ExpressionMixin:
         return float(self._safe_eval(expr, extra_ns=run_vars))
 
     def _eval_condition(self, cond: str, run_vars: dict[str, Any]) -> bool:
-        """Evaluate a boolean condition."""
-        cond = _rewrite_logical_outside_strings(cond)
+        """Evaluate a boolean condition.
+
+        The operator rewrite (AND/OR/NOT/XOR/<>) now happens inside _safe_eval,
+        so conditions and ordinary expressions share one consistent path.
+        """
         return bool(self._safe_eval(cond, extra_ns=run_vars))
 
     def _run_timer(self) -> float:

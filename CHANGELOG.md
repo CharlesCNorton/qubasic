@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.1 (2026-06-19)
+
+Expression, string, and PRINT fixes in the classic-BASIC layer. The quantum
+engine is unchanged.
+
+### Fixed
+- Math functions resolve in any case: `SQRT`, `SIN`, `ABS`, `INT`, ... now work as well as their lowercase spellings, matching the rest of the language. Runtime and string functions (`RND`, `LEFT$`, ...) are likewise case-insensitive.
+- `AND`, `OR`, `NOT`, `XOR`, and `<>` work in every expression context (`LET`, `PRINT`, gate parameters), not only in `IF` conditions. `AND`/`OR`/`XOR` are bitwise on integers (`6 AND 3` = 2) while preserving operator precedence below comparison, so `IF a > b AND c > d` still groups correctly; `NOT` is logical.
+- String variables are fully usable: `LET s$ = "foo" + "bar"`, `LET t$ = LEFT$(s$, 3)`, and other computed strings store their real value in both immediate and program mode, instead of being mistaken for a quoted literal or forced through `float()`.
+- `PRINT` surfaces evaluation errors instead of silently printing the unevaluated source text. Assigning a string to a numeric variable reports a `TYPE MISMATCH` rather than crashing on a float conversion.
+
 ## 0.10.0 (2026-06-19)
 
 Completes the frontier set: fault-tolerant QEC extras and a compilation/resources

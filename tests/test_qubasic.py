@@ -1948,6 +1948,74 @@ class TestResources(unittest.TestCase):
         self.assertIsNotNone(t.last_counts)
 
 
+class TestExpressionStringRegressions(unittest.TestCase):
+    """Regression coverage for the expression/string/PRINT fixes:
+    case-insensitive functions, bitwise/logical operators in every expression
+    context, string-variable assignment, and PRINT surfacing errors."""
+
+    def setUp(self):
+        self.t = QBasicTerminal()
+        self.t.num_qubits = 1
+
+    def test_math_functions_case_insensitive(self):
+        # Uppercase now resolves as well as lowercase, and they agree.
+        self.assertAlmostEqual(self.t.eval_expr('SQRT(2)'), math.sqrt(2))
+        self.assertAlmostEqual(self.t.eval_expr('SQRT(2)'), self.t.eval_expr('sqrt(2)'))
+        self.assertAlmostEqual(self.t.eval_expr('SIN(0)'), 0.0)
+        self.assertEqual(self.t.eval_expr('ABS(-5)'), 5.0)
+        self.assertEqual(self.t.eval_expr('INT(-3.2)'), self.t.eval_expr('int(-3.2)'))
+
+    def test_rnd_case_insensitive(self):
+        for expr in ('RND(1)', 'rnd(1)'):
+            v = self.t.eval_expr(expr)
+            self.assertTrue(0.0 <= v < 1.0)
+
+    def test_bitwise_logical_operators_in_expressions(self):
+        # AND/OR/XOR work in ordinary expressions (not just IF) and are bitwise.
+        self.assertEqual(self.t.eval_expr('6 AND 3'), 2.0)
+        self.assertEqual(self.t.eval_expr('5 OR 2'), 7.0)
+        self.assertEqual(self.t.eval_expr('5 XOR 3'), 6.0)
+        # <> works as an expression operator.
+        self.assertTrue(self.t._safe_eval('3 <> 4'))
+        self.assertFalse(self.t._safe_eval('3 <> 3'))
+
+    def test_logical_operator_precedence_preserved(self):
+        # AND must bind below comparison: a > b AND c > d groups correctly.
+        self.assertTrue(self.t._eval_condition('3 > 2 AND 5 > 1', {}))
+        self.assertFalse(self.t._eval_condition('3 > 5 AND 5 > 1', {}))
+        self.assertTrue(self.t._eval_condition('1 > 5 OR 5 > 1', {}))
+        self.assertTrue(self.t._eval_condition('NOT 0', {}))
+        self.assertFalse(self.t._eval_condition('NOT 1', {}))
+
+    def test_string_assignment_program_mode(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.program = {10: 'LET s$ = "foo" + "bar"',
+                     20: 'LET t$ = LEFT$("hello", 3)',
+                     30: 'LET u$ = MID$("hello", 2)'}
+        capture(t.cmd_run)
+        self.assertEqual(t.variables['s$'], 'foobar')
+        self.assertEqual(t.variables['t$'], 'hel')
+        self.assertEqual(t.variables['u$'], 'ello')
+
+    def test_string_assignment_immediate_mode(self):
+        capture(self.t.cmd_let, 's$ = "hi"')
+        self.assertEqual(self.t.variables['s$'], 'hi')
+        capture(self.t.cmd_let, 'g$ = "foo" + "bar"')
+        self.assertEqual(self.t.variables['g$'], 'foobar')
+
+    def test_numeric_var_rejects_string(self):
+        _, out = capture(self.t.cmd_let, 'n = "hi"')
+        self.assertIn('TYPE MISMATCH', out)
+        self.assertNotIn('n', self.t.variables)
+
+    def test_print_surfaces_errors_no_masking(self):
+        # A valid (now case-insensitive) call evaluates instead of printing source.
+        self.assertEqual(self.t._eval_print_item('SQRT(9)', {}), '3.0')
+        # A genuine error is raised, not silently printed as raw text.
+        with self.assertRaises(Exception):
+            self.t._eval_print_item('GARBAGEFUNC(3)', {})
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')

@@ -12,7 +12,7 @@ from qubasic_core.engine import ExecResult, ExecOutcome
 from qubasic_core.parser import parse_stmt
 from qubasic_core.statements import (
     RawStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt, WendStmt,
-    LetArrayStmt, LetStmt, PrintStmt, GotoStmt, GosubStmt,
+    LetArrayStmt, LetStmt, LetStrStmt, PrintStmt, GotoStmt, GosubStmt,
     ForStmt, NextStmt, WhileStmt, IfThenStmt,
     DataStmt, ReadStmt, OnGotoStmt, OnGosubStmt,
     SelectCaseStmt, CaseStmt, EndSelectStmt, ElseStmt, EndIfStmt,
@@ -106,7 +106,20 @@ class ControlFlowMixin:
     def _cf_let_var(self, stmt: str, run_vars: dict[str, Any],
                     parsed: LetStmt) -> tuple[bool, ExecOutcome]:
         name, expr = parsed.name, parsed.expr
-        val = self._eval_with_vars(expr, run_vars)
+        raw = self._safe_eval(expr, extra_ns=run_vars)
+        if isinstance(raw, str):
+            raise RuntimeError(
+                f"TYPE MISMATCH: '{name}' is numeric; use '{name}$' for strings")
+        val = float(raw)
+        run_vars[name] = val
+        self.variables[name] = val
+        return True, ExecResult.ADVANCE
+
+    def _cf_let_str(self, stmt: str, run_vars: dict[str, Any],
+                    parsed: LetStrStmt) -> tuple[bool, ExecOutcome]:
+        """LET v$ = <expr> — assign a string (or number) to a string variable."""
+        name, expr = parsed.name, parsed.expr
+        val = self._eval_string_expr(expr, run_vars)
         run_vars[name] = val
         self.variables[name] = val
         return True, ExecResult.ADVANCE
@@ -167,12 +180,12 @@ class ControlFlowMixin:
         text = re.sub(r'\bTAB\s*\(([^)]+)\)', _spaces, text, flags=re.IGNORECASE)
         if not text.strip():
             return text                      # standalone SPC/TAB -> whitespace
-        try:
-            ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else (
-                run_vars if isinstance(run_vars, dict) else dict(run_vars))
-            return str(self._safe_eval(text, extra_ns=ns))
-        except Exception:
-            return text
+        ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else (
+            run_vars if isinstance(run_vars, dict) else dict(run_vars))
+        # Surface evaluation errors instead of silently printing the raw source
+        # text (which used to turn PRINT SQRT(9) into the literal "SQRT(9)" and
+        # an undefined variable into its own name).
+        return str(self._safe_eval(text, extra_ns=ns))
 
     def _cf_print(self, stmt: str, run_vars: dict[str, Any],
                   parsed: PrintStmt) -> tuple[bool, ExecOutcome]:
@@ -400,6 +413,7 @@ class ControlFlowMixin:
         WendStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_wend(rv, ls, sl, ip),
         LetArrayStmt:    lambda s, st, p, ls, sl, ip, rv, ef: s._cf_let_array(st, rv, p),
         LetStmt:         lambda s, st, p, ls, sl, ip, rv, ef: s._cf_let_var(st, rv, p),
+        LetStrStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_let_str(st, rv, p),
         PrintStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_print(st, rv, p),
         GotoStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_goto(st, sl, p),
         GosubStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_gosub(st, sl, ip, p),

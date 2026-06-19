@@ -209,7 +209,7 @@ CLEAR x                  Remove a variable
 Arithmetic: `+`, `-`, `*`, `/`, `//`, `%`, `**`
 Comparison: `==`, `!=`, `<>`, `<`, `>`, `<=`, `>=`
 Logical: `AND`, `OR`, `NOT`, `XOR`
-Bitwise: `AND`, `OR`, `XOR`, `NOT` (on integers)
+Bitwise: `AND`, `OR`, `XOR` on integers (`6 AND 3` = 2); `NOT` is logical
 Hex/binary literals: `&HFF`, `&B10110`
 
 ## Arrays

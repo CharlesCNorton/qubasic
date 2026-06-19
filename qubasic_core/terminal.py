@@ -1044,9 +1044,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     def cmd_let(self, rest: str) -> None:
         """LET <var> = <expr> — assign a computed value to a variable.
-        Supports record fields (LET p.x = 3.14) and array elements
-        (LET a(0) = PI, LET m(i, j) = x), matching the in-program LET."""
-        from qubasic_core.patterns import RE_LET_ARRAY
+        Supports string variables (LET s$ = "hi"), record fields (LET p.x = 3.14)
+        and array elements (LET a(0) = PI, LET m(i, j) = x), matching the
+        in-program LET."""
+        from qubasic_core.patterns import RE_LET_ARRAY, RE_LET_STR
         am = RE_LET_ARRAY.match(f"LET {rest}")
         if am:
             from qubasic_core.statements import LetArrayStmt
@@ -1056,12 +1057,21 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self._cf_let_array(f"LET {rest}", self.variables, parsed)
             self.io.writeln(f"{name}({idx_expr.strip()}) = {self.eval_expr(val_expr)}")
             return
+        sm = RE_LET_STR.match(f"LET {rest}")
+        if sm:
+            self.cmd_let_str(sm.group(1), sm.group(2))
+            return
         m = re.match(r'(\w+(?:\.\w+)?)\s*=\s*(.*)', rest)
         if not m:
             self.io.writeln("?USAGE: LET <var> = <expr>")
             return
         name = m.group(1)
-        val = self.eval_expr(m.group(2))
+        raw = self._safe_eval(m.group(2))
+        if isinstance(raw, str):
+            self.io.writeln(
+                f"?TYPE MISMATCH: '{name}' is numeric — use '{name}$' for strings")
+            return
+        val = float(raw)
         self.variables[name] = val
         if '.' in name:  # mirror into the record dict for LIST VARS
             base, field = name.split('.', 1)
@@ -2097,7 +2107,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if not m:
             return False
         name = m.group(1)
-        val = self._eval_string_expr(m.group(2))
+        val = self._eval_string_expr(m.group(2), run_vars)
         run_vars[name] = val
         self.variables[name] = val
         return True

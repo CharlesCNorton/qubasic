@@ -84,21 +84,19 @@ class StringMixin:
                 ns[k] = v
         return ns
 
-    def _eval_string_expr(self, expr: str) -> str | float:
-        """Evaluate an expression that might return a string."""
+    def _eval_string_expr(self, expr: str, run_vars: dict[str, Any] | None = None) -> str | float:
+        """Evaluate an expression that may return a string or a number.
+
+        Uses the shared AST evaluator so concatenation (``"a" + "b"``), string
+        functions (``LEFT$(s$, 3)``), and string variables resolve to their real
+        values. A multi-part expression like ``"a" + "b"`` is no longer mistaken
+        for a single quoted literal, and a string result is no longer forced
+        through float(). Errors surface instead of silently returning the source.
+        """
         expr = expr.strip()
-        # Quoted string literal
-        if (expr.startswith('"') and expr.endswith('"')) or \
-           (expr.startswith("'") and expr.endswith("'")):
-            return expr[1:-1]
-        # String variable
-        if expr in self.variables and isinstance(self.variables[expr], str):
-            return self.variables[expr]
-        # Try numeric
-        try:
-            return self.eval_expr(expr)
-        except Exception:
-            return expr
+        if run_vars is not None:
+            return self._safe_eval(expr, extra_ns=run_vars)
+        return self._safe_eval(expr)
 
     def cmd_let_str(self, name: str, expr: str) -> None:
         """Assign a string value to a string variable."""
