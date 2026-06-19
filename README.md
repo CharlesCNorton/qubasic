@@ -384,12 +384,21 @@ STATS SHOW               Show mean/stddev/min/max per state
 STATS CLEAR              Reset accumulator
 ```
 
-### State comparison
+### Characterization
 ```
 FIDELITY |BELL>          State fidelity |<target|psi>|^2 vs a named state
 FIDELITY [0.707,0,0,0.707]   ...or an explicit amplitude list
-TOMOGRAPHY               Reconstruct the density matrix from Pauli expectations
+TOMOGRAPHY               State tomography: reconstruct rho from Pauli expectations
 TOMOGRAPHY 2000          Statistical tomography (2000 shots per Pauli basis)
+PTOMOGRAPHY              Process tomography: reconstruct the Pauli Transfer Matrix (<=2 qubits)
+RB                       Single-qubit randomized benchmarking (fits decay -> error/Clifford)
+RB 64 12                 Sequence lengths up to 64, 12 random sequences each
+```
+
+### Partial measurement
+```
+MEASURE                  Measure all qubits (the default)
+MEASURE 0, 2             Measure only qubits 0 and 2; histogram is over that subset
 ```
 
 ## Algorithm primitives

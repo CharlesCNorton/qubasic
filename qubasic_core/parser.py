@@ -517,6 +517,11 @@ def parse_stmt(raw: str) -> Stmt:
         return RemStmt(raw=raw)
     if upper == 'MEASURE':
         return MeasureStmt(raw=raw)
+    # MEASURE <qubit list> — partial measurement of a subset (digits/commas only,
+    # so MEASURE_X and similar are not captured here).
+    m_sub = re.match(r'MEASURE\s+([\d,\s]+)$', text, re.IGNORECASE)
+    if m_sub:
+        return MeasureStmt(raw=raw, qubits=m_sub.group(1).strip())
     if upper == 'END':
         return EndStmt(raw=raw)
     if upper == 'END IF':

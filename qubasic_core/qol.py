@@ -96,7 +96,7 @@ _ALL_COMMANDS = [
     'DIFF', 'PLOT', 'THEME', 'CLIP', 'EXPLAIN',
     'QFT', 'IQFT', 'DIFFUSE', 'MCX', 'MCZ', 'MCP', 'QADD', 'QADDC', 'QPE',
     'MINIMIZE', 'GRADIENT', 'FIDELITY', 'TOMOGRAPHY', 'COUPLING', 'BASIS',
-    'LOADQASM', 'SET_DENSITY', 'SAVEPNG',
+    'LOADQASM', 'SET_DENSITY', 'SAVEPNG', 'PTOMOGRAPHY', 'RB', 'MEASURE',
     # Gates
     'H', 'X', 'Y', 'Z', 'S', 'T', 'SDG', 'TDG', 'SX', 'ID',
     'RX', 'RY', 'RZ', 'P', 'U', 'CX', 'CZ', 'CY', 'CH',

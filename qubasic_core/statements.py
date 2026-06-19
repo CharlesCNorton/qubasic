@@ -19,7 +19,7 @@ class RemStmt(Stmt):
 
 @dataclass(frozen=True, slots=True)
 class MeasureStmt(Stmt):
-    pass
+    qubits: str = ''   # '' = measure all; else a comma/space list of qubit indices
 
 @dataclass(frozen=True, slots=True)
 class EndStmt(Stmt):

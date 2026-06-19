@@ -487,6 +487,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'PROBE': 'cmd_probe',
         # Classic
         'RESTORE': 'cmd_restore',
+        # Characterization
+        'PTOMOGRAPHY': 'cmd_ptomography',
     }
     _CMD_WITH_ARG = {
         'LIST': 'cmd_list', 'QUBITS': 'cmd_qubits', 'SHOTS': 'cmd_shots',
@@ -519,7 +521,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'IMPORT': 'cmd_import', 'TYPE': 'cmd_type',
         'SAMPLE': 'cmd_sample', 'ESTIMATE': 'cmd_estimate', 'BENCH': 'cmd_bench',
         'MINIMIZE': 'cmd_minimize', 'GRADIENT': 'cmd_gradient',
-        'FIDELITY': 'cmd_fidelity', 'TOMOGRAPHY': 'cmd_tomography',
+        'FIDELITY': 'cmd_fidelity', 'TOMOGRAPHY': 'cmd_tomography', 'RB': 'cmd_rb',
         'COUPLING': 'cmd_coupling', 'BASIS': 'cmd_basis',
         'LOADQASM': 'cmd_loadqasm', 'SAVEPNG': 'cmd_savepng',
         'SET_STATE': 'cmd_set_state', 'SET_DENSITY': 'cmd_set_density',
@@ -1325,7 +1327,16 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if self.sim_method in ('unitary', 'superop'):
             qc.save_unitary(label='unitary') if self.sim_method == 'unitary' else qc.save_superop(label='superop')
         elif has_measure:
-            qc.measure_all()
+            subset = getattr(self, '_measure_subset', None)
+            if subset:
+                # Partial measurement: report counts over the chosen qubits only.
+                from qiskit.circuit import ClassicalRegister
+                cr = ClassicalRegister(len(subset), 'sub')
+                qc.add_register(cr)
+                for i, q in enumerate(subset):
+                    qc.measure(q, cr[i])
+            else:
+                qc.measure_all()
 
         self.last_circuit = qc
         self._last_transpiled = None

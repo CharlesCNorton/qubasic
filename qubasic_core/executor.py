@@ -111,6 +111,8 @@ class ExecutorMixin:
         qc = QuantumCircuit(self.num_qubits)
         # Fresh mid-circuit measurement registry for this build (dynamic IF).
         self._classical_bits = {}
+        # Partial-measurement subset (None = measure all at the end).
+        self._measure_subset = None
         # Apply any qubit state preparation requested via POKE to $0100.
         if getattr(self, '_poke_state_prep', None):
             self._emit_poke_state_prep(qc)
@@ -161,6 +163,10 @@ class ExecutorMixin:
 
             if isinstance(parsed, MeasureStmt):
                 has_measure = True
+                if parsed.qubits:
+                    self._measure_subset = [
+                        self._resolve_qubit(q)
+                        for q in parsed.qubits.replace(',', ' ').split()]
                 if self._on_measure_target is not None and not self._on_measure_fired:
                     self._on_measure_fired = True
                     self._gosub_stack.append(ctx.ip + 1)

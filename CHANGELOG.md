@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 (2026-06-19)
+
+### Added
+- Partial measurement: `MEASURE 0, 2` measures a subset of qubits and reports the histogram over just those qubits (the bare `MEASURE` still measures all).
+- Process tomography: `PTOMOGRAPHY` reconstructs the circuit's Pauli Transfer Matrix (the unitary, or the full noisy channel via the superoperator when a noise model is active), and reports the trace-preserving and unital flags plus the average gate fidelity to the identity. Limited to <= 2 qubits.
+- Randomized benchmarking: `RB [max_length] [samples]` runs single-qubit RB over the 24-element Clifford group (each sequence ends with its recovery Clifford), fits the survival decay `p(m) = A f^m + B`, and reports the decay `f` and the error per Clifford `(1 - f)/2`. Reflects the active noise model.
+
 ## 0.7.0 (2026-06-19)
 
 ### Added

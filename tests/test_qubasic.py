@@ -1648,6 +1648,47 @@ class TestNewCommands(unittest.TestCase):
         self.assertIsNotNone(t._last_transpiled)
 
 
+class TestCharacterization(unittest.TestCase):
+    """Partial measurement, process tomography, randomized benchmarking."""
+
+    def test_partial_measurement(self):
+        # GHZ measured on a subset gives correlated subset counts.
+        t = QBasicTerminal(); t.num_qubits = 3; t.shots = 1000; t._seed = 1
+        for ln in ['10 H 0', '20 CX 0,1', '30 CX 0,2', '40 MEASURE 0,2']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        self.assertTrue(all(len(k) == 2 for k in t.last_counts))   # two-bit keys
+        self.assertEqual(set(t.last_counts), {'00', '11'})         # correlated
+        # single-qubit subset gives one-bit keys
+        t2 = QBasicTerminal(); t2.num_qubits = 3; t2.shots = 1000; t2._seed = 1
+        for ln in ['10 H 0', '20 CX 0,1', '30 MEASURE 1']:
+            t2.process(ln, track_undo=False)
+        capture(t2.cmd_run)
+        self.assertEqual(set(t2.last_counts), {'0', '1'})
+
+    def test_process_tomography(self):
+        # X gate: PTM = diag(1, 1, -1, -1).
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.process('10 X 0', track_undo=False)
+        _, out = capture(t.cmd_ptomography)
+        self.assertIn('Trace-preserving: True', out)
+        self.assertIn('-1.000', out)            # Y and Z rows flip sign
+        # H gate maps Z -> X, so the X column has a +1 off the diagonal.
+        t2 = QBasicTerminal(); t2.num_qubits = 1
+        t2.process('10 H 0', track_undo=False)
+        _, out2 = capture(t2.cmd_ptomography)
+        self.assertIn('Trace-preserving: True', out2)
+
+    def test_randomized_benchmarking(self):
+        # Noiseless single-qubit RB: perfect recovery, f = 1, error per Clifford = 0.
+        t = QBasicTerminal(); t.num_qubits = 1; t.shots = 400; t._seed = 3
+        capture(t.cmd_rb, '4 3')
+        self.assertAlmostEqual(t.variables['_RB_F'], 1.0, places=6)
+        self.assertAlmostEqual(t.variables['_RB_EPC'], 0.0, places=6)
+        # 24 single-qubit Cliffords are generated.
+        self.assertEqual(len(t._single_qubit_cliffords()), 24)
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
