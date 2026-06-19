@@ -94,6 +94,9 @@ _ALL_COMMANDS = [
     'BENCH', 'SET_STATE', 'CIRCUIT_DEF', 'APPLY_CIRCUIT',
     'CONSISTENCY', 'COMPARE', 'HEATMAP', 'ANIMATE', 'QUIZ',
     'DIFF', 'PLOT', 'THEME', 'CLIP', 'EXPLAIN',
+    'QFT', 'IQFT', 'DIFFUSE', 'MCX', 'MCZ', 'MCP', 'QADD', 'QADDC', 'QPE',
+    'MINIMIZE', 'GRADIENT', 'FIDELITY', 'TOMOGRAPHY', 'COUPLING', 'BASIS',
+    'LOADQASM', 'SET_DENSITY', 'SAVEPNG',
     # Gates
     'H', 'X', 'Y', 'Z', 'S', 'T', 'SDG', 'TDG', 'SX', 'ID',
     'RX', 'RY', 'RZ', 'P', 'U', 'CX', 'CZ', 'CY', 'CH',

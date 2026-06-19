@@ -109,6 +109,8 @@ class ExecutorMixin:
         from qubasic_core.backend import QiskitBackend
 
         qc = QuantumCircuit(self.num_qubits)
+        # Fresh mid-circuit measurement registry for this build (dynamic IF).
+        self._classical_bits = {}
         # Apply any qubit state preparation requested via POKE to $0100.
         if getattr(self, '_poke_state_prep', None):
             self._emit_poke_state_prep(qc)
@@ -118,6 +120,12 @@ class ExecutorMixin:
             from qiskit.quantum_info import Statevector
             from qiskit_aer.library import SetStatevector
             qc.append(SetStatevector(Statevector(_pend)), list(range(self.num_qubits)))
+        # Inject a pending mixed state (density matrix) — needs density_matrix method.
+        _pend_d = getattr(self, '_pending_set_density', None)
+        if _pend_d is not None and _pend_d.shape[0] == 2 ** self.num_qubits:
+            from qiskit.quantum_info import DensityMatrix
+            from qiskit_aer.library import SetDensityMatrix
+            qc.append(SetDensityMatrix(DensityMatrix(_pend_d)), list(range(self.num_qubits)))
         backend = QiskitBackend(qc, self._apply_gate)
         ctx = ExecContext(
             sorted_lines=sorted(self.program.keys()),
@@ -251,6 +259,16 @@ class ExecutorMixin:
                                 sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
             return ExecResult.ADVANCE
 
+        # 1b. Dynamic circuit: IF on a mid-circuit measurement bit (set by MEAS)
+        #     compiles to a Qiskit if_test, so the conditional gate is applied at
+        #     simulation time based on the real measured value (feedforward).
+        if (isinstance(parsed, IfThenStmt) and qc is not None
+                and hasattr(qc, 'if_test') and getattr(self, '_classical_bits', None)):
+            tgt = self._classical_if_target(parsed.condition)
+            if tgt is not None:
+                self._exec_dynamic_if(qc, tgt, parsed, loop_stack, sorted_lines, ip, run_vars)
+                return ExecResult.ADVANCE
+
         # 2. Delegate to unified control-flow dispatch (handles GOTO, GOSUB,
         #    FOR/NEXT, WHILE/WEND, IF/THEN, LET, PRINT, DATA/READ, ON GOTO,
         #    SELECT CASE, DO/LOOP, EXIT, SUB/FUNCTION, ON ERROR, etc.)
@@ -315,6 +333,50 @@ class ExecutorMixin:
             self._apply_gate_str(gate_str, qc, backend=_backend)
 
         return ExecResult.ADVANCE
+
+    def _classical_if_target(self, condition: str):
+        """If `condition` tests a mid-circuit measurement bit, return
+        (classical_register, target_value); else None.
+
+        Handled forms: ``c``, ``NOT c``, ``c == 0|1``, ``c != 0|1``.
+        """
+        cb = getattr(self, '_classical_bits', None)
+        if not cb:
+            return None
+        s = condition.strip()
+        m = re.match(r'NOT\s+(\w+)$', s, re.IGNORECASE)
+        if m and m.group(1) in cb:
+            return cb[m.group(1)], 0
+        if re.match(r'\w+$', s) and s in cb:
+            return cb[s], 1
+        m = re.match(r'(\w+)\s*(==|!=)\s*([01])$', s)
+        if m and m.group(1) in cb:
+            val = int(m.group(3))
+            return cb[m.group(1)], (val if m.group(2) == '==' else 1 - val)
+        return None
+
+    def _exec_dynamic_if(self, qc, tgt, parsed, loop_stack, sorted_lines, ip, run_vars) -> None:
+        """Emit a Qiskit if_test (with optional else) for an IF on a measured bit.
+
+        The then/else clauses are executed inside the if_test context so their
+        gates attach to the conditional block and run at simulation time based on
+        the real measurement outcome.
+        """
+        creg, val = tgt
+
+        def _run(clause):
+            if clause:
+                self._exec_line(clause, qc=qc, loop_stack=loop_stack,
+                                sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
+
+        if parsed.else_clause:
+            with qc.if_test((creg, val)) as else_block:
+                _run(parsed.then_clause)
+            with else_block:
+                _run(parsed.else_clause)
+        else:
+            with qc.if_test((creg, val)):
+                _run(parsed.then_clause)
 
     def _parse_syndrome(self, stmt: str, run_vars: dict) -> tuple[str, list[int], str] | None:
         """Parse SYNDROME statement. Returns (pauli_str, qubits, var) or None."""

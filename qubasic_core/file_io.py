@@ -11,10 +11,11 @@ from typing import Any
 import numpy as np
 
 from qubasic_core.engine import (
-    GATE_TABLE,
+    GATE_TABLE, GATE_ALIASES,
     MAX_INCLUDE_DEPTH,
     RE_OPEN, RE_CLOSE, RE_PRINT_FILE, RE_INPUT_FILE, RE_LPRINT,
 )
+from qubasic_core.parser import parse_stmt
 
 
 class FileIOMixin:
@@ -252,6 +253,161 @@ class FileIOMixin:
                     self._imported_lines.add(ln)
                     import_count += 1
         self.io.writeln(f"IMPORTED {mod_name} ({import_count} definitions from {path})")
+
+    def cmd_loadqasm(self, rest: str) -> None:
+        """LOADQASM <file> — import an OpenQASM file as an editable program.
+
+        Parses OpenQASM 3 (falling back to 2.0) into a circuit and translates it
+        into numbered QUBASIC gate lines, so the result can be LISTed, edited, and
+        re-RUN. Gates outside the built-in set are imported as UNITARY blocks when
+        a matrix is available, otherwise reported and skipped. Reverses EXPORT."""
+        if not rest.strip():
+            self.io.writeln("?USAGE: LOADQASM <file.qasm>")
+            return
+        try:
+            path = self._sanitize_path(rest.strip())
+        except ValueError as e:
+            self.io.writeln(f"?LOADQASM ERROR: {e}")
+            return
+        if not os.path.isfile(path) and os.path.isfile(path + '.qasm'):
+            path += '.qasm'
+        if not os.path.isfile(path):
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
+            return
+        text = open(path, 'r', encoding='utf-8').read()
+        qc = None
+        errors = []
+        for loader, mod in (('loads', 'qiskit.qasm3'), ('loads', 'qiskit.qasm2')):
+            try:
+                m = __import__(mod, fromlist=[loader])
+                qc = getattr(m, loader)(text)
+                break
+            except Exception as e:
+                errors.append(f"{mod}: {e}")
+        if qc is None:
+            self.io.writeln("?LOADQASM: could not parse as OpenQASM 3 or 2")
+            for e in errors:
+                self.io.writeln(f"  {e}")
+            return
+        lines, n_unknown, custom = self._circuit_to_qb(qc)
+        self.cmd_new(silent=True)
+        self.num_qubits = qc.num_qubits
+        for name, mat in custom.items():
+            self._custom_gates[name] = mat
+        ln = 10
+        for stmt in lines:
+            self.program[ln] = stmt
+            self._parsed[ln] = parse_stmt(stmt)
+            ln += 10
+        self.io.writeln(f"LOADQASM {path}: {qc.num_qubits} qubits, {len(lines)} lines")
+        if n_unknown:
+            self.io.writeln(f"  ({n_unknown} non-standard gate(s) imported as UNITARY)")
+
+    def _circuit_to_qb(self, qc) -> tuple[list[str], int, dict]:
+        """Translate a QuantumCircuit into QUBASIC gate lines.
+
+        Returns (lines, n_unknown, custom_gates). Standard gates map to their
+        QUBASIC form; unknown gates with a matrix become UNITARY definitions.
+        """
+        lines: list[str] = []
+        custom: dict = {}
+        n_unknown = 0
+        has_measure = False
+        for inst in qc.data:
+            op = inst.operation
+            nm = op.name.lower()
+            qidx = [qc.find_bit(q).index for q in inst.qubits]
+            if nm == 'measure':
+                has_measure = True
+                continue
+            if nm == 'barrier':
+                lines.append('BARRIER')
+                continue
+            if nm == 'reset':
+                lines.append(f'RESET {qidx[0]}')
+                continue
+            canonical = GATE_ALIASES.get(nm.upper(), nm.upper())
+            if canonical in GATE_TABLE:
+                n_params = GATE_TABLE[canonical][0]
+                params = [repr(float(p)) for p in op.params[:n_params]]
+                args = params + [str(q) for q in qidx]
+                lines.append(f"{canonical} {', '.join(args)}")
+            else:
+                try:
+                    import numpy as _np
+                    mat = _np.asarray(op.to_matrix(), dtype=complex)
+                    gname = f"G{len(custom)}"
+                    custom[gname] = mat
+                    lines.append(f"{gname} {', '.join(str(q) for q in qidx)}")
+                    n_unknown += 1
+                except Exception:
+                    lines.append(f"REM (skipped unsupported gate: {nm})")
+                    n_unknown += 1
+        if has_measure:
+            lines.append('MEASURE')
+        return lines, n_unknown, custom
+
+    def cmd_savepng(self, rest: str) -> None:
+        """SAVEPNG <file> [hist|bloch|circuit] — save a plot as a PNG image.
+
+        'hist' renders the last measurement histogram, 'bloch' the multi-qubit
+        Bloch spheres of the current statevector, and 'circuit' the circuit
+        diagram. Defaults to the histogram when results exist, else the circuit.
+        Requires matplotlib (circuit diagrams also need pylatexenc)."""
+        parts = rest.split()
+        if not parts:
+            self.io.writeln("?USAGE: SAVEPNG <file> [hist|bloch|circuit]")
+            return
+        try:
+            path = self._sanitize_path(parts[0])
+        except ValueError as e:
+            self.io.writeln(f"?SAVEPNG ERROR: {e}")
+            return
+        checked = self._check_agent_path(path, "SAVEPNG")
+        if checked is None:
+            return
+        path = checked
+        if not path.lower().endswith('.png'):
+            path += '.png'
+        what = parts[1].lower() if len(parts) > 1 else ('hist' if self.last_counts else 'circuit')
+        try:
+            import matplotlib
+            matplotlib.use('Agg')  # headless, no display needed
+        except ImportError:
+            self.io.writeln("?SAVEPNG requires matplotlib (pip install matplotlib)")
+            return
+        try:
+            if what in ('hist', 'histogram'):
+                if not self.last_counts:
+                    self.io.writeln("?NO RESULTS — RUN with MEASURE first")
+                    return
+                from qiskit.visualization import plot_histogram
+                fig = plot_histogram(self.last_counts)
+            elif what == 'bloch':
+                sv = self._active_sv
+                if sv is None:
+                    self.io.writeln("?NO STATE — RUN first")
+                    return
+                from qiskit.visualization import plot_bloch_multivector
+                fig = plot_bloch_multivector(np.ascontiguousarray(sv).ravel())
+            elif what == 'circuit':
+                if self.last_circuit is None:
+                    self.io.writeln("?NO CIRCUIT — RUN first")
+                    return
+                try:
+                    fig = self.last_circuit.draw('mpl')
+                except Exception as e:
+                    self.io.writeln(f"?circuit image needs pylatexenc (pip install pylatexenc): {e}")
+                    return
+            else:
+                self.io.writeln("?SAVEPNG type must be hist, bloch, or circuit")
+                return
+            fig.savefig(path, bbox_inches='tight', dpi=120)
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+            self.io.writeln(f"SAVED {what} image to {path}")
+        except Exception as e:
+            self.io.writeln(f"?SAVEPNG ERROR: {e}")
 
     def cmd_dir(self, rest: str = '') -> None:
         """List .qb files in current or specified directory."""

@@ -118,6 +118,7 @@ class Engine:
         self._circuit_cache_key = None
         self._circuit_cache = None
         self._pending_set_state = None
+        self._pending_set_density = None
         self._poke_state_prep = {}
 
     def _invalidate_run_state(self) -> None:

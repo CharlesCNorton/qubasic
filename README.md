@@ -384,6 +384,80 @@ STATS SHOW               Show mean/stddev/min/max per state
 STATS CLEAR              Reset accumulator
 ```
 
+### State comparison
+```
+FIDELITY |BELL>          State fidelity |<target|psi>|^2 vs a named state
+FIDELITY [0.707,0,0,0.707]   ...or an explicit amplitude list
+TOMOGRAPHY               Reconstruct the density matrix from Pauli expectations
+TOMOGRAPHY 2000          Statistical tomography (2000 shots per Pauli basis)
+```
+
+## Algorithm primitives
+
+Composable building blocks applied to a qubit range (`lo-hi`, a list, or all
+qubits). Qiskit-path only.
+
+```
+QFT 0-3                  Quantum Fourier transform over qubits 0..3
+IQFT 0-3                 Inverse QFT
+DIFFUSE 0-2              Grover diffusion operator (2|s><s| - I)
+MCX 0,1,2, 3             Multi-controlled X (any number of controls, last = target)
+MCZ 0,1,2                Multi-controlled Z
+MCP theta, 0,1, 2        Multi-controlled phase
+QADD 0-2, 3-5            In-place register add: A += B (mod 2^n), qubit 0 = LSB
+QADDC 5, 0-2             In-place constant add: A += 5 (mod 2^n)
+QPE 0-3 4 UGATE          Phase estimation of a UNITARY on a target register
+```
+
+## Optimization
+
+Classical drivers over circuit parameters (VQE/QAOA). Build a parametrized
+ansatz, compute a cost with `SAVE_EXPECT`, then minimize it.
+
+```
+10 RY theta, 0
+20 SAVE_EXPECT Z 0 -> cost
+MINIMIZE theta -> cost              Nelder-Mead minimization (dependency-free)
+MINIMIZE a, b -> z0 + 0.5*z1 ITERS 200   Multi-parameter; cost is any post-run expression
+GRADIENT theta -> cost             Parameter-shift gradient d(cost)/d(theta)
+```
+
+## Dynamic circuits (feedforward)
+
+In standard mode, `MEAS` is a real mid-circuit measurement and `IF` on the
+measured bit compiles to a Qiskit `if_test`, so the conditional gate runs at
+simulation time based on the actual outcome (no LOCC mode needed).
+
+```
+10 H 0
+20 MEAS 0 -> c           Mid-circuit measurement into classical bit c
+30 IF c THEN X 0         Feedforward correction (also: IF c == 0, NOT c, with ELSE)
+40 MEASURE
+```
+
+## Mixed states
+
+```
+SET_DENSITY [[0.5,0],[0,0.5]]    Inject a density matrix (uses density_matrix method)
+```
+
+## Device model
+
+Constrain transpilation to a hardware topology and native gate set, fully
+offline. After RUN, the routed depth and SWAP count are reported.
+
+```
+COUPLING linear          1D chain connectivity (also: ring, full, OFF, or 0-1, 1-2, ...)
+BASIS rz, sx, x, cx      Restrict to a native gate set (BASIS OFF to clear)
+```
+
+## Import and images
+
+```
+LOADQASM file.qasm       Import OpenQASM as an editable program (2.0 built-in; 3.0 needs qiskit_qasm3_import)
+SAVEPNG out.png hist     Save the histogram as a PNG (also: bloch, circuit; needs matplotlib)
+```
+
 ## Noise models
 
 ```

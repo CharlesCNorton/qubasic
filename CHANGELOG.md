@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 (2026-06-19)
+
+### Added
+- Dynamic circuits in the standard Aer path: `MEAS q -> c` is a real mid-circuit measurement and `IF c THEN <gate>` (also `IF c == 0`, `NOT c`, and `ELSE`) compiles to a Qiskit `if_test`, so feedforward corrections run on the actual outcome without LOCC mode. The mid-circuit measurement registers are kept out of the reported histogram.
+- Algorithm primitives applied to a qubit range: `QFT`/`IQFT`, `DIFFUSE` (Grover diffusion), `MCX`/`MCZ`/`MCP` (arbitrary control count), `QADD`/`QADDC` (in-place register and constant addition mod 2^n), and `QPE` (phase estimation of a UNITARY). The QFT is least-significant-first (qubit 0 = low bit) so register reads are consistent.
+- Optimization drivers: `MINIMIZE v1, v2 -> <cost expr>` runs a dependency-free Nelder-Mead optimizer over circuit parameters (VQE/QAOA), and `GRADIENT` computes the parameter-shift gradient. The cost is any expression evaluated after each run from variables the program sets (for example via `SAVE_EXPECT`).
+- Device model for transpilation: `COUPLING linear|ring|full|<edges>` constrains two-qubit connectivity and `BASIS <gates>` restricts to a native gate set, both offline; RUN reports the routed depth and SWAP count.
+- `FIDELITY <target>` (state fidelity against a named state or amplitude list) and `TOMOGRAPHY [shots]` (density-matrix reconstruction from Pauli expectations, exact or shot-sampled).
+- `LOADQASM <file>` imports OpenQASM as an editable program (2.0 built-in; 3.0 requires the optional `qiskit_qasm3_import` package).
+- `SET_DENSITY [[...]]` injects a mixed state (density matrix) for the next run, using the density_matrix method.
+- `SAVEPNG <file> hist|bloch|circuit` saves a plot as a PNG (requires matplotlib; circuit diagrams also need pylatexenc).
+
 ## 0.6.5 (2026-06-19)
 
 ### Fixed

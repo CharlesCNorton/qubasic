@@ -64,6 +64,7 @@ from qubasic_core.profiler import ProfilerMixin
 from qubasic_core.noise_mixin import NoiseMixin
 from qubasic_core.state_display import StateDisplayMixin
 from qubasic_core.qol import QoLMixin, did_you_mean, tip_of_the_day, quantum_spin
+from qubasic_core.algorithms import AlgorithmsMixin
 from qubasic_core.errors import QBasicError, QBasicBuildError, QBasicRangeError
 from qubasic_core.io_protocol import StdIOPort
 from qubasic_core.parser import parse_stmt
@@ -141,7 +142,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                      LOCCMixin, ControlFlowMixin, FileIOMixin, AnalysisMixin,
                      SweepMixin, MemoryMixin, StringMixin, ScreenMixin, ClassicMixin,
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin,
-                     NoiseMixin, StateDisplayMixin, QoLMixin):
+                     NoiseMixin, StateDisplayMixin, QoLMixin, AlgorithmsMixin):
     # Architecture: QBasicTerminal composes Engine (state) + 20 mixins (behavior).
     #
     # Mixin map (each provides specific methods; see TerminalProtocol for contract):
@@ -235,6 +236,15 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self._init_profiler()
         self._init_file_handles()
         self._init_qol()
+        # Device model for transpilation (None = unconstrained, all-to-all).
+        self._coupling_map: list[list[int]] | None = None
+        self._basis_gates: list[str] | None = None
+        # Mid-circuit measurement bits for dynamic (feedforward) circuits:
+        # variable name -> Qiskit classical register, populated by MEAS in the
+        # standard Aer path and consumed by IF <bit> THEN ... via if_test.
+        self._classical_bits: dict = {}
+        # Pending mixed-state injection (density matrix) for the next RUN.
+        self._pending_set_density = None
 
     # ── Backend factory ─────────────────────────────────────────────
 
@@ -508,7 +518,11 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         # Module, types, primitives
         'IMPORT': 'cmd_import', 'TYPE': 'cmd_type',
         'SAMPLE': 'cmd_sample', 'ESTIMATE': 'cmd_estimate', 'BENCH': 'cmd_bench',
-        'SET_STATE': 'cmd_set_state',
+        'MINIMIZE': 'cmd_minimize', 'GRADIENT': 'cmd_gradient',
+        'FIDELITY': 'cmd_fidelity', 'TOMOGRAPHY': 'cmd_tomography',
+        'COUPLING': 'cmd_coupling', 'BASIS': 'cmd_basis',
+        'LOADQASM': 'cmd_loadqasm', 'SAVEPNG': 'cmd_savepng',
+        'SET_STATE': 'cmd_set_state', 'SET_DENSITY': 'cmd_set_density',
         # Circuit macros
         'CIRCUIT_DEF': 'cmd_circuit_def', 'APPLY_CIRCUIT': 'cmd_apply_circuit',
         'HELP': 'cmd_help', 'CONSISTENCY': 'cmd_consistency',
@@ -654,6 +668,77 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         else:
             self.sim_method = rest.strip().lower()
             self.io.writeln(f"METHOD = {self.sim_method}")
+
+    def _transpile_kwargs(self) -> dict:
+        """coupling_map / basis_gates kwargs for transpile() (device model)."""
+        kw: dict = {}
+        if self._coupling_map:
+            kw['coupling_map'] = self._coupling_map
+        if self._basis_gates:
+            kw['basis_gates'] = self._basis_gates
+        return kw
+
+    def cmd_coupling(self, rest: str) -> None:
+        """COUPLING linear|ring|full|OFF|<edges> — constrain 2-qubit connectivity.
+
+        Sets the device coupling map used when transpiling for RUN, so circuits
+        are routed (SWAPs inserted) onto a topology. 'linear' is a 1D chain,
+        'ring' closes it, 'full'/'OFF' removes the constraint, and an explicit
+        list like '0-1, 1-2, 0-2' gives custom edges. All offline."""
+        arg = rest.strip()
+        self._circuit_cache_key = None
+        if not arg:
+            cm = self._coupling_map
+            self.io.writeln(f"COUPLING = {'all-to-all' if not cm else cm}")
+            return
+        low = arg.lower()
+        n = self.num_qubits
+        if low in ('off', 'full', 'all', 'none'):
+            self._coupling_map = None
+            self.io.writeln("COUPLING = all-to-all (unconstrained)")
+            return
+        if low == 'linear':
+            cm = [[i, i + 1] for i in range(n - 1)]
+        elif low == 'ring':
+            cm = [[i, (i + 1) % n] for i in range(n)] if n > 2 else [[0, 1]]
+        else:
+            cm = []
+            for tok in arg.replace(',', ' ').split():
+                m = re.match(r'(\d+)-(\d+)$', tok)
+                if not m:
+                    self.io.writeln(f"?bad edge '{tok}' (use a-b)")
+                    return
+                cm.append([int(m.group(1)), int(m.group(2))])
+            if not cm:
+                self.io.writeln("?USAGE: COUPLING linear|ring|full|OFF|<a-b, ...>")
+                return
+        # Bidirectional edges so routing can use either direction.
+        edges = []
+        for a, b in cm:
+            edges.append([a, b])
+            if [b, a] not in cm:
+                edges.append([b, a])
+        self._coupling_map = edges
+        self.io.writeln(f"COUPLING = {low if low in ('linear', 'ring') else 'custom'} "
+                        f"({len(cm)} edge(s))")
+
+    def cmd_basis(self, rest: str) -> None:
+        """BASIS <gate list>|OFF — restrict transpilation to a native gate set.
+
+        E.g. BASIS rz, sx, x, cx targets a typical superconducting basis; the
+        transpiler then decomposes the program into those gates for RUN. BASIS
+        OFF removes the restriction."""
+        arg = rest.strip()
+        self._circuit_cache_key = None
+        if not arg:
+            self.io.writeln(f"BASIS = {self._basis_gates or 'default (all)'}")
+            return
+        if arg.lower() in ('off', 'none', 'default'):
+            self._basis_gates = None
+            self.io.writeln("BASIS = default (all gates)")
+            return
+        self._basis_gates = [g.strip().lower() for g in arg.replace(',', ' ').split() if g.strip()]
+        self.io.writeln(f"BASIS = {self._basis_gates}")
 
     def cmd_list(self, rest: str = '') -> None:
         """LIST — display program lines. LIST SUBS|VARS|ARRAYS for filtered views."""
@@ -1027,6 +1112,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         Skipped above ``_SV_EXTRACT_MAX_QUBITS`` to avoid materializing a
         2^n statevector that cannot be displayed anyway.
         """
+        if getattr(self, '_pending_set_density', None) is not None:
+            self.last_sv = None   # mixed state: no pure statevector to extract
+            return
         if self.num_qubits > self._SV_EXTRACT_MAX_QUBITS:
             self.last_sv = None
             return
@@ -1112,10 +1200,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             (k, v) for k, v in self.variables.items()
             if isinstance(v, (int, float, bool)) and not k.startswith('_')
         ))
+        _dev_key = (
+            tuple(map(tuple, self._coupling_map)) if self._coupling_map else None,
+            tuple(self._basis_gates) if self._basis_gates else None,
+        )
         cache_key = (
             tuple(sorted(self.program.items())),
             self.num_qubits, method, self.sim_device,
-            _noise_key, _var_key,
+            _noise_key, _var_key, _dev_key,
             getattr(self, '_fusion_enable', None),
             getattr(self, '_mps_truncation', None),
             getattr(self, '_sv_parallel_threshold', None),
@@ -1125,7 +1217,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             qc_t, backend = self._circuit_cache
         else:
             backend = AerSimulator(**backend_opts)
-            qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
+            qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level,
+                             **self._transpile_kwargs())
             self._circuit_cache_key = cache_key
             self._circuit_cache = (qc_t, backend)
             self._last_transpiled = qc_t
@@ -1143,7 +1236,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 self._circuit_cache = None
                 backend_opts.pop('device', None)
                 backend = AerSimulator(**backend_opts)
-                qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
+                qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level,
+                                 **self._transpile_kwargs())
                 return backend.run(qc_t, **self._run_kwargs()).result()
             elif 'stabilizer' in _err_msg or 'invalid parameters' in _err_msg:
                 self._circuit_cache_key = None
@@ -1152,7 +1246,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 sv_opts['method'] = 'statevector'
                 self.io.writeln("  (stabilizer failed — falling back to statevector)")
                 backend = AerSimulator(**sv_opts)
-                qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level)
+                qc_t = transpile(qc, backend, optimization_level=self._transpile_opt_level,
+                                 **self._transpile_kwargs())
                 return backend.run(qc_t, **self._run_kwargs()).result()
             raise
 
@@ -1291,6 +1386,17 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 sv_qc = transpile(qc, sv_backend, optimization_level=self._transpile_opt_level)
                 result = sv_backend.run(sv_qc, **self._run_kwargs()).result()
                 self.last_counts = dict(result.get_counts())
+            # Dynamic-circuit runs carry extra mid-circuit MEAS registers, so
+            # get_counts returns space-separated per-register keys. The final
+            # MEASURE register is added last (leftmost token); keep only it so
+            # the reported histogram is the actual end-of-circuit outcome.
+            if self._classical_bits and self.last_counts and \
+                    any(' ' in k for k in self.last_counts):
+                collapsed: dict[str, int] = {}
+                for key, cnt in self.last_counts.items():
+                    outcome = key.split()[0]
+                    collapsed[outcome] = collapsed.get(outcome, 0) + cnt
+                self.last_counts = collapsed
 
         self._extract_save_results(result)
 
@@ -1317,6 +1423,12 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits, "
                         f"{self.shots} shots in {m['time_s']:.2f}s  "
                         f"[depth={m['depth']}, gates={m['gates']}{_throughput}, {_meta}{_cx_str}]")
+        if (self._coupling_map or self._basis_gates) and getattr(self, '_last_transpiled', None) is not None:
+            qt = self._last_transpiled
+            swaps = qt.count_ops().get('swap', 0)
+            _basis = f", basis={'+'.join(self._basis_gates)}" if self._basis_gates else ""
+            _topo = f", swaps={swaps}" if self._coupling_map else ""
+            self.io.writeln(f"  routed onto device: depth={qt.depth()}, gates={qt.size()}{_topo}{_basis}")
         if method in ('unitary', 'superop'):
             pass  # matrix already displayed above
         elif has_measure and self.last_counts:
@@ -1589,26 +1701,29 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     MEAS_CIRCUIT_MODE_VALUE = 0
 
     def _try_exec_meas(self, stmt: str, qc, run_vars: dict, *, backend=None) -> bool:
-        """Handle MEAS qubit -> var (mid-circuit measurement)."""
+        """Handle MEAS qubit -> var (mid-circuit measurement).
+
+        In standard Aer mode this is a real dynamic-circuit measurement: the
+        qubit is measured into a classical register recorded under `var`, which a
+        later ``IF var THEN <gate>`` turns into a Qiskit if_test (feedforward) at
+        build time. In LOCC mode it routes through the numpy engine as before.
+        """
         m = RE_MEAS.match(stmt)
         if not m:
             return False
         qubit = int(self._eval_with_vars(m.group(1), run_vars))
         var = m.group(2)
         if 0 <= qubit < self.num_qubits:
-            if not self.locc_mode:
-                raise QBasicBuildError(
-                    "MEAS requires LOCC mode for classical feedforward. "
-                    "Use LOCC SEND instead, or use MEASURE for end-of-circuit measurement.")
             b = backend or qc
             if hasattr(b, 'add_classical_register'):
-                cr = b.add_classical_register(f'meas_{var}')
+                cr = b.add_classical_register(f'mc_{var}')
                 b.measure(qubit, cr[0])
             else:
                 from qiskit.circuit import ClassicalRegister
-                cr = ClassicalRegister(1, f'meas_{var}')
+                cr = ClassicalRegister(1, f'mc_{var}')
                 qc.add_register(cr)
                 qc.measure(qubit, cr[0])
+            self._classical_bits[var] = cr
             run_vars[var] = self.MEAS_CIRCUIT_MODE_VALUE
             self.variables[var] = self.MEAS_CIRCUIT_MODE_VALUE
         return True
@@ -1859,6 +1974,12 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             or self._try_exec_reset(stmt, qc, run_vars, backend=backend)
             or self._try_exec_measure_basis(stmt, qc, run_vars, backend=backend)
             or self._try_exec_syndrome(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_qft(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_diffuse(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_mcgate(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_qaddc(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_qadd(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_qpe(stmt, qc, run_vars, backend=backend)
             or self._try_exec_unitary(stmt)
             or self._try_exec_dim(stmt)
             or self._try_exec_dim_type(stmt)
@@ -2105,6 +2226,44 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln(f"STATE SET ({self.num_qubits} qubits) — applied on next RUN")
         except Exception as e:
             self.io.writeln(f"?SET_STATE ERROR: {e}")
+
+    def cmd_set_density(self, rest: str) -> None:
+        """SET_DENSITY [[...]] — inject a mixed state (density matrix) for the next RUN.
+
+        Accepts a 2^n x 2^n Hermitian, unit-trace, positive-semidefinite matrix
+        (e.g. [[0.5,0],[0,0.5]] for the maximally mixed qubit). Switches the
+        method to density_matrix; STATE is unavailable for a mixed state, but
+        DENSITY and the measurement histogram reflect it."""
+        expr = rest.strip()
+        if not expr:
+            self.io.writeln("?USAGE: SET_DENSITY [[a,b],[c,d]]  (2^n x 2^n, Hermitian, trace 1)")
+            return
+        try:
+            rho = np.array(self._parse_matrix(expr), dtype=complex)
+            dim = 2 ** self.num_qubits
+            if rho.shape != (dim, dim):
+                raise ValueError(f"matrix is {rho.shape}, need ({dim}, {dim}) for {self.num_qubits} qubit(s)")
+            if not np.allclose(rho, rho.conj().T, atol=1e-6):
+                raise ValueError("matrix is not Hermitian")
+            tr = complex(np.trace(rho))
+            if abs(tr - 1.0) > 1e-6:
+                if abs(tr) < 1e-12:
+                    raise ValueError("matrix has zero trace")
+                rho = rho / tr
+                self.io.writeln(f"  (normalized: trace {tr.real:.4f} -> 1.0)")
+            evals = np.linalg.eigvalsh(rho)
+            if evals.min() < -1e-6:
+                raise ValueError(f"matrix is not positive semidefinite (min eigenvalue {evals.min():.4f})")
+            self._pending_set_density = rho
+            self._pending_set_state = None
+            self.last_sv = None
+            self.sim_method = 'density_matrix'
+            self._circuit_cache_key = None
+            purity = float(np.real(np.trace(rho @ rho)))
+            self.io.writeln(f"DENSITY MATRIX SET ({self.num_qubits} qubits, purity {purity:.4f}) "
+                            f"— applied on next RUN (method=density_matrix)")
+        except Exception as e:
+            self.io.writeln(f"?SET_DENSITY ERROR: {e}")
 
     # _split_colon_stmts, _substitute_vars, _expand_statement,
     # _offset_qubits, _apply_gate_str, _tokenize_gate, _resolve_qubit,

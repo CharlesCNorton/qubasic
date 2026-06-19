@@ -1051,13 +1051,18 @@ class TestMeasurement(unittest.TestCase):
                 self.assertIn(var_prefix, t.variables)
 
     def test_meas(self):
-        # MEAS without LOCC mode should raise a build error
+        # MEAS is a real mid-circuit measurement in standard mode (dynamic circuit).
         t = QBasicTerminal(); t.num_qubits = 2
         t.program = {10: 'X 0', 20: 'MEAS 0 -> result', 30: 'MEASURE'}
-        _, out = capture(t.cmd_run)
-        self.assertIn('LOCC', out)
-        self.assertIn('BUILD ERROR', out)
-        # MEAS works in LOCC mode
+        capture(t.cmd_run)
+        self.assertIsNotNone(t.last_counts)
+        self.assertEqual(max(t.last_counts, key=t.last_counts.get), '01')
+        # Feedforward: measure-and-correct always lands in |0>.
+        t3 = QBasicTerminal(); t3.num_qubits = 1; t3.shots = 200
+        t3.program = {10: 'H 0', 20: 'MEAS 0 -> c', 30: 'IF c THEN X 0', 40: 'MEASURE'}
+        capture(t3.cmd_run)
+        self.assertEqual(set(t3.last_counts), {'0'})
+        # MEAS still works in LOCC mode
         t2 = QBasicTerminal()
         capture(t2.cmd_locc, '2 2')
         t2.program = {10: '@A H 0', 20: 'SEND A 0 -> result', 30: 'MEASURE'}
@@ -1271,8 +1276,8 @@ class TestMisc(unittest.TestCase):
         self.assertTrue(hasattr(qubasic_core, 'QBasicTerminal'))
         t = QBasicTerminal(); t.num_qubits = 2
         t.program = {10: 'X 0', 20: 'MEAS 0 -> r', 30: 'MEASURE'}
-        _, out = capture(t.cmd_run)
-        self.assertIn('LOCC', out); self.assertIn('BUILD ERROR', out)
+        capture(t.cmd_run)
+        self.assertIsNotNone(t.last_counts)  # MEAS is a dynamic measurement, not an error
         from qubasic_core.protocol import TerminalProtocol
         self.assertIsInstance(t, TerminalProtocol)
         from qubasic_core.engine import ExecOutcome, ExecResult
@@ -1516,6 +1521,131 @@ class TestBugFixes063(unittest.TestCase):
         t2.process('20 PRINT LEFT$(name$, 3)', track_undo=False)
         _, out2 = capture(t2.cmd_run)
         self.assertIn('hel', out2)
+
+
+class TestAlgorithmPrimitives(unittest.TestCase):
+    """QFT, Grover diffusion, multi-controlled gates, adders, phase estimation."""
+
+    @staticmethod
+    def _regval(bs, lo, hi, nq):
+        return sum(int(bs[nq - 1 - q]) << (q - lo) for q in range(lo, hi + 1))
+
+    def test_qft_roundtrip(self):
+        t = QBasicTerminal(); t.num_qubits = 3
+        for ln in ['10 X 0', '20 H 1', '30 QFT 0-2', '40 IQFT 0-2']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        sv = np.ascontiguousarray(t.last_sv).ravel()
+        ref = QBasicTerminal(); ref.num_qubits = 3
+        for ln in ['10 X 0', '20 H 1']:
+            ref.process(ln, track_undo=False)
+        capture(ref.cmd_run)
+        self.assertTrue(np.allclose(sv, np.ascontiguousarray(ref.last_sv).ravel(), atol=1e-9))
+
+    def test_grover_diffuse(self):
+        t = QBasicTerminal(); t.num_qubits = 3; t.shots = 2000; t._seed = 1
+        for line in ['10 H 0', '20 H 1', '30 H 2']:    # uniform superposition
+            t.process(line, track_undo=False)
+        body = ['X 1', 'MCZ 0,1,2', 'X 1', 'DIFFUSE 0-2']
+        ln = 40
+        for _ in range(2):
+            for g in body:
+                t.process(f'{ln} {g}', track_undo=False); ln += 10
+        t.process(f'{ln} MEASURE', track_undo=False)
+        capture(t.cmd_run)
+        top = max(t.last_counts, key=t.last_counts.get)
+        self.assertEqual(top, '101')
+        self.assertGreater(t.last_counts['101'] / sum(t.last_counts.values()), 0.9)
+
+    def test_mcx_truth_table(self):
+        def out(bits):
+            t = QBasicTerminal(); t.num_qubits = 4; t._seed = 1
+            for i, b in enumerate(bits):
+                if b:
+                    t.process(f'{10 + i} X {i}', track_undo=False)
+            t.process('50 MCX 0,1,2,3', track_undo=False)
+            t.process('60 MEASURE', track_undo=False)
+            capture(t.cmd_run)
+            return max(t.last_counts, key=t.last_counts.get)
+        self.assertEqual(out([1, 1, 1, 0]), '1111')   # all controls 1 -> target flips
+        self.assertEqual(out([1, 1, 0, 0]), '0011')   # not all 1 -> target stays
+
+    def test_qadd_and_qaddc(self):
+        def qaddc(s, k, n=3):
+            t = QBasicTerminal(); t.num_qubits = n; t.shots = 200; t._seed = 1
+            for b in range(n):
+                if (s >> b) & 1:
+                    t.process(f'{10 + b} X {b}', track_undo=False)
+            t.process(f'100 QADDC {k}, 0-{n - 1}', track_undo=False)
+            t.process('110 MEASURE', track_undo=False)
+            capture(t.cmd_run)
+            return self._regval(max(t.last_counts, key=t.last_counts.get), 0, n - 1, n)
+        for s, k in [(0, 3), (2, 3), (5, 4), (7, 1)]:
+            self.assertEqual(qaddc(s, k), (s + k) % 8)
+
+        def qadd(a, b):
+            t = QBasicTerminal(); t.num_qubits = 6; t.shots = 200; t._seed = 1
+            for bit in range(3):
+                if (a >> bit) & 1:
+                    t.process(f'{10 + bit} X {bit}', track_undo=False)
+                if (b >> bit) & 1:
+                    t.process(f'{50 + bit} X {3 + bit}', track_undo=False)
+            t.process('100 QADD 0-2, 3-5', track_undo=False)
+            t.process('110 MEASURE', track_undo=False)
+            capture(t.cmd_run)
+            return self._regval(max(t.last_counts, key=t.last_counts.get), 0, 2, 6)
+        for a, b in [(2, 3), (1, 1), (7, 7)]:
+            self.assertEqual(qadd(a, b), (a + b) % 8)
+
+    def test_qpe(self):
+        t = QBasicTerminal(); t.num_qubits = 5; t.shots = 200; t._seed = 1
+        t.process('UNITARY UPH = [[1,0],[0,1j]]', track_undo=False)  # phase 0.25 on |1>
+        for ln in ['10 X 4', '20 QPE 0-3 4 UPH', '30 MEASURE']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        val = self._regval(max(t.last_counts, key=t.last_counts.get), 0, 3, 5)
+        self.assertAlmostEqual(val / 16, 0.25, places=6)
+
+
+class TestNewCommands(unittest.TestCase):
+    """FIDELITY, MINIMIZE, dynamic feedforward IF, device coupling."""
+
+    def test_fidelity(self):
+        t = QBasicTerminal(); t.num_qubits = 2
+        for ln in ['10 H 0', '20 CX 0,1']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        _, out = capture(t.cmd_fidelity, '|BELL>')
+        self.assertIn('1.000000', out)
+        _, out2 = capture(t.cmd_fidelity, '[1,0,0,0]')
+        self.assertIn('0.500000', out2)
+
+    def test_minimize_vqe(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.process('10 RY theta, 0', track_undo=False)
+        t.process('20 SAVE_EXPECT Z 0 -> cost', track_undo=False)
+        t.variables['theta'] = 0.4
+        capture(t.cmd_minimize, 'theta -> cost ITERS 120')
+        self.assertAlmostEqual(t.variables['_COST'], -1.0, places=3)
+        self.assertAlmostEqual(abs(math.cos(t.variables['theta'])), 1.0, places=3)
+
+    def test_dynamic_feedforward(self):
+        # Measure-and-correct: always lands in |0> via if_test feedforward.
+        t = QBasicTerminal(); t.num_qubits = 1; t.shots = 200; t._seed = 2
+        for ln in ['10 H 0', '20 MEAS 0 -> c', '30 IF c THEN X 0', '40 MEASURE']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        self.assertEqual(set(t.last_counts), {'0'})
+
+    def test_coupling_routes(self):
+        t = QBasicTerminal(); t.num_qubits = 4; t.shots = 500; t._seed = 1
+        for ln in ['10 H 0', '20 CX 0,1', '30 CX 0,2', '40 CX 0,3', '50 MEASURE']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_coupling, 'linear')
+        capture(t.cmd_run)
+        # GHZ correlations survive routing; only all-0 / all-1 appear.
+        self.assertEqual(set(t.last_counts), {'0000', '1111'})
+        self.assertIsNotNone(t._last_transpiled)
 
 
 if __name__ == '__main__':

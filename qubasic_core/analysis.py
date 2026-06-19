@@ -250,6 +250,100 @@ class AnalysisMixin:
             self.io.writeln(f"    {name:25s} {status}{extra}")
         self.io.writeln(f"\n  {'ALL CONSISTENT' if all_pass else 'INCONSISTENCY DETECTED'}")
 
+    def cmd_fidelity(self, rest: str) -> None:
+        """FIDELITY <target> — state fidelity |<target|psi>|^2 of the current state.
+
+        <target> is a named state (|0>, |1>, |+>, |->, |BELL>, |GHZ>, |GHZ3>,
+        |GHZ4>, |W>, |W3>) or an explicit amplitude list like [0.707, 0, 0, 0.707].
+        """
+        sv = self._active_sv
+        if sv is None:
+            self.io.writeln("?NO STATE — RUN first")
+            return
+        n = self._active_nqubits
+        target = rest.strip()
+        if not target:
+            self.io.writeln("?USAGE: FIDELITY <named state | [amplitudes]>")
+            return
+        dim = 2 ** n
+        try:
+            named = {'|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>',
+                     '|GHZ3>', '|GHZ4>', '|W>', '|W3>'}
+            if target.upper() in named:
+                from qubasic_core.terminal import _resolve_named_state
+                tvec = _resolve_named_state(target.upper(), n)
+            else:
+                tvec = np.array(self._parse_matrix(target), dtype=complex).ravel()
+            if len(tvec) != dim:
+                raise ValueError(f"target length {len(tvec)} != 2^{n} = {dim}")
+            tnorm = np.linalg.norm(tvec)
+            if tnorm > 1e-12:
+                tvec = tvec / tnorm
+            psi = np.ascontiguousarray(sv).ravel()
+            pnorm = np.linalg.norm(psi)
+            if pnorm > 1e-12:
+                psi = psi / pnorm
+            fid = float(np.abs(np.vdot(tvec, psi)) ** 2)
+            self.io.writeln(f"  Fidelity F = |<target|psi>|^2 = {fid:.6f}")
+            if fid > 0.999:
+                self.io.writeln(f"  -> states match")
+            elif fid < 0.001:
+                self.io.writeln(f"  -> orthogonal")
+        except Exception as e:
+            self.io.writeln(f"?FIDELITY ERROR: {e}")
+
+    def cmd_tomography(self, rest: str = '') -> None:
+        """TOMOGRAPHY [shots] — reconstruct the density matrix from Pauli expectations.
+
+        Builds rho = (1/2^n) sum_P <P> P over all n-qubit Pauli strings P. With no
+        argument the expectations are exact; with a shot count each <P> is estimated
+        from that many simulated measurements (statistical tomography). Limited to
+        <= 3 qubits (3^n Pauli settings)."""
+        sv = self._active_sv
+        if sv is None:
+            self.io.writeln("?NO STATE — RUN first")
+            return
+        n = self._active_nqubits
+        if n > 3:
+            self.io.writeln(f"?TOMOGRAPHY limited to 3 qubits (have {n}); use ENTROPY/EXPECT instead")
+            return
+        import itertools
+        shots = int(rest.strip()) if rest.strip() else 0
+        psi = np.ascontiguousarray(sv).ravel()
+        psi = psi / (np.linalg.norm(psi) or 1.0)
+        paulis = {
+            'I': np.eye(2, dtype=complex),
+            'X': np.array([[0, 1], [1, 0]], dtype=complex),
+            'Y': np.array([[0, -1j], [1j, 0]], dtype=complex),
+            'Z': np.array([[1, 0], [0, -1]], dtype=complex),
+        }
+        dim = 2 ** n
+        rho = np.zeros((dim, dim), dtype=complex)
+        for combo in itertools.product('IXYZ', repeat=n):
+            op = np.array([[1]], dtype=complex)
+            for p in combo:
+                op = np.kron(op, paulis[p])
+            exp = float(np.real(np.vdot(psi, op @ psi)))
+            if shots and any(p != 'I' for p in combo):
+                # Simulate finite-shot estimation: outcome +-1 with p=(1+exp)/2.
+                p_plus = min(1.0, max(0.0, (1 + exp) / 2))
+                hits = np.random.binomial(shots, p_plus)
+                exp = (2 * hits - shots) / shots
+            rho += exp * op
+        rho /= dim
+        self.io.writeln(f"\n  Reconstructed density matrix ({dim}x{dim}, "
+                        f"{'exact' if not shots else f'{shots} shots/basis'}):")
+        for i in range(dim):
+            row = '  '.join(
+                (f"{rho[i, j].real:+.3f}" if abs(rho[i, j].imag) < 1e-6
+                 else f"{rho[i, j].real:+.2f}{rho[i, j].imag:+.2f}j")
+                for j in range(dim))
+            self.io.writeln(f"    {row}")
+        purity = float(np.real(np.trace(rho @ rho)))
+        fid = float(np.real(np.vdot(psi, rho @ psi)))
+        self.io.writeln(f"  Purity Tr(rho^2) = {purity:.6f}")
+        self.io.writeln(f"  Fidelity to the simulated pure state = {fid:.6f}")
+
     def cmd_ram(self) -> None:
         """RAM — show memory budget, per-instance cost, and parallelism estimates."""
         ram = _get_ram_gb()
