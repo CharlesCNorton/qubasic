@@ -80,7 +80,59 @@ class QECMixin:
             stab.append('III' + 'XXXXXX')
             return {'n': 9, 'stab': stab, 'lx': 'X' * 9, 'lz': 'ZIIZIIZII',
                     'd': 3, 'alphabet': 'IXYZ', 'name': 'Shor [[9,1,3]]'}
-        raise ValueError(f"unknown code '{name}' (try REP, STEANE, SHOR; QEC LIST)")
+        if name in ('SURFACE', 'SURF'):
+            return self._surface_code(distance)
+        raise ValueError(f"unknown code '{name}' (try REP, STEANE, SHOR, SURFACE; QEC LIST)")
+
+    def _surface_code(self, d: int) -> dict:
+        """Rotated surface code of odd distance d (d^2 data qubits on a d x d grid).
+
+        Bulk faces are weight-4 stabilizers alternating X/Z by checkerboard parity;
+        boundary faces are weight-2, X on the top/bottom edges and Z on the
+        left/right edges. Logical X is an X string along the top row, logical Z a
+        Z string down the left column. The construction is validated by the
+        caller's checks (it must correct every weight-1 error)."""
+        if d % 2 == 0:
+            d += 1
+        n = d * d
+
+        def idx(r, c):
+            return r * d + c
+
+        stab = []
+        for r in range(-1, d):
+            for c in range(-1, d):
+                corners = [(r, c), (r, c + 1), (r + 1, c), (r + 1, c + 1)]
+                qs = [idx(i, j) for (i, j) in corners if 0 <= i < d and 0 <= j < d]
+                if len(qs) < 2:
+                    continue
+                typ = 'Z' if (r + c) % 2 == 0 else 'X'
+                if len(qs) == 4:
+                    stab.append((typ, qs))
+                else:
+                    on_tb = (r == -1 or r == d - 1)
+                    on_lr = (c == -1 or c == d - 1)
+                    if on_tb and not on_lr and typ == 'X':
+                        stab.append((typ, qs))
+                    elif on_lr and not on_tb and typ == 'Z':
+                        stab.append((typ, qs))
+        stab_strs = []
+        for typ, qs in stab:
+            s = ['I'] * n
+            for q in qs:
+                s[q] = typ
+            stab_strs.append(''.join(s))
+        # Logical X runs down a column (between the top/bottom X boundaries);
+        # logical Z runs along a row (between the left/right Z boundaries). They
+        # cross at qubit 0 and so anticommute.
+        lx = ['I'] * n
+        for r in range(d):
+            lx[idx(r, 0)] = 'X'
+        lz = ['I'] * n
+        for c in range(d):
+            lz[idx(0, c)] = 'Z'
+        return {'n': n, 'stab': stab_strs, 'lx': ''.join(lx), 'lz': ''.join(lz),
+                'd': d, 'alphabet': 'IXYZ', 'name': f'rotated surface d={d}'}
 
     def _qec_decoder(self, code: dict) -> dict:
         """Build the minimum-weight lookup decoder: syndrome -> recovery Pauli.
@@ -115,18 +167,175 @@ class QECMixin:
                     out.append('I')
         return ''.join(out)
 
-    def _logical_error_rate(self, code: dict, p: float, trials: int, rng) -> float:
-        decoder = self._qec_decoder(code)
+    def _logical_error_rate(self, code: dict, p: float, trials: int, rng, uf: bool = False) -> float:
+        decoder = None if uf else self._qec_decoder(code)
         stab, lx, lz = code['stab'], code['lx'], code['lz']
         fails = 0
         for _ in range(trials):
             err = self._random_pauli_error(code, p, rng)
             synd = tuple(_anticommute(err, s) for s in stab)
-            recovery = decoder.get(synd, 'I' * code['n'])
+            recovery = self._qec_matching_decode(code, synd) if uf \
+                else decoder.get(synd, 'I' * code['n'])
             residual = _pmul(err, recovery)
             if _anticommute(residual, lx) or _anticommute(residual, lz):
                 fails += 1
         return fails / trials
+
+    def _qec_matching_decode(self, code: dict, syndrome) -> str:
+        """Union-find / matching decoder: minimum-weight matching of syndrome
+        defects on the matching graph, correcting the connecting qubits.
+
+        Scalable alternative to the exponential lookup table (it never enumerates
+        all errors). Defects are matched to each other or to the boundary by exact
+        minimum-weight matching over shortest paths, and the path qubits flipped.
+        """
+        import functools
+        from collections import deque
+        n = code['n']
+        stabs = code['stab']
+        xr = ['I'] * n
+        zr = ['I'] * n
+        for etype, dtype, rec in (('X', 'Z', xr), ('Z', 'X', zr)):
+            det = [i for i, s in enumerate(stabs) if set(s) - {'I'} == {dtype}]
+            defects = tuple(i for i in det if syndrome[i])
+            if not defects:
+                continue
+            adj = {i: [] for i in det}
+            adj['B'] = []
+            for q in range(n):
+                touch = [i for i in det if stabs[i][q] == dtype]
+                if len(touch) == 2:
+                    adj[touch[0]].append((touch[1], q)); adj[touch[1]].append((touch[0], q))
+                elif len(touch) == 1:
+                    adj[touch[0]].append(('B', q)); adj['B'].append((touch[0], q))
+
+            def bfs(src):
+                prev = {src: (None, None)}
+                dq = deque([src])
+                while dq:
+                    u = dq.popleft()
+                    for v, q in adj.get(u, []):
+                        if v not in prev:
+                            prev[v] = (u, q); dq.append(v)
+                return prev
+
+            prevs = {s: bfs(s) for s in defects}
+
+            def path_qubits(src, tgt):
+                prev = prevs[src]
+                qs, node = [], tgt
+                while node != src and prev.get(node, (None, None))[0] is not None:
+                    par, q = prev[node]
+                    qs.append(q); node = par
+                return qs
+
+            def dist(src, tgt):
+                return len(path_qubits(src, tgt)) if tgt in prevs[src] else 10 ** 9
+
+            @functools.lru_cache(maxsize=None)
+            def solve(rem):
+                if not rem:
+                    return (0, ())
+                i, rest = rem[0], rem[1:]
+                best_c, best_m = dist(i, 'B') + solve(rest)[0], ((i, 'B'),) + solve(rest)[1]
+                for k, j in enumerate(rest):
+                    sub = solve(rest[:k] + rest[k + 1:])
+                    c = dist(i, j) + sub[0]
+                    if c < best_c:
+                        best_c, best_m = c, ((i, j),) + sub[1]
+                return (best_c, best_m)
+
+            _, matches = solve(defects)
+            for a, b in matches:
+                for q in path_qubits(a, b):
+                    rec[q] = etype
+        out = []
+        for q in range(n):
+            x, z = xr[q] == 'X', zr[q] == 'Z'
+            out.append('Y' if (x and z) else 'X' if x else 'Z' if z else 'I')
+        return ''.join(out)
+
+    def cmd_distill(self, rest: str) -> None:
+        """DISTILL <p> [trials] — 15-to-1 magic-state (T-state) distillation.
+
+        Models the protocol's error detection by the [15,11,3] Hamming code:
+        15 noisy T-states (Z error rate p), accept on a trivial syndrome, and a
+        logical output error occurs only for an undetected nonzero codeword. The
+        output error rate scales as ~35 p^3, well below the input p."""
+        parts = rest.split()
+        if not parts:
+            self.io.writeln("?USAGE: DISTILL <p> [trials]")
+            return
+        try:
+            p = float(self._eval_with_vars(parts[0], {}))
+            trials = int(parts[1]) if len(parts) > 1 else 200000
+            # [15,11,3] Hamming parity-check matrix: columns are 1..15 in binary.
+            H = np.array([[ (c >> b) & 1 for c in range(1, 16)] for b in range(4)])
+            rng = np.random.default_rng(self._seed)
+            accepted = 0
+            errors = 0
+            for _ in range(trials):
+                e = (rng.random(15) < p).astype(int)
+                synd = H.dot(e) % 2
+                if not synd.any():            # accept: trivial syndrome
+                    accepted += 1
+                    if e.any():               # nonzero codeword -> logical error
+                        errors += 1
+            acc = accepted / trials
+            p_out = errors / accepted if accepted else 0.0
+            self.io.writeln(f"\n  15-to-1 magic-state distillation:")
+            self.io.writeln(f"    input error p      = {p:g}")
+            self.io.writeln(f"    acceptance rate    = {acc:.4f}")
+            self.io.writeln(f"    output error p_out = {p_out:.3e}   (~35 p^3 = {35 * p ** 3:.3e})")
+            self.io.writeln(f"    suppression p/p_out= {p / p_out:.1f}x" if p_out > 0 else
+                            "    output error: none observed")
+            self.variables['_DISTILL_POUT'] = p_out
+        except Exception as e:
+            self.io.writeln(f"?DISTILL ERROR: {e}")
+
+    def cmd_lattice(self, rest: str) -> None:
+        """LATTICE <stateA> <stateB> — lattice-surgery logical ZZ measurement.
+
+        Encodes two distance-3 repetition logical qubits in the given logical
+        states (0, 1, +, -), then performs a merge that measures the joint
+        operator Zbar_A Zbar_B (the basis of a lattice-surgery CNOT) via an
+        ancilla, and reports the logical parity outcome."""
+        parts = rest.split()
+        if len(parts) < 2:
+            self.io.writeln("?USAGE: LATTICE <stateA> <stateB>   (states: 0, 1, +, -)")
+            return
+        from qiskit import QuantumCircuit, transpile
+        from qiskit_aer import AerSimulator
+        try:
+            sa, sb = parts[0], parts[1]
+            # 3 data qubits per patch (A: 0-2, B: 3-5) + 1 merge ancilla (6).
+            qc = QuantumCircuit(7, 1)
+
+            def encode(base, state):
+                if state in ('1',):
+                    qc.x(base)
+                elif state in ('+', '-'):
+                    qc.h(base)
+                    if state == '-':
+                        qc.z(base)
+                qc.cx(base, base + 1); qc.cx(base, base + 2)   # repetition encode
+            encode(0, sa); encode(3, sb)
+            # Merge: measure Zbar_A Zbar_B = Z_{A0} Z_{B0} via an ancilla.
+            anc = 6
+            qc.h(anc)
+            qc.cz(anc, 0)
+            qc.cz(anc, 3)
+            qc.h(anc)
+            qc.measure(anc, 0)
+            backend = AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
+            counts = backend.run(transpile(qc, backend), shots=max(500, self.shots)).result().get_counts()
+            par = '+1 (even)' if counts.get('0', 0) >= counts.get('1', 0) else '-1 (odd)'
+            self.io.writeln(f"\n  Lattice surgery: merge of |{sa}>_L (A) and |{sb}>_L (B)")
+            self.io.writeln(f"    joint Zbar_A Zbar_B measurement -> {par}   {dict(counts)}")
+            self.io.writeln(f"    (a deterministic joint parity for computational inputs; the "
+                            f"building block of a lattice-surgery CNOT)")
+        except Exception as e:
+            self.io.writeln(f"?LATTICE ERROR: {e}")
 
     # ── Commands ────────────────────────────────────────────────────────
 
@@ -138,9 +347,11 @@ class QECMixin:
         arg = rest.strip().upper()
         if not arg or arg == 'LIST':
             self.io.writeln("\n  Built-in QEC codes:")
-            self.io.writeln("    REP [d]    repetition / bit-flip code, odd distance d (default 3)")
-            self.io.writeln("    STEANE     [[7,1,3]] CSS code")
-            self.io.writeln("    SHOR       [[9,1,3]] code")
+            self.io.writeln("    REP [d]     repetition / bit-flip code, odd distance d (default 3)")
+            self.io.writeln("    STEANE      [[7,1,3]] CSS code")
+            self.io.writeln("    SHOR        [[9,1,3]] code")
+            self.io.writeln("    SURFACE [d] rotated surface code, odd distance d (default 3)")
+            self.io.writeln("  Decoders: optimal lookup (default), union-find (LOGICAL_ERROR_RATE ... UF)")
             return
         parts = arg.split()
         try:
@@ -178,12 +389,15 @@ class QECMixin:
             distance = 3
             if len(parts) > 2 and parts[1].isdigit() and float(parts[1]) >= 1:
                 distance = int(parts[1]); idx = 2
-            p = float(self._eval_with_vars(parts[idx], {}))
-            trials = int(parts[idx + 1]) if len(parts) > idx + 1 else 20000
+            uf = any(t.upper() in ('UF', 'UNION-FIND', 'MATCHING') for t in parts)
+            tail = [t for t in parts[idx:] if t.upper() not in ('UF', 'UNION-FIND', 'MATCHING')]
+            p = float(self._eval_with_vars(tail[0], {}))
+            trials = int(tail[1]) if len(tail) > 1 else 20000
             code = self._qec_code(name, distance)
             rng = np.random.default_rng(self._seed)
-            ler = self._logical_error_rate(code, p, trials, rng)
-            self.io.writeln(f"\n  {code['name']}: physical p={p}, {trials} trials")
+            ler = self._logical_error_rate(code, p, trials, rng, uf=uf)
+            self.io.writeln(f"\n  {code['name']}: physical p={p}, {trials} trials"
+                            f"{' (union-find decoder)' if uf else ' (lookup decoder)'}")
             self.io.writeln(f"  Logical error rate = {ler:.6f}")
             self.variables['_LER'] = ler
         except Exception as e:

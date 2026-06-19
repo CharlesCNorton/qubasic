@@ -72,6 +72,7 @@ from qubasic_core.algos2 import Algorithms2Mixin
 from qubasic_core.pauliprop import PauliPropMixin
 from qubasic_core.qudits import QuditMixin
 from qubasic_core.bosonic import BosonicMixin
+from qubasic_core.resources import ResourceMixin
 from qubasic_core.errors import QBasicError, QBasicBuildError, QBasicRangeError
 from qubasic_core.io_protocol import StdIOPort
 from qubasic_core.parser import parse_stmt
@@ -151,7 +152,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin,
                      NoiseMixin, StateDisplayMixin, QoLMixin, AlgorithmsMixin,
                      DynamicsMixin, QECMixin, BenchmarkingMixin, Algorithms2Mixin,
-                     PauliPropMixin, QuditMixin, BosonicMixin):
+                     PauliPropMixin, QuditMixin, BosonicMixin, ResourceMixin):
     # Architecture: QBasicTerminal composes Engine (state) + 20 mixins (behavior).
     #
     # Mixin map (each provides specific methods; see TerminalProtocol for contract):
@@ -540,7 +541,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'HAMILTONIAN': 'cmd_hamiltonian', 'LINDBLAD': 'cmd_lindblad',
         'CHANNEL': 'cmd_channel',
         'QEC': 'cmd_qec', 'LOGICAL_ERROR_RATE': 'cmd_logical_error_rate',
-        'THRESHOLD': 'cmd_threshold',
+        'THRESHOLD': 'cmd_threshold', 'DISTILL': 'cmd_distill', 'LATTICE': 'cmd_lattice',
         'XEB': 'cmd_xeb', 'QVOLUME': 'cmd_qvolume', 'RBINT': 'cmd_rbint',
         'MIRROR': 'cmd_mirror', 'CONCURRENCE': 'cmd_concurrence',
         'NEGATIVITY': 'cmd_negativity',
@@ -551,6 +552,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'QSUM': 'cmd_qsum', 'QMEASURE': 'cmd_qmeasure',
         'BOSONIC': 'cmd_bosonic', 'DISPLACE': 'cmd_displace', 'SQUEEZE': 'cmd_squeeze',
         'CAT': 'cmd_cat', 'BS': 'cmd_bs', 'BSTATE': 'cmd_bstate',
+        'RESOURCES': 'cmd_resources', 'DEVICE': 'cmd_device', 'OPTIMIZE': 'cmd_optimize',
         'SET_STATE': 'cmd_set_state', 'SET_DENSITY': 'cmd_set_density',
         # Circuit macros
         'CIRCUIT_DEF': 'cmd_circuit_def', 'APPLY_CIRCUIT': 'cmd_apply_circuit',

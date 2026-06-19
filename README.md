@@ -481,10 +481,17 @@ CHANNEL AD = [[1,0],[0,0.95]] ; [[0,0.31],[0,0]]   Define a Kraus channel
 ## Error correction
 
 ```
-QEC STEANE               Show a code (REP [d], STEANE, SHOR) and its stabilizers
-LOGICAL_ERROR_RATE STEANE 0.02   Monte-Carlo logical error rate at physical p
+QEC STEANE               Show a code (REP [d], STEANE, SHOR, SURFACE [d]) and its stabilizers
+LOGICAL_ERROR_RATE STEANE 0.02   Monte-Carlo logical error rate (optimal lookup decoder)
+LOGICAL_ERROR_RATE SURFACE 0.02 UF   Same, with the union-find / matching decoder
 THRESHOLD REP 0.0 0.5 11         Sweep p across distances 3/5/7 (crossing at 0.5)
+DISTILL 0.02             15-to-1 magic-state distillation (output error ~35 p^3)
+LATTICE 0 1              Lattice-surgery joint Zbar-Zbar measurement of two patches
 ```
+
+Codes: repetition (any odd distance), Steane [[7,1,3]], Shor [[9,1,3]], rotated
+surface. Decoders: an optimal minimum-weight lookup table (all codes) and a
+scalable union-find / matching decoder (topological codes, via the `UF` flag).
 
 ## Benchmarking and verification
 
@@ -519,6 +526,16 @@ HHL 1 0 0 2 1 1          Solve a 2x2 Hermitian system A x = v
 QUDIT 3 2                d-level systems: QX, QZ, QF, QSUM, QSTATE, QMEASURE
 BOSONIC 1 25             Continuous-variable Fock modes
 DISPLACE 0 1.0           ...DISPLACE, SQUEEZE, CAT, BS, BSTATE
+```
+
+## Compilation and resources
+
+```
+RESOURCES 1e-12 0.001    Fault-tolerant estimate (surface-code distance, qubits, runtime)
+DEVICE linear 5          Calibrated offline device model (per-qubit T1/T2 + coupling map)
+DEVICE ring 5 80 60      ...with custom T1/T2 in microseconds (also: heavyhex, all, OFF)
+OPTIMIZE 3               Transpile the program and report the depth/gate reduction
+NOISE crosstalk 0.01     Correlated two-qubit ZZ crosstalk on entangling gates
 ```
 
 ## Noise models

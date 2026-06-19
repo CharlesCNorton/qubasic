@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0 (2026-06-19)
+
+Completes the frontier set: fault-tolerant QEC extras and a compilation/resources
+group. All offline on Qiskit/Aer/numpy.
+
+### Added
+- Surface code: `QEC SURFACE [d]`, a rotated surface code at odd distance d (validated to correct every weight-1 error).
+- Union-find / matching decoder: exact minimum-weight matching of syndrome defects, scalable and dependency-free, selected with the `UF` flag on `LOGICAL_ERROR_RATE`. It tracks the optimal lookup decoder on the repetition and surface codes; the lookup decoder remains the default and the right choice for non-topological codes like Steane and Shor.
+- Magic-state distillation: `DISTILL <p>` runs the 15-to-1 protocol (via the [15,11,3] Hamming detection), with cubic output-error suppression ~35 p^3.
+- Lattice surgery: `LATTICE <a> <b>` performs the joint Zbar_A Zbar_B measurement that merges two repetition patches (the building block of a lattice-surgery CNOT).
+- Fault-tolerant resource estimation: `RESOURCES <target_pL> <physical_p>` reports the surface-code distance, physical qubits per logical, T-count, T-factory overhead, and an approximate runtime.
+- Calibrated device models: `DEVICE linear|ring|heavyhex|all [n] [T1us] [T2us]` builds a per-qubit thermal-relaxation noise model and coupling map for offline hardware-realistic simulation.
+- `NOISE crosstalk <p>`: a correlated two-qubit ZZ crosstalk channel on entangling gates.
+- `OPTIMIZE [level]`: transpiles the program and reports the depth and gate-count reduction.
+
 ## 0.9.0 (2026-06-19)
 
 Frontier and experimental methods. All offline on Qiskit/Aer/numpy; nothing

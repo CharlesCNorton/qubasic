@@ -1864,6 +1864,90 @@ class TestFrontier(unittest.TestCase):
         self.assertLess(sum(cat[k] for k in range(1, 25, 2)), 1e-6)  # even photons only
 
 
+class TestQECExtras(unittest.TestCase):
+    """Surface code, union-find decoder, magic-state distillation, lattice surgery."""
+
+    def test_surface_code_valid_and_distance(self):
+        from qubasic_core.qec import _anticommute, _pmul
+        t = QBasicTerminal()
+        c = t._qec_code('SURFACE', 3)
+        self.assertEqual(c['n'], 9)
+        self.assertTrue(all(not _anticommute(a, b) for a in c['stab'] for b in c['stab']))
+        self.assertTrue(all(not _anticommute(c['lx'], s) for s in c['stab']))
+        self.assertTrue(all(not _anticommute(c['lz'], s) for s in c['stab']))
+        self.assertEqual(_anticommute(c['lx'], c['lz']), 1)
+        dec = t._qec_decoder(c)
+        for q in range(9):
+            for p in 'XYZ':
+                err = 'I' * q + p + 'I' * (9 - q - 1)
+                synd = tuple(_anticommute(err, s) for s in c['stab'])
+                res = _pmul(err, dec.get(synd, 'I' * 9))
+                self.assertFalse(_anticommute(res, c['lx']) or _anticommute(res, c['lz']))
+
+    def test_union_find_decoder(self):
+        from qubasic_core.qec import _anticommute, _pmul
+        t = QBasicTerminal()
+        # Corrects all weight-1 errors on repetition and surface (matching codes).
+        for name, d in [('REP', 5), ('SURFACE', 3)]:
+            c = t._qec_code(name, d)
+            for q in range(c['n']):
+                for p in (c['alphabet'].replace('I', '') if name != 'REP' else 'X'):
+                    err = 'I' * q + p + 'I' * (c['n'] - q - 1)
+                    synd = tuple(_anticommute(err, s) for s in c['stab'])
+                    res = _pmul(err, t._qec_matching_decode(c, synd))
+                    self.assertFalse(_anticommute(res, c['lx']) or _anticommute(res, c['lz']))
+        # Logical error rate tracks the optimal lookup decoder on repetition.
+        c = t._qec_code('REP', 5)
+        lk = t._logical_error_rate(c, 0.08, 6000, np.random.default_rng(1), uf=False)
+        uf = t._logical_error_rate(c, 0.08, 6000, np.random.default_rng(1), uf=True)
+        self.assertLess(abs(lk - uf), 0.02)
+
+    def test_magic_state_distillation(self):
+        t = QBasicTerminal(); t._seed = 1
+        capture(t.cmd_distill, '0.02 200000')
+        p_out = t.variables['_DISTILL_POUT']
+        self.assertLess(p_out, 0.02)                 # below input
+        self.assertLess(p_out, 5e-3)                 # cubic suppression (~35 p^3)
+
+    def test_lattice_surgery(self):
+        t = QBasicTerminal(); t.shots = 500; t._seed = 1
+        _, out_even = capture(t.cmd_lattice, '0 0')
+        _, out_odd = capture(t.cmd_lattice, '0 1')
+        self.assertIn('even', out_even)
+        self.assertIn('odd', out_odd)
+
+
+class TestResources(unittest.TestCase):
+    """Fault-tolerant resource estimation, device models, optimization, crosstalk."""
+
+    def test_resource_estimation(self):
+        t = QBasicTerminal(); t.num_qubits = 10
+        t.process('10 H 0', track_undo=False)
+        capture(t.cmd_resources, '1e-12 0.001')
+        self.assertEqual(t.variables['_FT_DISTANCE'] % 2, 1)   # odd distance
+        self.assertGreater(t.variables['_FT_DISTANCE'], 1)
+
+    def test_device_and_optimize(self):
+        t = QBasicTerminal(); t.num_qubits = 3; t.shots = 500; t._seed = 1
+        capture(t.cmd_device, 'linear 3')
+        self.assertIsNotNone(t._noise_model)
+        self.assertIsNotNone(t._coupling_map)
+        # OPTIMIZE collapses redundant gates.
+        t2 = QBasicTerminal(); t2.num_qubits = 1
+        t2.process('10 H 0', track_undo=False); t2.process('20 H 0', track_undo=False)
+        capture(t2.cmd_optimize, '3')
+        self.assertLessEqual(t2.variables['_OPT_DEPTH'], 1)
+
+    def test_crosstalk_noise(self):
+        t = QBasicTerminal(); t.num_qubits = 2; t.shots = 500; t._seed = 1
+        capture(t.cmd_noise, 'crosstalk 0.1')
+        self.assertIsNotNone(t._noise_model)
+        for ln in ['10 H 0', '20 CX 0,1', '30 MEASURE']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        self.assertIsNotNone(t.last_counts)
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')

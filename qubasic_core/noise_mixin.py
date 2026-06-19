@@ -106,10 +106,17 @@ class NoiseMixin:
                 p1 = float(parts[2]) if len(parts) > 2 else 0.01
                 nm.add_all_qubit_quantum_error(reset_error(p0, p1), _1q)
                 self.io.writeln(f"NOISE reset p0={p0} p1={p1}")
+            elif ntype == 'crosstalk':
+                # Correlated (non-product) two-qubit error after each 2-qubit gate:
+                # a ZZ Pauli with probability p, otherwise identity.
+                p = float(parts[1]) if len(parts) > 1 else 0.01
+                err = pauli_error([('ZZ', p), ('II', 1 - p)])
+                nm.add_all_qubit_quantum_error(err, _2q)
+                self.io.writeln(f"NOISE crosstalk (correlated ZZ on 2-qubit gates) p={p}")
             else:
                 self.io.writeln(f"?UNKNOWN NOISE TYPE: {ntype}")
                 self.io.writeln("  Types: depolarizing, amplitude_damping, phase_flip, thermal,")
-                self.io.writeln("         readout, combined, pauli, reset")
+                self.io.writeln("         readout, combined, pauli, reset, crosstalk")
                 return
             self._noise_model = nm
             self._noise_spec = rest.strip()  # for SAVE round-tripping
