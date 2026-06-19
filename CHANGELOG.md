@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 (2026-06-19)
+
+Frontier and experimental methods. All offline on Qiskit/Aer/numpy; nothing
+needs a cloud backend or an external simulation engine.
+
+### Added
+- Hamiltonian dynamics and open systems: `HAMILTONIAN` (Pauli sum, plus `ISING`, `HEISENBERG`, `HUBBARD` Jordan-Wigner, and `RYDBERG` builders), `EVOLVE` (Suzuki-Trotter time evolution, verified to fidelity 1.0 against the exact propagator), `LINDBLAD` (RK4 master-equation open-system evolution), and `CHANNEL`/`APPLYCHANNEL` (user-defined CPTP Kraus channels).
+- Quantum error correction: `QEC` (repetition, Steane, Shor codes with self-verified logical operators), an optimal minimum-weight lookup decoder, `LOGICAL_ERROR_RATE` (Pauli-frame Monte Carlo), and `THRESHOLD` sweeps (the repetition crossing lands at p = 0.5).
+- Frontier benchmarking: `XEB` (cross-entropy benchmarking), `QVOLUME` (quantum volume heavy-output test), `RBINT` (interleaved RB), `MIRROR` (mirror benchmarking), `GST` (1-qubit linear-inversion gate-set-style estimate), and entanglement measures `CONCURRENCE` and `NEGATIVITY`.
+- Advanced algorithms: `IQPE` (iterative phase estimation), `AMPEST` (amplitude estimation), `AMPLIFY` (amplitude amplification), `QWALK` (discrete-time quantum walk), `GRAPHSTATE` (graph/cluster states for measurement-based computing), `FEATUREMAP`/`QKERNEL` (quantum-machine-learning encoding and kernels), `SHOR` (order finding and factoring, factors 15 into 3 x 5), and `HHL` (2x2 linear solver).
+- Pauli propagation: `PAULIPROP` estimates Pauli expectation values by Heisenberg-picture backpropagation with weight truncation (exact when nothing is pruned, matching `EXPECT`).
+- Qudit engine: `QUDIT`, `QX`, `QZ`, `QF`, `QSUM`, `QSTATE`, `QMEASURE` for d-level systems (independent of the qubit engine).
+- Bosonic / continuous-variable engine: `BOSONIC`, `DISPLACE`, `SQUEEZE`, `CAT`, `BS`, `BSTATE` for truncated Fock-space modes.
+
 ## 0.8.0 (2026-06-19)
 
 ### Added

@@ -1689,6 +1689,181 @@ class TestCharacterization(unittest.TestCase):
         self.assertEqual(len(t._single_qubit_cliffords()), 24)
 
 
+class TestDynamics(unittest.TestCase):
+    """Hamiltonian declaration, Trotter evolution, Lindblad, custom channels."""
+
+    @staticmethod
+    def _exact_evolve(Hmat, t, dim):
+        w, V = np.linalg.eigh(Hmat)
+        U = V @ np.diag(np.exp(-1j * t * w)) @ V.conj().T
+        psi0 = np.zeros(dim, dtype=complex); psi0[0] = 1
+        return U @ psi0
+
+    def test_evolve_exact_single_term(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.cmd_hamiltonian('H = X 0')
+        t.process('10 EVOLVE H, 0.5', track_undo=False)
+        capture(t.cmd_run)
+        ref = self._exact_evolve(t._hamiltonians['H'].to_matrix(), 0.5, 2)
+        sv = np.ascontiguousarray(t.last_sv).ravel()
+        self.assertAlmostEqual(abs(np.vdot(ref, sv)) ** 2, 1.0, places=8)
+
+    def test_evolve_trotter_noncommuting(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.cmd_hamiltonian('H = 1.0 X 0 + 1.0 Z 0')
+        t.process('10 EVOLVE H, 0.8, 300', track_undo=False)
+        capture(t.cmd_run)
+        ref = self._exact_evolve(t._hamiltonians['H'].to_matrix(), 0.8, 2)
+        sv = np.ascontiguousarray(t.last_sv).ravel()
+        self.assertGreater(abs(np.vdot(ref, sv)) ** 2, 0.9999)
+
+    def test_builders_unitary(self):
+        for spec in ('ISING 1.0 0.5', 'HEISENBERG 1.0', 'HUBBARD 1.0 2.0', 'RYDBERG 1.0 0.5 8.0'):
+            t = QBasicTerminal(); t.num_qubits = 4
+            t.cmd_hamiltonian(f'H = {spec}')
+            t.process('10 H 0', track_undo=False)
+            t.process('20 EVOLVE H, 0.4, 10', track_undo=False)
+            capture(t.cmd_run)
+            self.assertAlmostEqual(
+                float(np.linalg.norm(np.ascontiguousarray(t.last_sv).ravel())), 1.0, places=6)
+
+    def test_lindblad_decay(self):
+        # |1> under sigma-minus at rate 1, t=1 -> excited population e^-1.
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.process('10 X 0', track_undo=False)
+        capture(t.cmd_run)
+        capture(t.cmd_lindblad, 'NONE, 1.0, 300, 1.0 SM 0')
+        self.assertAlmostEqual(t.variables['_RHO1'], np.exp(-1.0), places=4)
+
+    def test_custom_kraus_channel(self):
+        import math
+        t = QBasicTerminal(); t.num_qubits = 1; t.shots = 4000; t._seed = 1
+        t.cmd_channel(f'AD = [[1,0],[0,{math.sqrt(0.9)}]] ; [[0,{math.sqrt(0.1)}],[0,0]]')
+        for ln in ['10 X 0', '20 APPLYCHANNEL AD 0', '30 MEASURE']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        tot = sum(t.last_counts.values())
+        self.assertAlmostEqual(t.last_counts.get('1', 0) / tot, 0.9, delta=0.03)
+
+
+class TestQEC(unittest.TestCase):
+    """Stabilizer codes, optimal decoding, logical error rates, thresholds."""
+
+    def test_codes_valid(self):
+        t = QBasicTerminal()
+        from qubasic_core.qec import _anticommute
+        for name in ('REP', 'STEANE', 'SHOR'):
+            c = t._qec_code(name)
+            self.assertTrue(all(not _anticommute(c['lx'], s) for s in c['stab']))
+            self.assertTrue(all(not _anticommute(c['lz'], s) for s in c['stab']))
+            self.assertEqual(_anticommute(c['lx'], c['lz']), 1)
+
+    def test_decoder_corrects_weight_one(self):
+        # A distance-3 code's optimal decoder must correct every weight-1 error.
+        import itertools
+        from qubasic_core.qec import _anticommute, _pmul
+        t = QBasicTerminal()
+        for name in ('REP', 'STEANE', 'SHOR'):
+            c = t._qec_code(name)
+            dec = t._qec_decoder(c)
+            n = c['n']
+            for q in range(n):
+                for pauli in c['alphabet'].replace('I', ''):
+                    err = 'I' * q + pauli + 'I' * (n - q - 1)
+                    synd = tuple(_anticommute(err, s) for s in c['stab'])
+                    res = _pmul(err, dec.get(synd, 'I' * n))
+                    self.assertFalse(_anticommute(res, c['lx']) or _anticommute(res, c['lz']),
+                                     f"{name}: weight-1 error {err} not corrected")
+
+    def test_logical_error_rate_and_threshold(self):
+        t = QBasicTerminal(); t._seed = 1
+        rng = np.random.default_rng(1)
+        c3 = t._qec_code('REP', 3)
+        c5 = t._qec_code('REP', 5)
+        # Below threshold (p=0.1): logical << physical, and larger distance is better.
+        ler3 = t._logical_error_rate(c3, 0.1, 8000, rng)
+        ler5 = t._logical_error_rate(c5, 0.1, 8000, rng)
+        self.assertLess(ler3, 0.1)
+        self.assertLess(ler5, ler3)
+
+
+class TestFrontier(unittest.TestCase):
+    """Benchmarking, advanced algorithms, Pauli propagation, qudits, bosonic."""
+
+    def test_pauli_propagation(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.process('10 X 0', track_undo=False)
+        capture(t.cmd_run)
+        capture(t.cmd_pauliprop, 'Z 0')
+        self.assertAlmostEqual(t.variables['_PAULIPROP'], -1.0, places=6)
+        t2 = QBasicTerminal(); t2.num_qubits = 1
+        t2.process('10 RY 0.5, 0', track_undo=False)
+        capture(t2.cmd_run)
+        capture(t2.cmd_pauliprop, 'Z 0')
+        self.assertAlmostEqual(t2.variables['_PAULIPROP'], math.cos(0.5), places=6)
+
+    def test_entanglement_measures(self):
+        t = QBasicTerminal(); t.num_qubits = 2
+        for ln in ['10 H 0', '20 CX 0,1']:
+            t.process(ln, track_undo=False)
+        capture(t.cmd_run)
+        capture(t.cmd_concurrence, '0 1')
+        capture(t.cmd_negativity, '0')
+        self.assertAlmostEqual(t.variables['_CONCURRENCE'], 1.0, places=5)
+        self.assertAlmostEqual(t.variables['_NEGATIVITY'], 0.5, places=5)
+
+    def test_xeb_ideal(self):
+        t = QBasicTerminal(); t.num_qubits = 3; t.shots = 1000; t._seed = 1
+        capture(t.cmd_xeb, '3 6 8')
+        self.assertGreater(t.variables['_XEB'], 0.6)   # ideal ~ 1
+
+    def test_iqpe_and_ampest(self):
+        t = QBasicTerminal(); t.num_qubits = 1; t._seed = 1
+        t.process('UNITARY UP = [[1,0],[0,-0.7071067811865476+0.7071067811865476j]]', track_undo=False)
+        t.process('10 X 0', track_undo=False)
+        capture(t.cmd_iqpe, '4 0 UP')
+        self.assertAlmostEqual(t.variables['_IQPE'], 0.375, places=6)
+        t2 = QBasicTerminal(); t2.num_qubits = 2; t2.shots = 3000; t2._seed = 1
+        capture(t2.cmd_ampest, '5 0')
+        self.assertAlmostEqual(t2.variables['_AMPEST'], 0.5, delta=0.08)
+
+    def test_shor_factors_15(self):
+        t = QBasicTerminal(); t.shots = 3000; t._seed = 2
+        capture(t.cmd_shor, '15 7')
+        self.assertIn(t.variables.get('_SHOR_FACTOR'), (3, 5))
+
+    def test_hhl(self):
+        t = QBasicTerminal(); t.num_qubits = 2; t._seed = 1
+        capture(t.cmd_hhl, '1 0 0 2 1 1')
+        self.assertGreater(t.variables['_HHL_FIDELITY'], 0.99)
+
+    def test_qudits(self):
+        t = QBasicTerminal()
+        capture(t.cmd_qudit, '3'); capture(t.cmd_qf, '0')
+        self.assertTrue(np.allclose(np.abs(t._qsv) ** 2, 1 / 3, atol=1e-9))
+        t2 = QBasicTerminal()
+        capture(t2.cmd_qudit, '3')
+        for _ in range(3):
+            capture(t2.cmd_qx, '0')
+        self.assertAlmostEqual(abs(t2._qsv[0]), 1.0, places=9)
+        t3 = QBasicTerminal()
+        capture(t3.cmd_qudit, '3 2'); capture(t3.cmd_qf, '0'); capture(t3.cmd_qsum, '0 1')
+        nz = sorted(i for i, a in enumerate(t3._qsv) if abs(a) > 1e-9)
+        self.assertEqual(nz, [0, 4, 8])   # |00>, |11>, |22>
+
+    def test_bosonic(self):
+        t = QBasicTerminal()
+        capture(t.cmd_bosonic, '1 25'); capture(t.cmd_displace, '0 1')
+        diag = t._mode_rdm_diag(0)
+        nbar = float(np.sum(np.arange(25) * diag))
+        self.assertAlmostEqual(nbar, 1.0, places=3)          # <n> = |alpha|^2
+        self.assertAlmostEqual(diag[0], math.exp(-1), places=3)  # Poisson P(0)
+        t2 = QBasicTerminal()
+        capture(t2.cmd_bosonic, '1 25'); capture(t2.cmd_cat, '0 2')
+        cat = t2._mode_rdm_diag(0)
+        self.assertLess(sum(cat[k] for k in range(1, 25, 2)), 1e-6)  # even photons only
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')

@@ -467,6 +467,60 @@ LOADQASM file.qasm       Import OpenQASM as an editable program (2.0 built-in; 3
 SAVEPNG out.png hist     Save the histogram as a PNG (also: bloch, circuit; needs matplotlib)
 ```
 
+## Hamiltonian dynamics and open systems
+
+```
+HAMILTONIAN H = 1.0 ZZ 0 1 + 0.5 X 0    Declare a Pauli-sum Hamiltonian
+HAMILTONIAN H = ISING 1.0 0.5           Builders: ISING, HEISENBERG, HUBBARD, RYDBERG
+10 EVOLVE H, 1.5, 20                     Trotterized e^{-iHt} (time, steps) in a circuit
+LINDBLAD NONE, 1.0, 200, 1.0 SM 0        Open-system master-equation evolution
+CHANNEL AD = [[1,0],[0,0.95]] ; [[0,0.31],[0,0]]   Define a Kraus channel
+10 APPLYCHANNEL AD 0                      Apply a custom channel
+```
+
+## Error correction
+
+```
+QEC STEANE               Show a code (REP [d], STEANE, SHOR) and its stabilizers
+LOGICAL_ERROR_RATE STEANE 0.02   Monte-Carlo logical error rate at physical p
+THRESHOLD REP 0.0 0.5 11         Sweep p across distances 3/5/7 (crossing at 0.5)
+```
+
+## Benchmarking and verification
+
+```
+XEB 4 10 20              Cross-entropy benchmarking fidelity
+QVOLUME 4                Quantum volume heavy-output test
+RBINT H                  Interleaved RB fidelity of a Clifford gate
+MIRROR 16 10             Mirror-circuit benchmarking
+GST                      1-qubit gate-set-style process estimate
+CONCURRENCE 0 1          Two-qubit concurrence
+NEGATIVITY 0             Entanglement negativity across a bipartition
+PAULIPROP ZZ 0 1         Pauli-propagation expectation (Heisenberg, truncated)
+```
+
+## Advanced algorithms
+
+```
+IQPE 4 0 UGATE           Iterative phase estimation of a UNITARY eigenphase
+AMPEST 5 0               Amplitude estimation of the marked amplitude
+10 AMPLIFY 101            One amplitude-amplification (Grover) step
+QWALK 5                  Discrete-time quantum walk on a cycle
+10 GRAPHSTATE 0-1, 1-2    Prepare a graph/cluster state (MBQC resource)
+10 FEATUREMAP x0 x1       ZZ feature-map data encoding (QML)
+QKERNEL 0.5 0.3 ; 0.4 0.2    Quantum kernel |<phi(x)|phi(y)>|^2
+SHOR 15                  Order finding / factoring of small N
+HHL 1 0 0 2 1 1          Solve a 2x2 Hermitian system A x = v
+```
+
+## Beyond qubits
+
+```
+QUDIT 3 2                d-level systems: QX, QZ, QF, QSUM, QSTATE, QMEASURE
+BOSONIC 1 25             Continuous-variable Fock modes
+DISPLACE 0 1.0           ...DISPLACE, SQUEEZE, CAT, BS, BSTATE
+```
+
 ## Noise models
 
 ```

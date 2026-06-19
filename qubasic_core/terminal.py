@@ -65,6 +65,13 @@ from qubasic_core.noise_mixin import NoiseMixin
 from qubasic_core.state_display import StateDisplayMixin
 from qubasic_core.qol import QoLMixin, did_you_mean, tip_of_the_day, quantum_spin
 from qubasic_core.algorithms import AlgorithmsMixin
+from qubasic_core.dynamics import DynamicsMixin
+from qubasic_core.qec import QECMixin
+from qubasic_core.benchmarking import BenchmarkingMixin
+from qubasic_core.algos2 import Algorithms2Mixin
+from qubasic_core.pauliprop import PauliPropMixin
+from qubasic_core.qudits import QuditMixin
+from qubasic_core.bosonic import BosonicMixin
 from qubasic_core.errors import QBasicError, QBasicBuildError, QBasicRangeError
 from qubasic_core.io_protocol import StdIOPort
 from qubasic_core.parser import parse_stmt
@@ -142,7 +149,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                      LOCCMixin, ControlFlowMixin, FileIOMixin, AnalysisMixin,
                      SweepMixin, MemoryMixin, StringMixin, ScreenMixin, ClassicMixin,
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin,
-                     NoiseMixin, StateDisplayMixin, QoLMixin, AlgorithmsMixin):
+                     NoiseMixin, StateDisplayMixin, QoLMixin, AlgorithmsMixin,
+                     DynamicsMixin, QECMixin, BenchmarkingMixin, Algorithms2Mixin,
+                     PauliPropMixin, QuditMixin, BosonicMixin):
     # Architecture: QBasicTerminal composes Engine (state) + 20 mixins (behavior).
     #
     # Mixin map (each provides specific methods; see TerminalProtocol for contract):
@@ -236,6 +245,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self._init_profiler()
         self._init_file_handles()
         self._init_qol()
+        self._init_dynamics()
+        self._init_qudits()
+        self._init_bosonic()
         # Device model for transpilation (None = unconstrained, all-to-all).
         self._coupling_map: list[list[int]] | None = None
         self._basis_gates: list[str] | None = None
@@ -488,7 +500,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         # Classic
         'RESTORE': 'cmd_restore',
         # Characterization
-        'PTOMOGRAPHY': 'cmd_ptomography',
+        'PTOMOGRAPHY': 'cmd_ptomography', 'GST': 'cmd_gst',
+        'QSTATE': 'cmd_qstate',
     }
     _CMD_WITH_ARG = {
         'LIST': 'cmd_list', 'QUBITS': 'cmd_qubits', 'SHOTS': 'cmd_shots',
@@ -524,6 +537,20 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'FIDELITY': 'cmd_fidelity', 'TOMOGRAPHY': 'cmd_tomography', 'RB': 'cmd_rb',
         'COUPLING': 'cmd_coupling', 'BASIS': 'cmd_basis',
         'LOADQASM': 'cmd_loadqasm', 'SAVEPNG': 'cmd_savepng',
+        'HAMILTONIAN': 'cmd_hamiltonian', 'LINDBLAD': 'cmd_lindblad',
+        'CHANNEL': 'cmd_channel',
+        'QEC': 'cmd_qec', 'LOGICAL_ERROR_RATE': 'cmd_logical_error_rate',
+        'THRESHOLD': 'cmd_threshold',
+        'XEB': 'cmd_xeb', 'QVOLUME': 'cmd_qvolume', 'RBINT': 'cmd_rbint',
+        'MIRROR': 'cmd_mirror', 'CONCURRENCE': 'cmd_concurrence',
+        'NEGATIVITY': 'cmd_negativity',
+        'IQPE': 'cmd_iqpe', 'AMPEST': 'cmd_ampest', 'QWALK': 'cmd_qwalk',
+        'QKERNEL': 'cmd_qkernel', 'SHOR': 'cmd_shor', 'HHL': 'cmd_hhl',
+        'PAULIPROP': 'cmd_pauliprop',
+        'QUDIT': 'cmd_qudit', 'QX': 'cmd_qx', 'QZ': 'cmd_qz', 'QF': 'cmd_qf',
+        'QSUM': 'cmd_qsum', 'QMEASURE': 'cmd_qmeasure',
+        'BOSONIC': 'cmd_bosonic', 'DISPLACE': 'cmd_displace', 'SQUEEZE': 'cmd_squeeze',
+        'CAT': 'cmd_cat', 'BS': 'cmd_bs', 'BSTATE': 'cmd_bstate',
         'SET_STATE': 'cmd_set_state', 'SET_DENSITY': 'cmd_set_density',
         # Circuit macros
         'CIRCUIT_DEF': 'cmd_circuit_def', 'APPLY_CIRCUIT': 'cmd_apply_circuit',
@@ -1991,6 +2018,11 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             or self._try_exec_qaddc(stmt, qc, run_vars, backend=backend)
             or self._try_exec_qadd(stmt, qc, run_vars, backend=backend)
             or self._try_exec_qpe(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_evolve(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_applychannel(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_amplify(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_graphstate(stmt, qc, run_vars, backend=backend)
+            or self._try_exec_featuremap(stmt, qc, run_vars, backend=backend)
             or self._try_exec_unitary(stmt)
             or self._try_exec_dim(stmt)
             or self._try_exec_dim_type(stmt)
