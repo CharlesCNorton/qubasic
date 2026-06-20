@@ -2078,6 +2078,23 @@ class TestConventionAndStateRegressions(unittest.TestCase):
         self.assertIn('rightmost', note)
         self.assertIn('bit_order', t.result())
 
+    def test_config_command_as_program_line_errors_clearly(self):
+        # A config/REPL command used as a numbered program line explains itself
+        # instead of failing with the misleading "UNKNOWN GATE".
+        for cmd in ('QUBITS 3', 'SHOTS 256', 'METHOD stabilizer', 'LOCC 2 2'):
+            t = QBasicTerminal(); t.num_qubits = 2
+            t.program = {10: cmd, 20: 'H 0', 30: 'MEASURE'}
+            _, out = capture(t.cmd_run)
+            self.assertIn('configuration', out.lower())
+            self.assertNotIn('UNKNOWN GATE', out)
+
+    def test_subroutine_call_not_treated_as_config_command(self):
+        t = QBasicTerminal(); t.num_qubits = 2
+        t.process('DEF BELL = H 0 : CX 0,1', track_undo=False)
+        t.program = {10: 'BELL', 20: 'MEASURE'}
+        capture(t.cmd_run)
+        self.assertIsNotNone(t.last_counts)  # ran; not blocked as a "command"
+
 
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):

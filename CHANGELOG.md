@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.1 (2026-06-19)
+
+### Fixed
+- A configuration/session command (`QUBITS`, `SHOTS`, `METHOD`, `LOCC`, ...) placed on a numbered program line now reports a clear error explaining it must run without a line number (before `RUN`), instead of the misleading `UNKNOWN GATE`. Unnumbered config in a script was, and remains, the correct usage.
+
 ## 0.11.0 (2026-06-19)
 
 Convention-conformance and observability pass: make the language behave the way

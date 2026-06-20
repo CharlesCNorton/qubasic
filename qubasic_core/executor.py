@@ -333,6 +333,19 @@ class ExecutorMixin:
                 return ExecResult.ADVANCE
             # Fall through to _apply_gate_str for custom gates not in GATE_TABLE
 
+        # A REPL/config command (QUBITS, SHOTS, METHOD, LOCC, ...) used as a
+        # numbered program line reaches here only because it is neither a gate
+        # nor a statement. Explain it instead of failing with "UNKNOWN GATE".
+        # SEND/SHARE are LOCC statements (handled on the LOCC path), so leave
+        # them to their own error.
+        _first = stmt.split(None, 1)[0].upper() if stmt.split() else ''
+        if ((_first in self._CMD_WITH_ARG or _first in self._CMD_NO_ARG)
+                and _first not in ('SEND', 'SHARE')):
+            raise QBasicBuildError(
+                f"{_first} is a configuration/session command, not a program "
+                f"statement; run it without a line number (before RUN), e.g. "
+                f"QUBITS 3 / SHOTS 1024 / METHOD statevector / LOCC 2 2")
+
         # Slow path: subroutine expansion + gate dispatch
         expanded = self._expand_statement(stmt)
         for gate_str in expanded:
