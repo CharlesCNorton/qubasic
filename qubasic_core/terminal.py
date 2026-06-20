@@ -1244,6 +1244,28 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     # it skip extraction; STATE/BLOCH then report no state.
     _SV_EXTRACT_MAX_QUBITS = 24
 
+    def _density_from_qc(self, qc_sv):
+        """Solve the density matrix of a measure-free circuit, for DENSITY.
+
+        Computed on demand (not on every run) from the circuit captured when a
+        SET_DENSITY state was prepared.
+        """
+        try:
+            q2 = qc_sv.copy()
+            q2.save_density_matrix()
+            dm_backend = self._make_backend('density_matrix', include_noise=True)
+            _kw = {}
+            if self._seed is not None:
+                _kw['seed_simulator'] = self._seed
+            res = dm_backend.run(
+                transpile(q2, dm_backend, optimization_level=self._transpile_opt_level),
+                **_kw).result()
+            data = res.data(0)
+            dm = data.get('density_matrix') if hasattr(data, 'get') else None
+            return np.array(dm) if dm is not None else None
+        except Exception:
+            return None
+
     def _extract_statevector(self, qc_sv) -> None:
         """Run the measurement-free circuit copy to get last_sv.
 
@@ -1255,25 +1277,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         2^n statevector that cannot be displayed anyway.
         """
         if getattr(self, '_pending_set_density', None) is not None:
-            # Mixed state: no pure statevector. Capture the density matrix so
-            # DENSITY works after a measured run, not just a no-MEASURE one.
+            # Mixed state: no pure statevector. Defer the density-matrix solve
+            # to DENSITY (lazy) so a measured run does not pay for it unused;
+            # keep the measure-free circuit to solve from.
             self.last_sv = None
-            if self.num_qubits <= self._SV_EXTRACT_MAX_QUBITS:
-                try:
-                    qc_sv.save_density_matrix()
-                    dm_backend = self._make_backend('density_matrix', include_noise=True)
-                    _kw = {}
-                    if self._seed is not None:
-                        _kw['seed_simulator'] = self._seed
-                    dm_result = dm_backend.run(
-                        transpile(qc_sv, dm_backend,
-                                  optimization_level=self._transpile_opt_level),
-                        **_kw).result()
-                    data = dm_result.data(0)
-                    dm = data.get('density_matrix') if hasattr(data, 'get') else None
-                    self._last_density = np.array(dm) if dm is not None else None
-                except Exception:
-                    self._last_density = None
+            self._last_density = None
+            self._last_density_qc = (qc_sv if self.num_qubits <= self._SV_EXTRACT_MAX_QUBITS
+                                     else None)
             return
         if self.num_qubits > self._SV_EXTRACT_MAX_QUBITS:
             self.last_sv = None
@@ -1318,20 +1328,12 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         """Execute the no-MEASURE path: statevector (or density matrix), no shots."""
         too_large = self.num_qubits > self._SV_EXTRACT_MAX_QUBITS
         if getattr(self, '_pending_set_density', None) is not None and not too_large:
-            # A mixed state has no statevector, so capture the density matrix
-            # for DENSITY instead. Saving a statevector here used to raise an
-            # untranslatable-circuit error from Aer.
+            # A mixed state has no statevector. Defer the density solve to
+            # DENSITY (lazy); keep the measure-free circuit. Saving a statevector
+            # here used to raise an untranslatable-circuit error from Aer.
             self.last_sv = None
-            try:
-                qc_sv.save_density_matrix()
-                dm_backend = self._make_backend('density_matrix', include_noise=True)
-                dm_result = dm_backend.run(
-                    transpile(qc_sv, dm_backend, optimization_level=self._transpile_opt_level)).result()
-                data = dm_result.data(0)
-                dm = data.get('density_matrix') if hasattr(data, 'get') else None
-                self._last_density = np.array(dm) if dm is not None else None
-            except Exception:
-                self._last_density = None
+            self._last_density = None
+            self._last_density_qc = qc_sv
         elif too_large:
             self.last_sv = None
         else:
@@ -1969,7 +1971,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         total = 1
         for s in sizes:
             total *= s
-        self.arrays[name] = [0.0] * total
+        self.arrays[name] = [('' if name.endswith('$') else 0.0)] * total
         if len(sizes) > 1:
             self._array_dims[name] = sizes
         self._dimmed_arrays.add(name)

@@ -109,9 +109,12 @@ class AnalysisMixin:
 
     def cmd_density(self, rest: str = '') -> None:
         """Show density matrix (DENSITY [reg]); summarizes for large systems."""
-        # A mixed state set via SET_DENSITY has a stored density matrix and no
-        # statevector; display it directly.
+        # A mixed state set via SET_DENSITY has no statevector; solve its
+        # density matrix on demand (cached) from the captured circuit.
         dm = getattr(self, '_last_density', None)
+        if dm is None and getattr(self, '_last_density_qc', None) is not None:
+            dm = self._density_from_qc(self._last_density_qc)
+            self._last_density = dm
         if dm is not None and not rest.strip():
             rho = np.ascontiguousarray(dm)
             dim = rho.shape[0]

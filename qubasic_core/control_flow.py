@@ -102,9 +102,10 @@ class ControlFlowMixin:
         if idx < 0:
             raise RuntimeError(f"ARRAY INDEX OUT OF RANGE: {name}({idx + base})")
         dimmed = getattr(self, '_dimmed_arrays', set())
+        fill = '' if name.endswith('$') else 0.0   # string arrays default to ""
         if name not in self.arrays:
             # Implicit array: created (and allowed to grow) on first assignment.
-            self.arrays[name] = [0.0] * (idx + 1)
+            self.arrays[name] = [fill] * (idx + 1)
         elif idx >= len(self.arrays[name]):
             if name in dimmed:
                 # Explicitly DIMmed: writes are bounds-checked like reads,
@@ -113,7 +114,7 @@ class ControlFlowMixin:
                     f"ARRAY INDEX OUT OF RANGE: {name}({idx + base}), "
                     f"size {len(self.arrays[name])}")
             while idx >= len(self.arrays[name]):
-                self.arrays[name].append(0.0)
+                self.arrays[name].append(fill)
         self.arrays[name][idx] = val
         return True, ExecResult.ADVANCE
 

@@ -190,6 +190,15 @@ class ExpressionMixin:
                 return node.value
             raise ValueError(f"UNSUPPORTED CONSTANT: {node.value!r}")
         if isinstance(node, ast.Name):
+            # A mid-circuit measurement bit has no classical value (it is
+            # resolved per shot); reading it outside an IF feedforward is an
+            # error rather than a silent placeholder 0.
+            cb = getattr(self, '_classical_bits', None)
+            if cb and node.id in cb:
+                raise ValueError(
+                    f"'{node.id}' is a mid-circuit measurement bit; its value is "
+                    f"per-shot, so it can't be read in a classical expression "
+                    f"(use IF {node.id} for feedforward, or LOCC mode for a live value)")
             if node.id in ns:
                 return ns[node.id]
             raise ValueError(f"UNDEFINED: {node.id}")
@@ -215,18 +224,19 @@ class ExpressionMixin:
                 result = op(result, self._ast_eval(val, ns))
             return result
         if isinstance(node, ast.Compare):
-            # A chained comparison (a < b < c) is ambiguous: Python reads it as
-            # (a<b) and (b<c), BASIC as the left-to-right (a<b)<c. Rather than
-            # pick one silently, require it to be written explicitly.
-            if len(node.ops) > 1:
-                raise ValueError(
-                    "AMBIGUOUS CHAINED COMPARISON: write it explicitly, "
-                    "e.g. (a < b) AND (b < c)")
-            op = self._AST_OPS.get(type(node.ops[0]))
-            if op is None:
-                raise ValueError(f"UNSUPPORTED OP: {type(node.ops[0]).__name__}")
-            return op(self._ast_eval(node.left, ns),
-                      self._ast_eval(node.comparators[0], ns))
+            # Python-style chaining (a < b < c means (a<b) and (b<c)) so range
+            # checks like 0 <= x <= 10 work as written; results use BASIC truth
+            # values (-1 for true, 0 for false).
+            left = self._ast_eval(node.left, ns)
+            for op_node, comparator in zip(node.ops, node.comparators):
+                op = self._AST_OPS.get(type(op_node))
+                if op is None:
+                    raise ValueError(f"UNSUPPORTED OP: {type(op_node).__name__}")
+                right = self._ast_eval(comparator, ns)
+                if not op(left, right):
+                    return 0
+                left = right
+            return -1
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
                 raise ValueError("ONLY SIMPLE FUNCTION CALLS ALLOWED")

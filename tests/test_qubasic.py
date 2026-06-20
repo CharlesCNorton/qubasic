@@ -2138,7 +2138,9 @@ class TestDeepFixRegressions(unittest.TestCase):
         t.process('10 ID 0', track_undo=False)
         _, out = capture(t.cmd_run)
         self.assertNotIn('Unable to translate', out)
-        self.assertIsNotNone(getattr(t, '_last_density', None))
+        # Density is solved lazily: the measure-free circuit is captured now,
+        # and DENSITY computes the matrix on demand.
+        self.assertIsNotNone(getattr(t, '_last_density_qc', None))
         _, dout = capture(t.cmd_density, '')
         self.assertIn('Density matrix', dout)
 
@@ -2173,10 +2175,13 @@ class TestConventionFixesV2(unittest.TestCase):
         self.assertEqual(self.t.eval_expr('round(-2.5)'), -3.0)
         self.assertAlmostEqual(self.t.eval_expr('round(2.345, 2)'), 2.35)
 
-    def test_chained_comparison_raises(self):
-        self.assertTrue(bool(self.t._safe_eval('3 < 5')))
-        with self.assertRaises(ValueError):
-            self.t._safe_eval('1 < 2 < 3')
+    def test_comparison_truth_and_chaining(self):
+        # Comparisons yield BASIC truth values: -1 for true, 0 for false.
+        self.assertEqual(self.t._safe_eval('3 < 5'), -1)
+        self.assertEqual(self.t._safe_eval('3 > 5'), 0)
+        # Python-style chaining, so range checks work as written.
+        self.assertEqual(self.t._safe_eval('0 <= 5 <= 10'), -1)
+        self.assertEqual(self.t._safe_eval('0 <= 50 <= 10'), 0)
 
     def test_dim_inclusive_top_index(self):
         t = self._runp(['10 DIM a(5)', '20 LET a(5)=7', '30 LET v=a(5)'])
@@ -2202,6 +2207,24 @@ class TestConventionFixesV2(unittest.TestCase):
         capture(t.cmd_run)
         _, dout = capture(t.cmd_density, '')
         self.assertIn('Density matrix', dout)
+
+    def test_meas_bit_classical_use_errors(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        for l in ['10 X 0', '20 MEAS 0 -> m', '30 LET y = m + 1', '40 MEASURE']:
+            t.process(l, track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertIn('mid-circuit', out)
+
+    def test_string_array_default_empty(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.process('DIM s$(3)', track_undo=False)
+        self.assertEqual(t._safe_eval('s$(1)'), '')
+
+    def test_spec_statements_present(self):
+        from qubasic_core.cli import _SPEC_STATEMENTS
+        names = {n for (n, _s, _h) in _SPEC_STATEMENTS}
+        for op in ('QFT', 'MEAS', 'SYNDROME', 'EVOLVE', 'QADD'):
+            self.assertIn(op, names)
 
 
 if __name__ == '__main__':

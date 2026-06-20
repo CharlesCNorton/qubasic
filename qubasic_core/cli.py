@@ -26,6 +26,54 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
 from qubasic_core.terminal import QBasicTerminal
 from qubasic_core.program_mgmt import ProgramMgmtMixin
 
+# Statement-level operations that are parsed inline rather than dispatched as
+# REPL commands or gates, so they are absent from the command tables and the
+# gate table. Listed in --spec (name, signature, description) for agents.
+_SPEC_STATEMENTS = [
+    ('MEAS', 'MEAS <qubit> -> <bit>', 'mid-circuit measurement into a classical bit (drives IF feedforward)'),
+    ('MEASURE', 'MEASURE [qubit list]', 'measure all qubits, or a subset, into the result histogram'),
+    ('MEASURE_X', 'MEASURE_X <qubit>', 'measure in the X basis (result in mx_<q>)'),
+    ('MEASURE_Y', 'MEASURE_Y <qubit>', 'measure in the Y basis (result in my_<q>)'),
+    ('MEASURE_Z', 'MEASURE_Z <qubit>', 'measure in the Z basis (result in mz_<q>)'),
+    ('SYNDROME', 'SYNDROME <paulis> <qubits> -> <var>', 'non-destructive stabilizer measurement via an ancilla'),
+    ('RESET', 'RESET <qubit>', 'reset a qubit to |0>'),
+    ('BARRIER', 'BARRIER', 'optimization barrier'),
+    ('QFT', 'QFT <lo>-<hi>', 'quantum Fourier transform over a qubit range'),
+    ('IQFT', 'IQFT <lo>-<hi>', 'inverse quantum Fourier transform'),
+    ('DIFFUSE', 'DIFFUSE <lo>-<hi>', 'Grover diffusion operator'),
+    ('MCX', 'MCX <ctrl,...>, <target>', 'multi-controlled X'),
+    ('MCZ', 'MCZ <ctrl,...>', 'multi-controlled Z'),
+    ('MCP', 'MCP <theta>, <ctrl,...>, <target>', 'multi-controlled phase'),
+    ('QADD', 'QADD <a-range>, <b-range>', 'in-place register add A += B (mod 2^n)'),
+    ('QADDC', 'QADDC <k>, <range>', 'in-place constant add A += k (mod 2^n)'),
+    ('QPE', 'QPE <range> <target> <UGATE>', 'quantum phase estimation of a unitary'),
+    ('AMPLIFY', 'AMPLIFY <marked>', 'one amplitude-amplification (Grover) step'),
+    ('GRAPHSTATE', 'GRAPHSTATE <a-b, b-c, ...>', 'prepare a graph/cluster state'),
+    ('FEATUREMAP', 'FEATUREMAP <x0> <x1> ...', 'ZZ feature-map data encoding'),
+    ('EVOLVE', 'EVOLVE <H>, <time>, <steps>', 'Trotterized Hamiltonian time evolution'),
+    ('APPLYCHANNEL', 'APPLYCHANNEL <name> <qubit>', 'apply a defined Kraus channel'),
+    ('SAVE_EXPECT', 'SAVE_EXPECT <obs> <qubits> -> <var>', 'record an expectation value into a variable after RUN'),
+    ('SAVE_PROBS', 'SAVE_PROBS <qubits> -> <array>', 'record a probability snapshot into an array after RUN'),
+    ('SAVE_AMPS', 'SAVE_AMPS <lo>,<hi> -> <array>', 'record amplitudes into an array after RUN'),
+    ('CTRL', 'CTRL <gate> <ctrl>, <target>', 'controlled version of any gate'),
+    ('INV', 'INV <gate> <args>', 'inverse/dagger of a gate'),
+    ('UNITARY', 'UNITARY <NAME> = [[...]]', 'define a custom gate from a unitary matrix'),
+    ('GOTO', 'GOTO <line>', 'jump to a line number'),
+    ('GOSUB', 'GOSUB <line>', 'call a line block; RETURN resumes'),
+    ('FOR', 'FOR <v> = <a> TO <b> [STEP <s>]', 'counted loop, closed by NEXT'),
+    ('WHILE', 'WHILE <cond>', 'pre-test loop, closed by WEND'),
+    ('DO', 'DO [WHILE|UNTIL <cond>]', 'loop, closed by LOOP [WHILE|UNTIL]'),
+    ('IF', 'IF <cond> THEN <stmt> [ELSE <stmt>]', 'conditional (single-line, or block ending in END IF)'),
+    ('SELECT', 'SELECT CASE <expr>', 'multi-way branch (CASE / CASE ELSE / END SELECT)'),
+    ('DATA', 'DATA <v1>, <v2>, ...', 'inline data consumed by READ'),
+    ('READ', 'READ <var>, ...', 'read the next DATA values'),
+    ('DEF', 'DEF <NAME>[(p)] = <gates>', 'define a gate-sequence subroutine (also DEF FN, DEF BEGIN)'),
+    ('SUB', 'SUB <name>(<args>)', 'structured subroutine (END SUB; LOCAL/STATIC/SHARED)'),
+    ('FUNCTION', 'FUNCTION <name>(<args>)', 'function returning a value (END FUNCTION)'),
+    ('DIM', 'DIM <name>(<size>[,...])', 'declare an array (name$ for strings; inclusive sizing)'),
+    ('REDIM', 'REDIM [PRESERVE] <name>(<size>)', 'resize an array; PRESERVE keeps existing data'),
+]
+
 
 def run_script(path: str, terminal: 'QBasicTerminal') -> None:
     """Run a .qb script file. Supports multi-line DEF blocks.
@@ -100,20 +148,32 @@ def main():
         from qubasic_core.engine import GATE_TABLE
         from qubasic_core.expression import ExpressionMixin
 
-        def _help1(mname):
+        def _doc_parts(mname):
             doc = (getattr(getattr(QBasicTerminal, mname, None), '__doc__', '') or '').strip()
-            return doc.split('\n')[0].strip()
+            line = doc.split('\n')[0].strip()
+            # Docstrings format the first line as "SIGNATURE — description".
+            for sep in ('—', ' - '):
+                if sep in line:
+                    sig, _, hlp = line.partition(sep)
+                    return sig.strip(), hlp.strip()
+            return '', line
 
         cmds = []
         for tbl, takes in ((QBasicTerminal._CMD_WITH_ARG, True),
                            (QBasicTerminal._CMD_NO_ARG, False)):
             for cname, mname in tbl.items():
-                cmds.append({'name': cname, 'takes_arg': takes, 'help': _help1(mname)})
+                sig, hlp = _doc_parts(mname)
+                cmds.append({'name': cname, 'takes_arg': takes,
+                             'signature': sig or cname, 'help': hlp})
+        statements = [{'name': n, 'signature': s, 'help': h}
+                      for (n, s, h) in _SPEC_STATEMENTS]
         spec = {
             'name': 'qubasic',
             'version': __version__,
             'bit_order': 'little-endian (qubit 0 = rightmost bit)',
+            'true_value': -1,
             'commands': sorted(cmds, key=lambda c: c['name']),
+            'statements': sorted(statements, key=lambda s: s['name']),
             'gates': sorted(GATE_TABLE.keys()),
             'functions': sorted(
                 set(ExpressionMixin._SAFE_FUNCS)

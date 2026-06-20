@@ -113,8 +113,10 @@ class ExecutorMixin:
         self._classical_bits = {}
         # Partial-measurement subset (None = measure all at the end).
         self._measure_subset = None
-        # Density matrix captured by a no-MEASURE run (None unless set).
+        # Density matrix (and circuit) captured by a SET_DENSITY run; the
+        # matrix is solved lazily by DENSITY from the stored circuit.
         self._last_density = None
+        self._last_density_qc = None
         # Apply any qubit state preparation requested via POKE to $0100.
         if getattr(self, '_poke_state_prep', None):
             self._emit_poke_state_prep(qc)

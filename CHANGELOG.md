@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.14.0 (2026-06-19)
+
+Second audit-gap round: a complete agent contract, BASIC truth values, range
+comparisons, louder mid-circuit-bit handling, string-array defaults, and lazy
+density inspection. The quantum engine is unchanged.
+
+### Added
+- `qubasic --spec` now reports the full language surface: a `statements` section (QFT, MEAS, SYNDROME, EVOLVE, QADD, CTRL/INV, the control-flow keywords, ...) alongside commands, each with a `signature` field, plus `true_value: -1`.
+- `DIM s$(n)` declares a string array; unread elements default to `""` instead of `0.0`.
+
+### Changed
+- Comparisons return BASIC truth values: `-1` for true, `0` for false (so `LET t = (a > b)` is `-1`).
+- Comparison chaining is Python-style, so `0 <= x <= 10` reads as `(0 <= x) AND (x <= 10)`.
+- Reading a mid-circuit measurement bit (`MEAS`/`SYNDROME -> var`) in a classical expression now raises a clear error instead of silently using the placeholder 0; `IF <bit>` feedforward is unaffected.
+- `DENSITY` solves the density matrix lazily, on demand, instead of on every measured `SET_DENSITY` run.
+
 ## 0.13.0 (2026-06-19)
 
 Closes the remaining audit gaps in the classic-BASIC layer (conventions,

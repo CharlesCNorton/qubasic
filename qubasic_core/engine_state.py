@@ -57,8 +57,10 @@ class Engine:
         # Arrays declared with DIM/REDIM enforce their bounds on write;
         # arrays created implicitly by first assignment keep auto-growing.
         self._dimmed_arrays: set[str] = set()
-        # Density matrix captured by a no-MEASURE run with SET_DENSITY.
+        # Density matrix (and the measure-free circuit to solve it lazily)
+        # for a run with SET_DENSITY, computed on demand by DENSITY.
         self._last_density: Any = None
+        self._last_density_qc: Any = None
 
         # Subroutines and registers
         self.subroutines: dict[str, Any] = {}
@@ -119,6 +121,7 @@ class Engine:
         self._array_dims.clear()
         self._dimmed_arrays.clear()
         self._last_density = None
+        self._last_density_qc = None
         self.last_counts = None
         self.last_sv = None
         self.last_circuit = None

@@ -212,7 +212,7 @@ Functions and keywords are case-insensitive (`SQRT` and `sqrt` both work).
 
 ### Operators
 Arithmetic: `+`, `-`, `*`, `/`, `//`, `%`, `**`
-Comparison: `==`, `!=`, `<>`, `<`, `>`, `<=`, `>=`
+Comparison: `==`, `!=`, `<>`, `<`, `>`, `<=`, `>=` (yield -1 for true, 0 for false; chain Python-style, so `0 <= x <= 10` works)
 Logical: `AND`, `OR`, `NOT`, `XOR`
 Bitwise: `AND`, `OR`, `XOR` on integers (`6 AND 3` = 2); `NOT` is logical
 Hex/binary literals: `&HFF`, `&B10110`

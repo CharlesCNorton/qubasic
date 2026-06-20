@@ -17,7 +17,7 @@ RE_SHARE = re.compile(r'SHARE\s+([A-Z])\s+(\d+)\s*,?\s*([A-Z])\s+(\d+)', re.IGNO
 RE_MEAS = re.compile(r'MEAS\s+(\S+)\s*->\s*(\w+)', re.IGNORECASE)
 RE_RESET = re.compile(r'RESET\s+(\S+)', re.IGNORECASE)
 RE_UNITARY = re.compile(r'UNITARY\s+(\w+)\s*=\s*(\[.+\])', re.IGNORECASE)
-RE_DIM = re.compile(r'DIM\s+(\w+)\((\d+)\)', re.IGNORECASE)
+RE_DIM = re.compile(r'DIM\s+(\w+\$?)\((\d+)\)', re.IGNORECASE)
 RE_REDIM = re.compile(r'REDIM\s+(PRESERVE\s+)?(\w+)\((\d+)\)', re.IGNORECASE)
 RE_ERASE = re.compile(r'ERASE\s+(\w+)', re.IGNORECASE)
 RE_GET = re.compile(r'GET\s+(\w+\$?)', re.IGNORECASE)
@@ -100,7 +100,7 @@ RE_SCREEN = re.compile(r'SCREEN\s+(\d+)', re.IGNORECASE)
 RE_LPRINT = re.compile(r'LPRINT\s+(.*)', re.IGNORECASE)
 RE_ON_MEASURE = re.compile(r'ON\s+MEASURE\s+GOSUB\s+(\d+)', re.IGNORECASE)
 RE_ON_TIMER = re.compile(r'ON\s+TIMER\s*\((\d+)\)\s+GOSUB\s+(\d+)', re.IGNORECASE)
-RE_DIM_MULTI = re.compile(r'DIM\s+(\w+)\((\d+(?:\s*,\s*\d+)*)\)', re.IGNORECASE)
+RE_DIM_MULTI = re.compile(r'DIM\s+(\w+\$?)\((\d+(?:\s*,\s*\d+)*)\)', re.IGNORECASE)
 RE_LET_STR = re.compile(r'LET\s+(\w+\$)\s*=\s*(.*)', re.IGNORECASE)
 # Implicit LET: an assignment written without the LET keyword (x = 5, s$ = "hi",
 # a(1) = 5, p.x = 3). Anchored lvalue followed by a single '=' that is not part
