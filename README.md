@@ -45,6 +45,7 @@ python -m qubasic_core         Same, without installing
 qubasic script.qb             Run a script file
 qubasic --quiet script         Suppress banner, output results only
 qubasic --json script          Machine-readable JSON output
+qubasic --spec                Print a JSON contract (commands, gates, functions)
 qubasic --help                Show CLI help
 ```
 
@@ -223,12 +224,13 @@ DIM data(10)            1D array
 DIM matrix(3, 3)        Multi-dimensional (flat storage)
 LET data(0) = PI
 LET names$(0) = "alice" String array (name$ elements hold strings)
-REDIM data(20)          Resize (preserves existing data)
+REDIM data(20)          Resize, clearing to zeros
+REDIM PRESERVE data(20) Resize, keeping existing data
 ERASE data              Delete array
 OPTION BASE 1           Set array index base
 ```
 
-A `DIM`med array enforces its declared bounds on write; an undimensioned array grows on first assignment.
+`DIM a(n)` is inclusive: it spans indices base..n, so the declared top index is valid. A `DIM`med array enforces its declared bounds on write; an undimensioned array grows on first assignment.
 
 ## Control flow
 

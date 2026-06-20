@@ -2152,6 +2152,58 @@ class TestDeepFixRegressions(unittest.TestCase):
         self.assertEqual(t.eval_expr('sq(5)'), 25.0)
 
 
+class TestConventionFixesV2(unittest.TestCase):
+    """round half-away, chained-comparison guard, inclusive DIM, REDIM
+    PRESERVE, MEAS print hint, DENSITY after MEASURE."""
+
+    def setUp(self):
+        self.t = QBasicTerminal(); self.t.num_qubits = 1
+
+    def _runp(self, lines, nq=1):
+        t = QBasicTerminal(); t.num_qubits = nq
+        for l in lines:
+            t.process(l, track_undo=False)
+        _, out = capture(t.cmd_run)
+        t._out = out
+        return t
+
+    def test_round_half_away_from_zero(self):
+        self.assertEqual(self.t.eval_expr('round(2.5)'), 3.0)
+        self.assertEqual(self.t.eval_expr('round(3.5)'), 4.0)
+        self.assertEqual(self.t.eval_expr('round(-2.5)'), -3.0)
+        self.assertAlmostEqual(self.t.eval_expr('round(2.345, 2)'), 2.35)
+
+    def test_chained_comparison_raises(self):
+        self.assertTrue(bool(self.t._safe_eval('3 < 5')))
+        with self.assertRaises(ValueError):
+            self.t._safe_eval('1 < 2 < 3')
+
+    def test_dim_inclusive_top_index(self):
+        t = self._runp(['10 DIM a(5)', '20 LET a(5)=7', '30 LET v=a(5)'])
+        self.assertEqual(t.variables.get('v'), 7.0)
+        t2 = self._runp(['10 DIM a(5)', '20 LET a(6)=1'])
+        self.assertIn('OUT OF RANGE', t2._out)
+
+    def test_redim_clear_vs_preserve(self):
+        t = self._runp(['10 DIM a(3)', '20 LET a(1)=9', '30 REDIM a(5)', '40 LET v=a(1)'])
+        self.assertEqual(t.variables.get('v'), 0.0)
+        t2 = self._runp(['10 DIM a(3)', '20 LET a(1)=9', '30 REDIM PRESERVE a(5)', '40 LET v=a(1)'])
+        self.assertEqual(t2.variables.get('v'), 9.0)
+
+    def test_meas_print_hint(self):
+        t = self._runp(['10 X 0', '20 MEAS 0 -> m', '30 PRINT m', '40 MEASURE'])
+        self.assertIn('mid-circuit', t._out)
+
+    def test_density_after_measure(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.process('SET_DENSITY [[0.5,0],[0,0.5]]', track_undo=False)
+        for l in ['10 H 0', '20 MEASURE']:
+            t.process(l, track_undo=False)
+        capture(t.cmd_run)
+        _, dout = capture(t.cmd_density, '')
+        self.assertIn('Density matrix', dout)
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')

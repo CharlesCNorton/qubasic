@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.13.0 (2026-06-19)
+
+Closes the remaining audit gaps in the classic-BASIC layer (conventions,
+inspection, and an agent contract). The quantum engine is unchanged.
+
+### Added
+- `qubasic --spec` emits a machine-readable JSON contract (version, commands with arg flag and one-line help, gates, functions, constants, bit order) so an agent can load the exact surface of the installed version.
+- `REDIM PRESERVE name(n)` keeps existing elements; plain `REDIM` clears to zeros (QBASIC semantics).
+- `DENSITY` shows the density matrix after a measured `SET_DENSITY` run, not only a no-MEASURE one.
+
+### Changed
+- `DIM` uses inclusive sizing: `DIM a(n)` spans indices base..n (the declared top index is valid), matching QBASIC instead of the previous C-style element count.
+- `round()` rounds half away from zero (`round(2.5)` = 3), not Python's banker's rounding.
+- `STR$(n)` reserves a leading space for non-negative numbers (`STR$(42)` = " 42").
+- A chained comparison such as `a < b < c` now raises a clear "ambiguous" error instead of silently using Python chaining; write `(a < b) AND (b < c)`.
+- `PRINT`ing a mid-circuit measurement bit (`MEAS`/`SYNDROME -> var`) shows "mid-circuit bit, resolved per shot" rather than the placeholder 0.
+
 ## 0.12.0 (2026-06-19)
 
 Correctness and robustness pass on the classic-BASIC layer, from an extended

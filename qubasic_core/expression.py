@@ -124,6 +124,18 @@ def _basic_xor(a: Any, b: Any) -> int:
     return _as_int(a) ^ _as_int(b)
 
 
+def _basic_round(x: Any, ndigits: Any = None) -> float:
+    """Round half away from zero (BASIC convention), not Python's half-to-even.
+
+    round(2.5) == 3, round(-2.5) == -3, round(2.345, 2) == 2.35.
+    """
+    nd = int(ndigits) if ndigits is not None else 0
+    f = 10 ** nd
+    y = float(x) * f
+    r = math.floor(y + 0.5) if y >= 0 else math.ceil(y - 0.5)
+    return (r / f) if nd else float(r)
+
+
 class ExpressionMixin:
     """AST-based safe expression evaluation. No eval().
 
@@ -138,7 +150,7 @@ class ExpressionMixin:
         # INT floors toward negative infinity, as in QBASIC (INT(-3.2) = -4).
         # FIX truncates toward zero (FIX(-3.2) = -3) for the other convention.
         'abs': abs, 'int': math.floor, 'fix': math.trunc, 'float': float,
-        'min': min, 'max': max, 'round': round, 'len': len,
+        'min': min, 'max': max, 'round': _basic_round, 'len': len,
         'ceil': math.ceil, 'floor': math.floor,
     }
     _SAFE_CONSTS = {
@@ -203,16 +215,18 @@ class ExpressionMixin:
                 result = op(result, self._ast_eval(val, ns))
             return result
         if isinstance(node, ast.Compare):
-            left = self._ast_eval(node.left, ns)
-            for op_node, comparator in zip(node.ops, node.comparators):
-                op = self._AST_OPS.get(type(op_node))
-                if op is None:
-                    raise ValueError(f"UNSUPPORTED OP: {type(op_node).__name__}")
-                right = self._ast_eval(comparator, ns)
-                if not op(left, right):
-                    return False
-                left = right
-            return True
+            # A chained comparison (a < b < c) is ambiguous: Python reads it as
+            # (a<b) and (b<c), BASIC as the left-to-right (a<b)<c. Rather than
+            # pick one silently, require it to be written explicitly.
+            if len(node.ops) > 1:
+                raise ValueError(
+                    "AMBIGUOUS CHAINED COMPARISON: write it explicitly, "
+                    "e.g. (a < b) AND (b < c)")
+            op = self._AST_OPS.get(type(node.ops[0]))
+            if op is None:
+                raise ValueError(f"UNSUPPORTED OP: {type(node.ops[0]).__name__}")
+            return op(self._ast_eval(node.left, ns),
+                      self._ast_eval(node.comparators[0], ns))
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
                 raise ValueError("ONLY SIMPLE FUNCTION CALLS ALLOWED")

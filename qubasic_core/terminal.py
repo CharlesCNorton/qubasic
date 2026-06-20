@@ -1255,7 +1255,25 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         2^n statevector that cannot be displayed anyway.
         """
         if getattr(self, '_pending_set_density', None) is not None:
-            self.last_sv = None   # mixed state: no pure statevector to extract
+            # Mixed state: no pure statevector. Capture the density matrix so
+            # DENSITY works after a measured run, not just a no-MEASURE one.
+            self.last_sv = None
+            if self.num_qubits <= self._SV_EXTRACT_MAX_QUBITS:
+                try:
+                    qc_sv.save_density_matrix()
+                    dm_backend = self._make_backend('density_matrix', include_noise=True)
+                    _kw = {}
+                    if self._seed is not None:
+                        _kw['seed_simulator'] = self._seed
+                    dm_result = dm_backend.run(
+                        transpile(qc_sv, dm_backend,
+                                  optimization_level=self._transpile_opt_level),
+                        **_kw).result()
+                    data = dm_result.data(0)
+                    dm = data.get('density_matrix') if hasattr(data, 'get') else None
+                    self._last_density = np.array(dm) if dm is not None else None
+                except Exception:
+                    self._last_density = None
             return
         if self.num_qubits > self._SV_EXTRACT_MAX_QUBITS:
             self.last_sv = None
@@ -1943,13 +1961,17 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if not m:
             return False
         name = m.group(1)
+        base = getattr(self, '_option_base', 0)
         dims = [int(d.strip()) for d in m.group(2).split(',')]
+        # Inclusive sizing (QBASIC): DIM a(n) spans indices base..n, so the
+        # declared top index n is valid (n - base + 1 slots per dimension).
+        sizes = [max(0, d - base + 1) for d in dims]
         total = 1
-        for d in dims:
-            total *= d
+        for s in sizes:
+            total *= s
         self.arrays[name] = [0.0] * total
-        if len(dims) > 1:
-            self._array_dims[name] = dims
+        if len(sizes) > 1:
+            self._array_dims[name] = sizes
         self._dimmed_arrays.add(name)
         return True
 
@@ -1975,20 +1997,26 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         return True
 
     def _try_exec_redim(self, stmt: str) -> bool:
-        """Handle REDIM name(size) — resize an existing array."""
+        """Handle REDIM [PRESERVE] name(size) — resize an array.
+
+        Plain REDIM clears to zeros (QBASIC semantics); REDIM PRESERVE keeps the
+        existing elements. Sizing is inclusive (REDIM a(n) spans indices base..n).
+        """
         m = RE_REDIM.match(stmt)
         if not m:
             return False
-        name = m.group(1)
-        new_size = int(m.group(2))
+        preserve = bool(m.group(1))
+        name = m.group(2)
+        base = getattr(self, '_option_base', 0)
+        new_len = max(0, int(m.group(3)) - base + 1)
         old = self.arrays.get(name, [])
-        if isinstance(old, list):
-            if new_size > len(old):
-                self.arrays[name] = old + [0.0] * (new_size - len(old))
+        if preserve and isinstance(old, list):
+            if new_len > len(old):
+                self.arrays[name] = old + [0.0] * (new_len - len(old))
             else:
-                self.arrays[name] = old[:new_size]
+                self.arrays[name] = old[:new_len]
         else:
-            self.arrays[name] = [0.0] * new_size
+            self.arrays[name] = [0.0] * new_len
         self._dimmed_arrays.add(name)
         return True
 

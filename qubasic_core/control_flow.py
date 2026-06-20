@@ -184,6 +184,12 @@ class ControlFlowMixin:
         # Quoted literal: emit verbatim (no substitution, no SPC/TAB).
         if (item[0] == '"' and item[-1] == '"') or (item[0] == "'" and item[-1] == "'"):
             return item[1:-1]
+        # A mid-circuit measurement bit (MEAS/SYNDROME -> var) has no single
+        # value in standard mode; it is resolved per shot inside the if_test.
+        # Show that instead of the placeholder 0.
+        cb = getattr(self, '_classical_bits', None)
+        if cb and item in cb:
+            return f"<{item}: mid-circuit bit, resolved per shot>"
         text = self._substitute_vars(item, run_vars)
 
         def _spaces(m):

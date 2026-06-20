@@ -29,8 +29,11 @@ def _chr_fn(n: float) -> str:
     return chr(int(n))
 
 def _str_fn(n: float) -> str:
+    # BASIC reserves a leading space for the sign of a non-negative number,
+    # so STR$(42) is " 42" and STR$(-5) is "-5".
     v = float(n)
-    return str(int(v)) if v == int(v) else str(v)
+    s = str(int(v)) if v == int(v) else str(v)
+    return s if v < 0 else ' ' + s
 
 def _val_fn(s: str) -> float:
     try:

@@ -487,8 +487,9 @@ class TestStrings(unittest.TestCase):
         self.assertEqual(_instr("HELLO", "XYZ"), 0.0)
         self.assertEqual(_hex_fn(255), "FF")
         self.assertEqual(_bin_fn(5), "101")
-        self.assertEqual(_str_fn(42.0), "42")
-        self.assertEqual(_str_fn(3.14), "3.14")
+        self.assertEqual(_str_fn(42.0), " 42")    # leading space for non-negative
+        self.assertEqual(_str_fn(3.14), " 3.14")
+        self.assertEqual(_str_fn(-5.0), "-5")
         self.assertEqual(_val_fn("42"), 42.0)
         self.assertEqual(_val_fn("abc"), 0.0)
         self.assertEqual(_len_fn("HELLO"), 5.0)
@@ -1048,7 +1049,7 @@ class TestProgramManagement(unittest.TestCase):
         _, out = capture(t_dim.cmd_run)
         self.assertIn('matrix', t_dim.arrays)
         self.assertIsInstance(t_dim.arrays['matrix'], list)
-        self.assertEqual(len(t_dim.arrays['matrix']), 9)
+        self.assertEqual(len(t_dim.arrays['matrix']), 16)  # inclusive: (0..3)^2
 
         # DIM single
         t_dim2 = QBasicTerminal()
@@ -1056,7 +1057,7 @@ class TestProgramManagement(unittest.TestCase):
         t_dim2.process('20 END')
         capture(t_dim2.cmd_run)
         self.assertIn('arr', t_dim2.arrays)
-        self.assertEqual(len(t_dim2.arrays['arr']), 5)
+        self.assertEqual(len(t_dim2.arrays['arr']), 6)   # inclusive: indices 0..5
 
         # IMPORT namespace
         with tempfile.NamedTemporaryFile(mode='w', suffix='.qb', dir='.', delete=False) as f:
@@ -2305,20 +2306,26 @@ class TestGapCoverage(unittest.TestCase):
 
     # 16 REDIM
     def test_redim(self):
-        """REDIM resizes an existing array, preserving or truncating data."""
-        # DIM first
+        """REDIM resizes (inclusive sizing); plain clears, PRESERVE keeps."""
+        # DIM a(5) spans indices 0..5 -> 6 slots (inclusive sizing).
         self.t._try_exec_dim('DIM arr(5)')
-        self.assertEqual(len(self.t.arrays['arr']), 5)
-        # REDIM larger
+        self.assertEqual(len(self.t.arrays['arr']), 6)
+        self.t.arrays['arr'][2] = 99.0
+        # Plain REDIM clears to zeros.
         self.t._try_exec_redim('REDIM arr(8)')
-        self.assertEqual(len(self.t.arrays['arr']), 8)
-        self.assertEqual(self.t.arrays['arr'][:5], [0.0] * 5)
-        # REDIM smaller
-        self.t._try_exec_redim('REDIM arr(3)')
-        self.assertEqual(len(self.t.arrays['arr']), 3)
-        # REDIM non-existent array creates it
+        self.assertEqual(len(self.t.arrays['arr']), 9)
+        self.assertEqual(self.t.arrays['arr'][2], 0.0)
+        # REDIM PRESERVE keeps existing data.
+        self.t.arrays['arr'][1] = 7.0
+        self.t._try_exec_redim('REDIM PRESERVE arr(10)')
+        self.assertEqual(len(self.t.arrays['arr']), 11)
+        self.assertEqual(self.t.arrays['arr'][1], 7.0)
+        # PRESERVE smaller truncates.
+        self.t._try_exec_redim('REDIM PRESERVE arr(3)')
+        self.assertEqual(len(self.t.arrays['arr']), 4)
+        # REDIM on a non-existent array creates it.
         self.t._try_exec_redim('REDIM newary(4)')
-        self.assertEqual(len(self.t.arrays['newary']), 4)
+        self.assertEqual(len(self.t.arrays['newary']), 5)
 
 
 # =====================================================================

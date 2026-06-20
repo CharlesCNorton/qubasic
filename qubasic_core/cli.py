@@ -57,8 +57,9 @@ def main():
     quiet = '--quiet' in args or '-q' in args
     json_mode = '--json' in args
     agent_mode = '--agent' in args
+    spec_mode = '--spec' in args
     seed_val = None
-    for flag in ('--quiet', '-q', '--json', '--agent'):
+    for flag in ('--quiet', '-q', '--json', '--agent', '--spec'):
         args = [a for a in args if a != flag]
     # Parse --seed N
     filtered = []
@@ -91,6 +92,37 @@ def main():
         print("  python -m qubasic_core    Run without the installed console script")
         print()
         print("Type HELP inside the REPL for full command reference.")
+        sys.exit(0)
+
+    if spec_mode:
+        # Machine-readable contract for agents: commands, gates, functions,
+        # constants, and conventions for the installed version.
+        from qubasic_core.engine import GATE_TABLE
+        from qubasic_core.expression import ExpressionMixin
+
+        def _help1(mname):
+            doc = (getattr(getattr(QBasicTerminal, mname, None), '__doc__', '') or '').strip()
+            return doc.split('\n')[0].strip()
+
+        cmds = []
+        for tbl, takes in ((QBasicTerminal._CMD_WITH_ARG, True),
+                           (QBasicTerminal._CMD_NO_ARG, False)):
+            for cname, mname in tbl.items():
+                cmds.append({'name': cname, 'takes_arg': takes, 'help': _help1(mname)})
+        spec = {
+            'name': 'qubasic',
+            'version': __version__,
+            'bit_order': 'little-endian (qubit 0 = rightmost bit)',
+            'commands': sorted(cmds, key=lambda c: c['name']),
+            'gates': sorted(GATE_TABLE.keys()),
+            'functions': sorted(
+                set(ExpressionMixin._SAFE_FUNCS)
+                | {'RND', 'TIMER', 'POS', 'PEEK', 'USR', 'EOF', 'FRE',
+                   'LEFT$', 'RIGHT$', 'MID$', 'CHR$', 'STR$', 'HEX$', 'BIN$',
+                   'ASC', 'VAL', 'INSTR', 'LEN'}),
+            'constants': sorted(ExpressionMixin._SAFE_CONSTS.keys()),
+        }
+        print(_json.dumps(spec, indent=2))
         sys.exit(0)
 
     term = QBasicTerminal()
