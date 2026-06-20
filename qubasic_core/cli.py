@@ -38,8 +38,12 @@ def run_script(path: str, terminal: 'QBasicTerminal') -> None:
     ProgramMgmtMixin._load_lines_with_defs(
         lines, lambda line: terminal.process(line, track_undo=False))
 
-    # Auto-run if the program has a reachable MEASURE (incl. in subs / IF clauses)
-    if terminal.program and terminal._program_has_measure(sorted(terminal.program)):
+    # Auto-run if the program has a reachable MEASURE (incl. in subs / IF
+    # clauses), unless the script already issued an explicit RUN (which would
+    # otherwise execute and print the program twice).
+    explicit_run = any(l.strip().upper() == 'RUN' for l in lines)
+    if (terminal.program and not explicit_run
+            and terminal._program_has_measure(sorted(terminal.program))):
         terminal.cmd_run()
 
 
@@ -78,12 +82,13 @@ def main():
         print("Usage:")
         print("  qubasic                  Interactive REPL")
         print("  qubasic script.qb        Run a script file")
-        print("  qubasic --quiet script    Suppress banner and progress")
+        print("  qubasic --quiet script    Suppress banner and progress (also -q)")
         print("  qubasic --json script     Output results as JSON")
         print("  qubasic --agent script    Confine file writes to the working dir")
         print("  qubasic --seed N script   Set random seed for reproducibility")
-        print("  qubasic --version         Show version")
-        print("  qubasic --help            Show this help")
+        print("  qubasic --version         Show version (also -v)")
+        print("  qubasic --help            Show this help (also -h)")
+        print("  python -m qubasic_core    Run without the installed console script")
         print()
         print("Type HELP inside the REPL for full command reference.")
         sys.exit(0)

@@ -54,6 +54,11 @@ class Engine:
         self.variables: dict[str, Any] = {}
         self.arrays: dict[str, Any] = {}
         self._array_dims: dict[str, list[int]] = {}
+        # Arrays declared with DIM/REDIM enforce their bounds on write;
+        # arrays created implicitly by first assignment keep auto-growing.
+        self._dimmed_arrays: set[str] = set()
+        # Density matrix captured by a no-MEASURE run with SET_DENSITY.
+        self._last_density: Any = None
 
         # Subroutines and registers
         self.subroutines: dict[str, Any] = {}
@@ -112,6 +117,8 @@ class Engine:
         self.variables.clear()
         self.arrays.clear()
         self._array_dims.clear()
+        self._dimmed_arrays.clear()
+        self._last_density = None
         self.last_counts = None
         self.last_sv = None
         self.last_circuit = None

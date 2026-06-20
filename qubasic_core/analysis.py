@@ -109,6 +109,28 @@ class AnalysisMixin:
 
     def cmd_density(self, rest: str = '') -> None:
         """Show density matrix (DENSITY [reg]); summarizes for large systems."""
+        # A mixed state set via SET_DENSITY has a stored density matrix and no
+        # statevector; display it directly.
+        dm = getattr(self, '_last_density', None)
+        if dm is not None and not rest.strip():
+            rho = np.ascontiguousarray(dm)
+            dim = rho.shape[0]
+            self.io.writeln(f"\n  Density matrix ({dim}x{dim}):\n")
+            if dim <= 16:
+                for i in range(dim):
+                    row = []
+                    for j in range(dim):
+                        v = complex(rho[i, j])
+                        if abs(v.imag) < 1e-6:
+                            row.append(f"{v.real:7.3f}")
+                        else:
+                            row.append(f"{v.real:+.2f}{v.imag:+.2f}j")
+                    self.io.writeln(f"    {'  '.join(row)}")
+            else:
+                self.io.writeln(f"    ({dim}x{dim}, too large to display)")
+            self.io.writeln(f"\n  Purity: {float(np.real(np.trace(rho @ rho))):.6f}")
+            self.io.writeln('')
+            return
         sv, n, rest = self._resolve_analysis_target(rest)
         if sv is None:
             if self.locc_mode and self.locc and not self.locc.joint:

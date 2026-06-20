@@ -915,6 +915,18 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if upper.startswith('BEGIN'):
             return self._def_multiline(rest[5:].strip())
 
+        # DEF FN name(params) = expr — a user expression function, same as the
+        # in-program form, so it works at the prompt too.
+        if upper.startswith('FN'):
+            from qubasic_core.patterns import RE_DEF_FN
+            fm = RE_DEF_FN.match(f"DEF {rest}")
+            if fm:
+                fparams = [p.strip() for p in fm.group(2).split(',') if p.strip()]
+                self._user_fns['FN' + fm.group(1).upper()] = {
+                    'params': fparams, 'body': fm.group(3).strip()}
+                self.io.writeln(f"DEF FN {fm.group(1).upper()}({', '.join(fparams)})")
+                return
+
         m = RE_DEF_SINGLE.match(rest)
         if not m:
             self.io.writeln("?USAGE: DEF NAME[(params)] = GATE : GATE : ...")
@@ -1067,7 +1079,11 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             parsed = LetArrayStmt(raw=f"LET {rest}", name=name,
                                   index_expr=idx_expr, value_expr=val_expr)
             self._cf_let_array(f"LET {rest}", self.variables, parsed)
-            self.io.writeln(f"{name}({idx_expr.strip()}) = {self.eval_expr(val_expr)}")
+            shown = (self._eval_string_expr(val_expr) if name.endswith('$')
+                     else self.eval_expr(val_expr))
+            self.io.writeln(f"{name}({idx_expr.strip()}) = {shown!r}"
+                            if isinstance(shown, str)
+                            else f"{name}({idx_expr.strip()}) = {shown}")
             return
         sm = RE_LET_STR.match(f"LET {rest}")
         if sm:
@@ -1122,7 +1138,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             'trace_mode': bool(getattr(self, '_trace_mode', False)),
             'bank': getattr(self, '_current_slot', 0),
             'program_lines': len(self.program),
-            'variables': len(self.variables),
+            'variables': sum(1 for k in self.variables if not k.startswith('_')),
             'arrays': len(self.arrays),
             'subroutines': len(self.subroutines),
             'custom_gates': sorted(self._custom_gates.keys()),
@@ -1281,9 +1297,24 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         }
 
     def _run_no_measure(self, qc, qc_sv, t0: float) -> None:
-        """Execute the no-MEASURE path: statevector only, no shots."""
+        """Execute the no-MEASURE path: statevector (or density matrix), no shots."""
         too_large = self.num_qubits > self._SV_EXTRACT_MAX_QUBITS
-        if too_large:
+        if getattr(self, '_pending_set_density', None) is not None and not too_large:
+            # A mixed state has no statevector, so capture the density matrix
+            # for DENSITY instead. Saving a statevector here used to raise an
+            # untranslatable-circuit error from Aer.
+            self.last_sv = None
+            try:
+                qc_sv.save_density_matrix()
+                dm_backend = self._make_backend('density_matrix', include_noise=True)
+                dm_result = dm_backend.run(
+                    transpile(qc_sv, dm_backend, optimization_level=self._transpile_opt_level)).result()
+                data = dm_result.data(0)
+                dm = data.get('density_matrix') if hasattr(data, 'get') else None
+                self._last_density = np.array(dm) if dm is not None else None
+            except Exception:
+                self._last_density = None
+        elif too_large:
             self.last_sv = None
         else:
             try:
@@ -1919,6 +1950,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self.arrays[name] = [0.0] * total
         if len(dims) > 1:
             self._array_dims[name] = dims
+        self._dimmed_arrays.add(name)
         return True
 
     def _try_exec_dim_type(self, stmt: str) -> bool:
@@ -1957,6 +1989,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 self.arrays[name] = old[:new_size]
         else:
             self.arrays[name] = [0.0] * new_size
+        self._dimmed_arrays.add(name)
         return True
 
     def _try_exec_erase(self, stmt: str) -> bool:
@@ -1967,6 +2000,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         name = m.group(1)
         if name in self.arrays:
             del self.arrays[name]
+        self._array_dims.pop(name, None)
+        self._dimmed_arrays.discard(name)
         return True
 
     def _try_exec_get(self, stmt: str, run_vars: dict) -> bool:

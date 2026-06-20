@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.0 (2026-06-19)
+
+Correctness and robustness pass on the classic-BASIC layer, from an extended
+adversarial audit. The quantum engine is unchanged.
+
+### Fixed
+- `SHARED` variables in a `SUB` now propagate their modifications back to the caller instead of being discarded when the call's scope is restored (an accumulator across two calls now sums correctly: `8`, not `3`).
+- `RESTORE` resets the `DATA` read pointer inside a program; it was a no-op, so a `READ` after `RESTORE` raised `OUT OF DATA`.
+- Writes to an explicitly `DIM`med array are bounds-checked like reads instead of silently auto-extending past the declared size. Implicit (undimensioned) arrays still grow on first assignment.
+- String arrays work: `LET s$(i) = ...` stores and reads string elements.
+- `SET_DENSITY` followed by inspection without a `MEASURE` no longer raises a raw "unable to translate" error from Aer; the density matrix is captured and shown by `DENSITY`.
+- A script that issues an explicit `RUN` and also contains a `MEASURE` no longer auto-runs (and prints) the program a second time.
+
+### Changed
+- `STATUS` reports the user-variable count only, excluding the internal `_DEPTH`/`_GATES`/`_TIME` set after a run.
+- `DEF FN name(x) = expr` now works at the prompt (immediate mode), matching the in-program form.
+- `HELP` refreshed (`STATUS`, `INT` floors / `FIX` truncates, implicit `LET`, `<>`/`XOR`, corrected `MEAS`); `--help` notes the `-q`/`-v`/`-h` short flags and `python -m qubasic_core`.
+
 ## 0.11.1 (2026-06-19)
 
 ### Fixed

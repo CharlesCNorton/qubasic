@@ -113,6 +113,8 @@ class ExecutorMixin:
         self._classical_bits = {}
         # Partial-measurement subset (None = measure all at the end).
         self._measure_subset = None
+        # Density matrix captured by a no-MEASURE run (None unless set).
+        self._last_density = None
         # Apply any qubit state preparation requested via POKE to $0100.
         if getattr(self, '_poke_state_prep', None):
             self._emit_poke_state_prep(qc)
@@ -289,6 +291,7 @@ class ExecutorMixin:
         # 3. Remaining statement handlers (not in control-flow dispatch)
         from qubasic_core.statements import RestoreStmt
         if isinstance(parsed, RestoreStmt):
+            self._data_ptr = 0   # reset the DATA read pointer (was a no-op)
             return ExecResult.ADVANCE
 
         # Multi-line IF block markers — no-ops during execution

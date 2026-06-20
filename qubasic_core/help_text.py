@@ -42,7 +42,7 @@ REGISTERS & SUBROUTINES
   DEFS                List subroutines
 
 VARIABLES & LOOPS
-  LET angle = PI/4    Set a variable
+  LET angle = PI/4    Set a variable (LET optional: x = 5 also works)
   10 RX angle, 0      Use in gate parameters
   10 FOR I = 0 TO 3   Loop (variable substitution in body)
   20   H I
@@ -62,6 +62,7 @@ CONFIGURATION
   SHOTS n             Set number of shots (default: 1024)
   METHOD name         Set simulation method (automatic, statevector,
                       matrix_product_state, stabilizer, ...)
+  STATUS [JSON]       Show every active mode (qubits, method, LOCC, noise, ...)
 
 DEMOS
   DEMO LIST           List available demos
@@ -141,7 +142,7 @@ INLINE CIRCUIT INSTRUCTIONS (in programs, results available after RUN)
   SAVE_EXPECT ZZ 0,1 -> v   Expectation value -> variable
   SAVE_PROBS 0,1 -> p       Probability snapshot -> array
   SAVE_AMPS 0,3 -> a        Specific amplitudes -> array
-  MEAS qubit -> var          Mid-circuit measurement (LOCC mode)
+  MEAS qubit -> var          Mid-circuit measurement + IF feedforward (any mode)
   MEASURE_X/Y/Z qubit       Basis measurement
 
 FLOW CONTROL (in programs)
@@ -162,8 +163,8 @@ FLOW CONTROL (in programs)
   LET arr[i] = val        Array assignment
 
 EXPRESSIONS
-  PI, TAU, E, SQRT2, sin(), cos(), sqrt(), log(), etc.
-  Comparisons: ==, !=, <, >, <=, >=, AND, OR, NOT
+  PI, TAU, E, SQRT2, sin(), cos(), sqrt(), log(), int() floors, fix() truncates
+  Comparisons: ==, !=, <>, <, >, <=, >=    Logical/bitwise: AND, OR, NOT, XOR
   Arrays: arr(i) or arr[i]
   Example: LET theta = PI/4 + asin(0.5)
 """

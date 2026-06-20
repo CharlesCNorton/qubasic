@@ -27,6 +27,9 @@ class SubroutineMixin:
         self._static_vars: dict[str, dict[str, Any]] = {'_GLOBAL': {}}
         self._call_stack: list[dict[str, Any]] = []
         self._func_call_depth: int = 0
+        # Names declared SHARED in the current scope level, so their
+        # modifications survive _pop_scope instead of being discarded.
+        self._shared_stack: list[set[str]] = []
 
     def _scan_subs(self, sorted_lines: list[int]) -> None:
         """Scan program for SUB/FUNCTION blocks and build jump table."""
@@ -284,12 +287,15 @@ class SubroutineMixin:
             if vname in self._scope_stack[-1]:
                 run_vars[vname] = self._scope_stack[-1].get(vname, 0)
                 self.variables[vname] = run_vars[vname]
+                if self._shared_stack:
+                    self._shared_stack[-1].add(vname)
         return True, ExecResult.ADVANCE
 
     # ── Scope management ───────────────────────────────────────────────
 
     def _push_scope(self) -> None:
         self._scope_stack.append(dict(self.variables))
+        self._shared_stack.append(set())
 
     def _pop_scope(self, frame: dict[str, Any] | None = None) -> None:
         # Save STATIC vars for the current frame before restoring outer scope.
@@ -303,5 +309,13 @@ class SubroutineMixin:
                 for vname in list(self._static_vars[sub_name]):
                     self._static_vars[sub_name][vname] = self.variables.get(vname, 0)
         if self._scope_stack:
+            # SHARED variables must keep the modifications made inside the
+            # call; capture them before restoring the caller snapshot and
+            # write them back, instead of discarding them with the snapshot.
+            shared = self._shared_stack.pop() if self._shared_stack else set()
+            shared_vals = {v: self.variables.get(v) for v in shared}
             self.variables.clear()
             self.variables.update(self._scope_stack.pop())
+            for v, val in shared_vals.items():
+                if val is not None:
+                    self.variables[v] = val

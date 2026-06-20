@@ -222,10 +222,13 @@ Hex/binary literals: `&HFF`, `&B10110`
 DIM data(10)            1D array
 DIM matrix(3, 3)        Multi-dimensional (flat storage)
 LET data(0) = PI
+LET names$(0) = "alice" String array (name$ elements hold strings)
 REDIM data(20)          Resize (preserves existing data)
 ERASE data              Delete array
 OPTION BASE 1           Set array index base
 ```
+
+A `DIM`med array enforces its declared bounds on write; an undimensioned array grows on first assignment.
 
 ## Control flow
 

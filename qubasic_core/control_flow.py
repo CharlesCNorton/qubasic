@@ -75,7 +75,11 @@ class ControlFlowMixin:
         name, idx_expr, val_expr = parsed.name, parsed.index_expr, parsed.value_expr
         self._assert_assignable(name)
         base = getattr(self, '_option_base', 0)
-        val = self._eval_with_vars(val_expr, run_vars)
+        # String arrays (name$) hold string values; numeric arrays hold floats.
+        if name.endswith('$'):
+            val = self._eval_string_expr(val_expr, run_vars)
+        else:
+            val = self._eval_with_vars(val_expr, run_vars)
         parts = self._split_arg_list(idx_expr)
         if len(parts) > 1:
             # Multi-dimensional write: flatten with the same stride convention
@@ -97,10 +101,19 @@ class ControlFlowMixin:
         idx = int(self._eval_with_vars(idx_expr, run_vars)) - base
         if idx < 0:
             raise RuntimeError(f"ARRAY INDEX OUT OF RANGE: {name}({idx + base})")
+        dimmed = getattr(self, '_dimmed_arrays', set())
         if name not in self.arrays:
+            # Implicit array: created (and allowed to grow) on first assignment.
             self.arrays[name] = [0.0] * (idx + 1)
-        while idx >= len(self.arrays[name]):
-            self.arrays[name].append(0.0)
+        elif idx >= len(self.arrays[name]):
+            if name in dimmed:
+                # Explicitly DIMmed: writes are bounds-checked like reads,
+                # instead of silently auto-extending past the declared size.
+                raise RuntimeError(
+                    f"ARRAY INDEX OUT OF RANGE: {name}({idx + base}), "
+                    f"size {len(self.arrays[name])}")
+            while idx >= len(self.arrays[name]):
+                self.arrays[name].append(0.0)
         self.arrays[name][idx] = val
         return True, ExecResult.ADVANCE
 

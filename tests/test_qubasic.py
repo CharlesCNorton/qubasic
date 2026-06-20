@@ -2096,6 +2096,62 @@ class TestConventionAndStateRegressions(unittest.TestCase):
         self.assertIsNotNone(t.last_counts)  # ran; not blocked as a "command"
 
 
+class TestDeepFixRegressions(unittest.TestCase):
+    """SHARED writeback, RESTORE, array write bounds, string arrays,
+    SET_DENSITY inspection, STATUS var count, immediate DEF FN."""
+
+    def _runp(self, lines, nq=1):
+        t = QBasicTerminal(); t.num_qubits = nq
+        for l in lines:
+            t.process(l, track_undo=False)
+        capture(t.cmd_run)
+        return t
+
+    def test_shared_writeback(self):
+        t = self._runp(['10 LET acc=0', '20 SUB ADD(n)', '30 SHARED acc',
+                        '40 LET acc=acc+n', '50 END SUB', '60 CALL ADD(5)',
+                        '70 CALL ADD(3)'])
+        self.assertEqual(t.variables.get('acc'), 8.0)
+
+    def test_restore_resets_data_pointer(self):
+        t = self._runp(['10 DATA 5', '20 READ a', '30 RESTORE', '40 READ b',
+                        '50 LET s=a+b'])
+        self.assertEqual(t.variables.get('s'), 10.0)
+
+    def test_dimmed_array_write_is_bounds_checked(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        for l in ['10 DIM a(3)', '20 LET a(99)=1']:
+            t.process(l, track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertIn('OUT OF RANGE', out)
+        # An implicit (undimensioned) array still auto-grows on write.
+        t2 = self._runp(['10 LET b(50)=7', '20 LET v=b(50)'])
+        self.assertEqual(t2.variables.get('v'), 7.0)
+
+    def test_string_array(self):
+        t = self._runp(['10 LET s$(0)="he"+"llo"', '20 LET t$=s$(0)'])
+        self.assertEqual(t.variables.get('t$'), 'hello')
+
+    def test_set_density_no_measure_does_not_crash(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.process('SET_DENSITY [[0.5,0],[0,0.5]]', track_undo=False)
+        t.process('10 ID 0', track_undo=False)
+        _, out = capture(t.cmd_run)
+        self.assertNotIn('Unable to translate', out)
+        self.assertIsNotNone(getattr(t, '_last_density', None))
+        _, dout = capture(t.cmd_density, '')
+        self.assertIn('Density matrix', dout)
+
+    def test_status_excludes_internal_vars(self):
+        t = self._runp(['10 H 0', '20 MEASURE'])
+        self.assertEqual(t._status_dict()['variables'], 0)
+
+    def test_immediate_def_fn(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        capture(t.cmd_def, 'FN sq(x) = x*x')
+        self.assertEqual(t.eval_expr('sq(5)'), 25.0)
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
