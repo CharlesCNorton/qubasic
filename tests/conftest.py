@@ -51,23 +51,10 @@ def buffer_terminal():
 
 @pytest.fixture
 def mock_aer(monkeypatch):
-    """Patch AerSimulator with a fast mock — use for non-quantum tests."""
+    """Patch AerSimulator with a fast mock — opt-in, for tests of REPL
+    plumbing that must not depend on simulation results."""
     from qubasic_core.mock_backend import patch_aer
     patch_aer(monkeypatch)
-
-
-@pytest.fixture(autouse=True)
-def _auto_mock_for_features(request, monkeypatch):
-    """Auto-apply mock AerSimulator for test_features.py tests.
-
-    Tests marked with @pytest.mark.real_sim skip the mock and use
-    the real Qiskit Aer simulator.
-    """
-    if 'test_features' in request.node.nodeid:
-        if request.node.get_closest_marker('real_sim'):
-            return  # skip mock for real-simulation tests
-        from qubasic_core.mock_backend import patch_aer
-        patch_aer(monkeypatch)
 
 
 def capture(func, *args, **kwargs):

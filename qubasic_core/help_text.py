@@ -28,8 +28,10 @@ GATES (immediate or in a program)
   SWAP 0, 1           Swap two qubits
   MEASURE             Add measurements (use in program)
 
-MULTI-GATE LINES
-  10 H 0 : CX 0,1    Multiple gates on one line with ':'
+MULTI-STATEMENT LINES
+  10 H 0 : CX 0,1    Several statements on one line with ':'
+  10 FOR I = 0 TO 3: H I: NEXT I     Loops on one line too
+  An IF owns the rest of its line: IF c THEN A: B ELSE C: D
 
 REGISTERS & SUBROUTINES
   REG data 3          Name a group of qubits
@@ -54,7 +56,8 @@ DISPLAY
   HIST                Show measurement histogram
   PROBS               Show probability distribution
   BLOCH [n]           ASCII Bloch sphere for qubit n (or all)
-  STEP                Step through program with state display
+  STEP                Step through program with state display (one live
+                      shot: MEAS collapses the state)
   CIRCUIT             Show circuit diagram
 
 CONFIGURATION
@@ -62,6 +65,7 @@ CONFIGURATION
   SHOTS n             Set number of shots (default: 1024)
   METHOD name         Set simulation method (automatic, statevector,
                       matrix_product_state, stabilizer, ...)
+  PRECISION SINGLE    complex64 amplitudes: half the memory (DOUBLE restores)
   STATUS [JSON]       Show every active mode (qubits, method, LOCC, noise, ...)
 
 DEMOS
@@ -101,8 +105,9 @@ BASIS MEASUREMENT
   MEASURE_Y qubit         Measure in Y basis (SDG+H before measure)
   MEASURE_Z qubit         Measure in Z basis (standard)
   Results stored in mx_<q>, my_<q>, mz_<q> variables.
-  In standard (Aer) mode measurement is deferred, so the result variable
-  reads 0 during the run; use LOCC mode for live mid-circuit outcomes.
+  IF <bit> THEN <gates> compiles to feedforward; any other use of a measured
+  bit (PRINT, LET, GOTO, loops) runs the program live, shot by shot, so the
+  variable holds the real outcome. Only the first shot prints.
 
 ERROR CORRECTION
   SYNDROME ZZ 0 1 -> s0   Measure Pauli stabilizer non-destructively
@@ -125,7 +130,7 @@ ADVANCED
   DECOMPOSE               Gate count breakdown
   EXPORT [file]           Export circuit as OpenQASM (not available in LOCC mode)
   CSV [file]              Export results as CSV (includes statevector if available)
-  RAM                     Memory budget and parallelism estimates (3x overhead)
+  RAM                     Memory model: widest run per precision, peak per run
   BENCH [n1 n2 ...]       Benchmark qubit scaling (default: 4 8 12 16 20 24 28)
   PEEK addr               Read memory-mapped address
   USR(addr)               Execute SYS routine, return top measurement as integer
@@ -142,8 +147,13 @@ INLINE CIRCUIT INSTRUCTIONS (in programs, results available after RUN)
   SAVE_EXPECT ZZ 0,1 -> v   Expectation value -> variable
   SAVE_PROBS 0,1 -> p       Probability snapshot -> array
   SAVE_AMPS 0,3 -> a        Specific amplitudes -> array
-  MEAS qubit -> var          Mid-circuit measurement + IF feedforward (any mode)
+  MEAS qubit -> var          Mid-circuit measurement (feedforward, or a live run)
   MEASURE_X/Y/Z qubit       Basis measurement
+
+LOGICAL QUBITS
+  LQUBITS 2 CODE STEANE PHYS 1e-3    Encoded [[7,1,3]] simulation of the program
+  LQUBITS 2 CODE SURFACE 5           Modeled code (per-op logical error channel)
+  LQUBITS OFF                        Back to physical qubits
 
 FLOW CONTROL (in programs)
   GOTO line               Jump to line
@@ -153,7 +163,7 @@ FLOW CONTROL (in programs)
   IF expr THEN / ... / END IF    Multi-line block
   IF ... ELSEIF ... ELSE  Chained conditions
   DO [WHILE|UNTIL] / LOOP  Pre/post-test loops
-  SELECT CASE / CASE / END SELECT
+  SELECT CASE / CASE 1, 2 / CASE 3 TO 8 / CASE IS > 8 / CASE ELSE / END SELECT
   SUB name(args) / END SUB      Subroutine with scope
   FUNCTION name(args) / END FUNCTION  Function with return value
   END                     Stop execution
@@ -164,7 +174,8 @@ FLOW CONTROL (in programs)
 
 EXPRESSIONS
   PI, TAU, E, SQRT2, sin(), cos(), sqrt(), log(), int() floors, fix() truncates
-  Comparisons: ==, !=, <>, <, >, <=, >=    Logical/bitwise: AND, OR, NOT, XOR
+  Comparisons: =, ==, <>, !=, <, >, <=, >=    Logical/bitwise: AND, OR, NOT, XOR
+  In a running program an unassigned variable reads 0 ("" for name$)
   Arrays: arr(i) or arr[i]
   Example: LET theta = PI/4 + asin(0.5)
 """

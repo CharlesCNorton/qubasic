@@ -104,7 +104,7 @@ class SweepMixin:
                     sweep_ys.append(top[1] / self.shots)
                 except Exception as e:
                     self.io.writeln(f"  {var}={val:8.4f}  ERROR: {e}")
-                if _prog is not None:
+                if _prog is not None and _ptask is not None:
                     _prog.advance(_ptask)
         finally:
             if _prog is not None:

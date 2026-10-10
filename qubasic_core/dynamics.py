@@ -27,6 +27,30 @@ _JUMP_OPS = {
     'N': np.array([[0, 0], [0, 1]], dtype=complex),    # number / dephasing-ish
 }
 
+# Widest register the exact (density-matrix) LINDBLAD path integrates.
+LINDBLAD_DENSE_MAX = 10
+
+
+def _add_sandwich(out: np.ndarray, rho: np.ndarray, m: np.ndarray, qubit: int, n: int) -> None:
+    """out += M rho M^dag for a single-qubit M on `qubit`, from views of the
+    quarter blocks of rho (no full-size temporaries)."""
+    hi, lo = 2 ** (n - 1 - qubit), 2 ** qubit
+    t = rho.reshape(hi, 2, lo, hi, 2, lo)
+    o = out.reshape(hi, 2, lo, hi, 2, lo)
+    nz = [(a, b) for a in range(2) for b in range(2) if m[a, b] != 0]
+    for a, b in nz:
+        for d, c in nz:
+            o[:, a, :, :, d, :] += (m[a, b] * np.conj(m[d, c])) * t[:, b, :, :, c, :]
+
+
+def _embed_sparse(op1: np.ndarray, qubit: int, n: int):
+    """A single-qubit operator on `qubit` of n qubits as a sparse matrix
+    (qubit 0 least significant)."""
+    import scipy.sparse as sp
+    return sp.kron(sp.kron(sp.identity(2 ** (n - 1 - qubit), format='csr'),
+                           sp.csr_matrix(op1)),
+                   sp.identity(2 ** qubit, format='csr'), format='csr')
+
 
 class DynamicsMixin:
     """Hamiltonian declaration, Trotter evolution, and Lindblad open dynamics.
@@ -157,15 +181,16 @@ class DynamicsMixin:
         """CHANNEL <name> = K0 ; K1 ; ... — define a quantum channel by its Kraus operators.
 
         Each Ki is a matrix literal (single- or multi-qubit). The CPTP condition
-        sum Ki^dag Ki = I is checked. Apply it with APPLYCHANNEL <name> <qubit(s)>;
-        a non-unitary channel routes the run through the density_matrix method."""
+        sum Ki^dag Ki = I is checked. Apply it with APPLYCHANNEL <name> <qubit(s)>:
+        shots sample it as quantum trajectories, and a run without MEASURE keeps
+        the mixed state for DENSITY."""
         m = re.match(r'(\w+)\s*=\s*(.+)$', rest.strip())
         if not m:
             self.io.writeln("?USAGE: CHANNEL <name> = <K0> ; <K1> ; ...")
             return
         name = m.group(1).upper()
         try:
-            ops = [np.array(self._parse_matrix(k.strip()), dtype=complex)
+            ops = [np.array(self._parse_matrix(k.strip()), dtype=np.complex128)
                    for k in m.group(2).split(';') if k.strip()]
             dim = ops[0].shape[0]
             check = sum(K.conj().T @ K for K in ops)
@@ -190,10 +215,9 @@ class DynamicsMixin:
             raise ValueError(f"unknown CHANNEL '{name}' (define one with CHANNEL {name} = ...)")
         qubits = [self._resolve_qubit(q) for q in m.group(2).replace(',', ' ').split()]
         from qiskit.quantum_info import Kraus
+        # Shots sample the channel as quantum trajectories; a run with no
+        # MEASURE keeps the mixed state for DENSITY.
         qc.append(Kraus(channels[name]).to_instruction(), qubits)
-        # A non-unitary channel needs a method that propagates mixed states.
-        if self.sim_method in ('automatic', 'statevector', 'stabilizer'):
-            self.sim_method = 'density_matrix'
         return True
 
     def cmd_hamiltonian(self, rest: str) -> None:
@@ -237,24 +261,15 @@ class DynamicsMixin:
 
     # ── Lindblad open-system evolution ──────────────────────────────────
 
-    def _embed_op(self, op1: np.ndarray, qubit: int) -> np.ndarray:
-        """Embed a single-qubit operator on `qubit` into the full n-qubit space."""
-        n = self.num_qubits
-        mats = [op1 if i == qubit else np.eye(2, dtype=complex) for i in range(n)]
-        # Qubit 0 is the least significant; build kron with qubit n-1 outermost.
-        full = np.array([[1]], dtype=complex)
-        for i in range(n - 1, -1, -1):
-            full = np.kron(full, mats[i])
-        return full
-
     def cmd_lindblad(self, rest: str) -> None:
         """LINDBLAD <H|NONE>, <time>, <steps>, <rate> <op> <q> [; ...] [TRAJ [n]] — open-system evolution.
 
         Integrates drho/dt = -i[H, rho] + sum_k g_k (L_k rho L_k^dag - {L_k^dag L_k, rho}/2)
         with RK4 from the current state (or |0...0>). Jump operators are single-qubit:
         SM (decay), SP (excite), X, Y, Z, N. Reports the final density matrix.
-        TRAJ switches to Monte Carlo wavefunction unraveling (statevector-sized,
-        default 200 trajectories), raising the ceiling from 5 to 15 qubits.
+        The density matrix is dense and every operator sparse, so the exact path
+        reaches 10 qubits. TRAJ switches to Monte Carlo wavefunction unraveling
+        (statevector-sized, default 200 trajectories) for up to 15 qubits.
         Example: LINDBLAD NONE, 1.0, 200, 1.0 SM 0"""
         ntraj = None
         m_traj = re.search(r'\bTRAJ(?:\s+(\d+))?\s*$', rest, re.IGNORECASE)
@@ -267,9 +282,10 @@ class DynamicsMixin:
             return
         n = self.num_qubits
         dim = 2 ** n
-        if ntraj is None and n > 5:
-            self.io.writeln(f"?LINDBLAD dense path is limited to 5 qubits ({dim}x{dim} rho); "
-                            f"append TRAJ for Monte Carlo wavefunction (up to 15)")
+        if ntraj is None and n > LINDBLAD_DENSE_MAX:
+            self.io.writeln(f"?LINDBLAD exact path is limited to {LINDBLAD_DENSE_MAX} qubits "
+                            f"({dim}x{dim} rho); append TRAJ for Monte Carlo wavefunction "
+                            f"(up to 15)")
             return
         if ntraj is not None and n > 15:
             self.io.writeln(f"?LINDBLAD TRAJ is limited to 15 qubits; have {n}")
@@ -278,13 +294,14 @@ class DynamicsMixin:
             self._lindblad_traj(parts, ntraj)
             return
         try:
+            import scipy.sparse as sp
             hname = parts[0].upper()
             if hname in ('NONE', '0', ''):
-                H = np.zeros((dim, dim), dtype=complex)
+                H = sp.csr_matrix((dim, dim), dtype=complex)
             else:
                 if hname not in self._hamiltonians:
                     raise ValueError(f"unknown HAMILTONIAN '{hname}'")
-                H = np.asarray(self._hamiltonians[hname].to_matrix(), dtype=complex)
+                H = sp.csr_matrix(self._hamiltonians[hname].to_matrix(sparse=True), dtype=complex)
             t = float(self._safe_eval(parts[1]))
             steps = max(1, int(self._safe_eval(parts[2])))
             jumps = []
@@ -297,21 +314,31 @@ class DynamicsMixin:
                 if opname not in _JUMP_OPS:
                     raise ValueError(f"unknown jump op '{opname}' (use {', '.join(_JUMP_OPS)})")
                 q = int(self._eval_with_vars(toks[2], {}))
-                jumps.append((np.sqrt(rate) * self._embed_op(_JUMP_OPS[opname], q)))
+                if not 0 <= q < n:
+                    raise ValueError(f"qubit {q} out of range (0-{n - 1})")
+                jumps.append((np.sqrt(rate) * _JUMP_OPS[opname], q))
             # Initial density matrix from the current statevector, else |0...0>.
             if self.last_sv is not None and np.asarray(self.last_sv).size == dim:
-                psi = np.ascontiguousarray(self.last_sv).ravel()
+                psi = np.ascontiguousarray(self.last_sv).ravel().astype(complex)
                 psi = psi / (np.linalg.norm(psi) or 1.0)
                 rho = np.outer(psi, psi.conj())
             else:
                 rho = np.zeros((dim, dim), dtype=complex)
                 rho[0, 0] = 1.0
-            precomp = [(L, L.conj().T @ L) for L in jumps]
+            # drho/dt = -i (H_eff rho - rho H_eff^dag) + sum_k L_k rho L_k^dag with
+            # H_eff = H - (i/2) sum_k L_k^dag L_k. rho stays Hermitian, so
+            # rho H_eff^dag = (H_eff rho)^dag; each L_k rho L_k^dag is a sum of
+            # quarter blocks of rho, one per pair of non-zero entries of L_k.
+            h_eff = sp.csr_matrix(H - 0.5j * sum(
+                (_embed_sparse(M.conj().T @ M, q, n) for M, q in jumps),
+                sp.csr_matrix((dim, dim), dtype=complex)))
 
             def drho(r):
-                out = -1j * (H @ r - r @ H)
-                for L, LdL in precomp:
-                    out += L @ r @ L.conj().T - 0.5 * (LdL @ r + r @ LdL)
+                out = h_eff @ r
+                out *= -1j
+                out += out.conj().T
+                for M, q in jumps:
+                    _add_sandwich(out, r, M, q, n)
                 return out
 
             dt = t / steps
@@ -337,8 +364,9 @@ class DynamicsMixin:
                         for j in range(dim))
                     self.io.writeln(f"    {row}")
             self.io.writeln(f"  Populations: " + ', '.join(
-                f"|{format(i, f'0{n}b')}>={pops[i]:.4f}" for i in range(dim) if pops[i] > 1e-4))
-            purity = float(np.real(np.trace(rho @ rho)))
+                f"|{self._bits(format(i, f'0{n}b'))}>={pops[i]:.4f}"
+                for i in range(dim) if pops[i] > 1e-4))
+            purity = float(np.vdot(rho, rho).real)      # Tr(rho^2) for Hermitian rho
             self.io.writeln(f"  Purity Tr(rho^2) = {purity:.6f}")
             for i in range(dim):
                 self.variables[f'_RHO{i}'] = float(pops[i])
@@ -435,7 +463,7 @@ class DynamicsMixin:
             top = np.argsort(pops)[::-1]
             shown = [i for i in top[:8] if pops[i] > 1e-4]
             self.io.writeln("  Populations: " + ', '.join(
-                f"|{format(i, f'0{n}b')}>={pops[i]:.4f}" for i in shown))
+                f"|{self._bits(format(int(i), f'0{n}b'))}>={pops[i]:.4f}" for i in shown))
             if dim <= 256:
                 for i in range(dim):
                     self.variables[f'_RHO{i}'] = float(pops[i])

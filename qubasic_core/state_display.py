@@ -31,7 +31,7 @@ class StateDisplayMixin:
         if sv is None:
             self.io.writeln("?NO STATE — RUN first")
             return
-        self._print_probs(sv)
+        self._print_probs(sv, self._active_nqubits)
 
     def cmd_bloch(self, rest: str) -> None:
         if self.locc_mode:

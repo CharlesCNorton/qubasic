@@ -30,8 +30,6 @@ class ProfilerMixin:
         self._profile_mode: bool = False
         self._profile_data: dict[int, dict[str, float]] = {}
         self._profile_start: float = 0.0
-        self._depth_counter: int = 0
-        self._gate_counter: int = 0
         self._stats_runs: list[dict[str, int]] = []
 
     # ── Profile mode ───────────────────────────────────────────────────
@@ -79,14 +77,6 @@ class ProfilerMixin:
             self.io.writeln(f"  {ln:>6}  {d['time_ms']:>9.2f}  {d['calls']:>6}  {d['gates']:>6}  {src}")
         self.io.writeln(f"\n  Total: {total_time:.2f} ms")
         self.io.writeln('')
-
-    # ── Gate/depth tracking ────────────────────────────────────────────
-
-    def _track_gate(self) -> None:
-        self._gate_counter += 1
-
-    def _track_depth(self, depth: int) -> None:
-        self._depth_counter = max(self._depth_counter, depth)
 
     # ── Statistics accumulator ─────────────────────────────────────────
 

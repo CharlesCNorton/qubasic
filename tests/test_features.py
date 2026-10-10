@@ -271,15 +271,8 @@ class TestClassicBasic(unittest.TestCase):
         t.process('60 PRINT i', track_undo=False)
         t.process('70 END', track_undo=False)
         _, out = capture(t.cmd_run)
-        # If EXIT WHILE works from IF THEN, i should be 3
-        # If it doesn't work, the program may loop or error
-        # Accept either "3" in output (success) or an error message (documented limitation)
-        if '3' in out:
-            pass  # EXIT WHILE worked
-        else:
-            # Document the limitation -- don't fail the test
-            self.assertIn('ERROR', out.upper(),
-                "EXIT WHILE in IF THEN neither worked nor produced an error")
+        self.assertEqual(out.split('\nRAN')[0].split(), ['3'])
+        self.assertEqual(t.variables['i'], 3)
 
     def test_print_using_edge_cases(self):
         """PRINT USING edge cases: normal format and wider field."""
@@ -1529,8 +1522,7 @@ class TestIntegration(unittest.TestCase):
         for state in ('00', '11'):
             self.assertGreater(counts.get(state, 0), 300)
 
-    # Grover correctness is tested in test_qubasic.py with real simulation;
-    # test_features.py runs under auto-mock which returns random counts.
+    # Grover correctness is tested in test_qubasic.py.
 
 
 # =====================================================================
@@ -1703,8 +1695,7 @@ class TestPropertyBased(unittest.TestCase):
             pass  # errors OK, crashes not
 
     @given(st.integers(min_value=1, max_value=8))
-    @settings(max_examples=5)
-    @unittest.skip("requires real simulation; test_features runs under auto-mock")
+    @settings(max_examples=5, deadline=None)
     def test_ghz_state_valid(self, n):
         """GHZ state on n qubits should produce only all-zeros or all-ones."""
         t = QBasicTerminal()
@@ -1721,10 +1712,10 @@ class TestPropertyBased(unittest.TestCase):
             t.cmd_run()
         finally:
             sys.stdout = old
-        if t.last_counts:
-            for state in t.last_counts:
-                self.assertTrue(all(c == state[0] for c in state),
-                    f"GHZ-{n} produced non-GHZ state: {state}")
+        self.assertEqual(sum(t.last_counts.values()), 100)
+        for state in t.last_counts:
+            self.assertTrue(all(c == state[0] for c in state),
+                f"GHZ-{n} produced non-GHZ state: {state}")
 
 
 # =====================================================================
@@ -2362,7 +2353,7 @@ class TestPropertyBasedExtended(unittest.TestCase):
     @given(st.text(min_size=0, max_size=80, alphabet=st.characters(
         whitelist_categories=('L', 'N', 'P', 'Z'),
         blacklist_characters='\x00')))
-    @hyp_settings(max_examples=80)
+    @hyp_settings(max_examples=80, deadline=None)
     def test_process_never_crashes(self, line):
         """process() should handle arbitrary text without crashing."""
         try:
@@ -2371,7 +2362,7 @@ class TestPropertyBasedExtended(unittest.TestCase):
             pass  # BYE/QUIT/EXIT raise these intentionally
 
     @given(st.integers(min_value=1, max_value=20))
-    @hyp_settings(max_examples=15)
+    @hyp_settings(max_examples=15, deadline=None)
     def test_for_loop_count(self, n):
         """FOR I = 0 TO n should iterate exactly n+1 times."""
         self.t.cmd_new(silent=True)

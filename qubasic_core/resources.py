@@ -16,6 +16,50 @@ import re
 
 import numpy as np
 
+# Surface-code logical error rate per code cycle, p_L = A (p / p_th)^((d+1)/2)
+# with A = 0.1 and p_th = 0.01 (Litinski, "A Game of Surface Codes", 2019),
+# shared by RESOURCES and the LQUBITS model.
+SC_A = 0.1
+SC_THRESHOLD = 0.01
+
+
+def surface_logical_rate(p: float, d: int) -> float:
+    """Logical error rate of a distance-d surface code at physical rate p."""
+    return SC_A * (p / SC_THRESHOLD) ** ((d + 1) / 2)
+
+
+def heavy_hex_edges(n: int) -> list[list[int]]:
+    """Undirected edges of an n-qubit connected piece of IBM's heavy-hex
+    lattice: the smallest odd-distance heavy-hex map with at least n qubits,
+    cut to the first n nodes in breadth-first order and relabelled 0..n-1."""
+    from collections import deque
+    from qiskit.transpiler import CouplingMap
+    d = 3
+    cm = CouplingMap.from_heavy_hex(d)
+    while cm.size() < n:
+        d += 2
+        cm = CouplingMap.from_heavy_hex(d)
+    adj: dict[int, set[int]] = {}
+    for a, b in cm.get_edges():
+        adj.setdefault(a, set()).add(b)
+        adj.setdefault(b, set()).add(a)
+    order: list[int] = []
+    seen = {0}
+    dq = deque([0])
+    while dq and len(order) < n:
+        u = dq.popleft()
+        order.append(u)
+        for v in sorted(adj.get(u, ())):
+            if v not in seen:
+                seen.add(v)
+                dq.append(v)
+    label = {old: i for i, old in enumerate(order)}
+    edges = set()
+    for a, b in cm.get_edges():
+        if a in label and b in label:
+            edges.add(tuple(sorted((label[a], label[b]))))
+    return [list(e) for e in sorted(edges)]
+
 
 class ResourceMixin:
     """Resource estimation, calibrated device models, and circuit optimization.
@@ -24,10 +68,8 @@ class ResourceMixin:
     self.build_circuit(), self._noise_model, self._coupling_map, self.io.
     """
 
-    # Standard surface-code parameters (circuit-level): threshold and the
-    # sub-threshold scaling p_L ~ A (p/p_th)^((d+1)/2).
-    _SC_THRESHOLD = 0.01
-    _SC_A = 0.03
+    _SC_THRESHOLD = SC_THRESHOLD
+    _SC_A = SC_A
 
     def cmd_resources(self, rest: str) -> None:
         """RESOURCES <target_logical_error> <physical_error> — fault-tolerant estimate.
@@ -49,9 +91,9 @@ class ResourceMixin:
                 return
             # Smallest odd d with A (p/p_th)^((d+1)/2) <= target.
             d = 1
-            while self._SC_A * (p / self._SC_THRESHOLD) ** ((d + 1) / 2) > target and d < 99:
+            while surface_logical_rate(p, d) > target and d < 99:
                 d += 2
-            pL = self._SC_A * (p / self._SC_THRESHOLD) ** ((d + 1) / 2)
+            pL = surface_logical_rate(p, d)
             n_logical = self.num_qubits
             phys_per_logical = 2 * d * d - 1
             data_qubits = n_logical * phys_per_logical
@@ -98,8 +140,9 @@ class ResourceMixin:
         OFF clears it."""
         parts = rest.split()
         if not parts:
-            cm = 'set' if self._coupling_map else 'none'
-            self.io.writeln(f"DEVICE: noise={'on' if self._noise_model else 'off'}, coupling={cm}")
+            coupling = 'set' if self._coupling_map else 'none'
+            self.io.writeln(f"DEVICE: noise={'on' if self._noise_model else 'off'}, "
+                            f"coupling={coupling}")
             return
         if parts[0].upper() in ('OFF', 'NONE'):
             self._noise_model = None
@@ -130,14 +173,27 @@ class ResourceMixin:
             elif topo == 'ring':
                 cm = [[i, (i + 1) % n] for i in range(n)]
             elif topo in ('heavyhex', 'heavy-hex'):
-                cm = [[i, i + 1] for i in range(n - 1)] + [[i, i + 2] for i in range(0, n - 2, 4)]
+                cm = heavy_hex_edges(n)
+            elif topo in ('all', 'full'):
+                cm = [[i, j] for i in range(n) for j in range(n) if i < j]
             else:
-                cm = [[i, j] for i in range(n) for j in range(n) if i != j]
+                raise ValueError(f"unknown topology '{topo}' (linear, ring, heavyhex, all)")
+            if n != self.num_qubits:
+                self.io.writeln(f"  (device has {n} qubits; QUBITS is {self.num_qubits})")
+            # 2-qubit noise only on coupled pairs: routing keeps every 2-qubit
+            # gate on an edge of the coupling map.
+            if topo not in ('all', 'full'):
+                nm = NoiseModel()
+                for q in range(n):
+                    nm.add_quantum_error(thermal_relaxation_error(t1, t2, t_1q), _1q, [q])
+                for a, b in cm:
+                    nm.add_quantum_error(err2, _2q, [a, b])
+                    nm.add_quantum_error(err2, _2q, [b, a])
             edges = []
             for a, b in cm:
                 edges += [[a, b], [b, a]]
             self._noise_model = nm
-            self._coupling_map = edges if topo != 'all' else None
+            self._coupling_map = edges if topo not in ('all', 'full') else None
             self._noise_spec = f"device {topo} T1={t1 * 1e6}us T2={t2 * 1e6}us"
             self._circuit_cache_key = None
             self.io.writeln(f"DEVICE {topo}: {n} qubits, T1={t1 * 1e6:.0f}us T2={t2 * 1e6:.0f}us, "

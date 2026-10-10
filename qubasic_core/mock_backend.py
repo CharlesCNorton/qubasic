@@ -37,9 +37,10 @@ class MockResult:
         sv = np.full(dim, 1.0 / np.sqrt(dim), dtype=complex)
         return sv
 
-    def data(self) -> dict:
-        """Return empty dict — no save instructions in mock."""
-        return {}
+    def data(self, *args) -> dict:
+        """A uniform saved state under the label RUN uses; no other saves."""
+        from qiskit.quantum_info import Statevector
+        return {'qb_state': Statevector(self.get_statevector())}
 
 
 class MockAerSimulator:

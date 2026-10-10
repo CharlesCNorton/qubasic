@@ -330,43 +330,52 @@ class QoLMixin:
             c2 = results[m2].get(s, 0)
             p1, p2 = c1 / total1, c2 / total2
             diff = p2 - p1
-            self.io.writeln(f"  |{s}\u27E9 {p1:>11.3%} {p2:>11.3%} {diff:>+7.3%}")
+            self.io.writeln(f"  |{self._bits(s)}\u27E9 {p1:>11.3%} {p2:>11.3%} {diff:>+7.3%}")
         self.io.writeln('')
 
     # ── #10: HEATMAP ─────────────────────────────────────────────────
 
     def cmd_heatmap(self, rest: str = '') -> None:
-        """HEATMAP — qubit-qubit entanglement entropy grid."""
+        """HEATMAP [CONCURRENCE] — pairwise correlation grid of the state.
+
+        Default cells show the quantum mutual information I(i:j) = S(i) + S(j)
+        - S(ij) in bits (0 to 2: classical and quantum correlation). HEATMAP
+        CONCURRENCE shows the Wootters concurrence instead (0 to 1: pairwise
+        entanglement only; a GHZ pair reads 0, a Bell pair 1)."""
         sv = self._active_sv
         if sv is None:
             self.io.writeln("?NO STATE -- RUN first")
             return
+        from qubasic_core import statetools as st
+        mode = 'concurrence' if rest.strip().upper().startswith('CONC') else 'mi'
         n = self._active_nqubits
         n_show = min(n, 12)
-        self.io.writeln(f"\n  Entanglement heatmap ({n_show} qubits):")
+        scale = 1.0 if mode == 'concurrence' else 2.0
+        title = ("pairwise concurrence, 0-1" if mode == 'concurrence'
+                 else "quantum mutual information I(i:j), 0-2 bits")
+        self.io.writeln(f"\n  Heatmap ({title}, {n_show} qubits):")
         _shades = ' \u2591\u2592\u2593\u2588'
-        header = '     ' + ''.join(f'{q:>4}' for q in range(n_show))
-        self.io.writeln(header)
-        sv_flat = np.ascontiguousarray(sv).ravel()
-        psi_t = sv_flat.reshape([2] * n)  # reshape once, reuse across all pairs
+        self.io.writeln('     ' + ''.join(f'{q:>6}' for q in range(n_show)))
+        cells: dict = {}
+        for qi in range(n_show):
+            for qj in range(qi + 1, n_show):
+                if mode == 'concurrence':
+                    v = st.concurrence(st.subsystem_rdm(sv, [qi, qj], n))
+                else:
+                    v = st.mutual_information(sv, qi, qj, n)
+                cells[(qi, qj)] = cells[(qj, qi)] = v
         for qi in range(n_show):
             row = f'  {qi:>2} '
             for qj in range(n_show):
                 if qi == qj:
-                    row += '  - '
+                    row += '     -'
                     continue
-                keep = sorted({qi, qj})
-                trace_out = [q for q in range(n) if q not in keep]
-                if trace_out:
-                    rho = np.tensordot(psi_t, psi_t.conj(), axes=(trace_out, trace_out))
-                else:
-                    rho = np.outer(sv_flat, sv_flat.conj())
-                rho = rho.reshape(4, 4)
-                ev = np.linalg.eigvalsh(rho)
-                ev = ev[ev > 1e-14]
-                S = -np.sum(ev * np.log2(ev)) if len(ev) > 0 else 0.0
-                idx = min(len(_shades) - 1, int(S * 2))
-                row += f' {_shades[idx]}{S:.0f} ' if S > 0.05 else '  . '
+                v = cells[(qi, qj)]
+                if v < 0.005:
+                    row += '     .'
+                    continue
+                shade = _shades[min(len(_shades) - 1, 1 + int(3 * v / scale))]
+                row += f' {shade}{v:4.2f}'
             self.io.writeln(row)
         self.io.writeln('')
 
@@ -385,23 +394,34 @@ class QoLMixin:
         delay = float(parts[4]) / 1000 if len(parts) > 4 else 0.3
         values = [start + (end - start) * i / max(1, steps - 1) for i in range(steps)]
 
-        for i, val in enumerate(values):
-            self.variables[var] = val
-            old_io = self.io
-            self.io = _NullIO()
-            try:
-                self.cmd_run()
-            finally:
-                self.io = old_io
-            if self.last_counts:
-                ranked = sorted(self.last_counts.items(), key=lambda x: -x[1])
-                total = sum(self.last_counts.values())
-                top = ranked[0]
-                bar = '\u2588' * int(30 * top[1] / total)
-                frame = f"\r  {var}={val:>8.3f}  |{top[0]}\u27E9 {top[1]/total:>5.1%} {bar:<30}"
-                old_io.write(frame)
-            time.sleep(delay)
+        had_prior, prior = var in self.variables, self.variables.get(var)
+        try:
+            for i, val in enumerate(values):
+                self.variables[var] = val
+                old_io = self.io
+                self.io = _NullIO()
+                try:
+                    self.cmd_run()
+                finally:
+                    self.io = old_io
+                if self.last_counts:
+                    ranked = sorted(self.last_counts.items(), key=lambda x: -x[1])
+                    total = sum(self.last_counts.values())
+                    top = ranked[0]
+                    bar = '\u2588' * int(30 * top[1] / total)
+                    frame = f"\r  {var}={val:>8.3f}  |{self._bits(top[0])}\u27E9 {top[1]/total:>5.1%} {bar:<30}"
+                    old_io.write(frame)
+                time.sleep(delay)
+        finally:
+            self._restore_var(var, had_prior, prior)
         self.io.writeln('')
+
+    def _restore_var(self, var: str, had_prior: bool, prior) -> None:
+        """Put a swept variable back the way the program had it."""
+        if had_prior:
+            self.variables[var] = prior
+        else:
+            self.variables.pop(var, None)
 
     # ── #13: QUIZ ─────────────────────────────────────────────────────
 
@@ -495,19 +515,23 @@ class QoLMixin:
         values = [start + (end - start) * i / max(1, steps - 1) for i in range(steps)]
 
         xs, ys = [], []
-        for val in values:
-            self.variables[var] = val
-            old_io = self.io
-            self.io = _NullIO()
-            try:
-                self.cmd_run()
-            finally:
-                self.io = old_io
-            if self.last_counts:
-                total = sum(self.last_counts.values())
-                top_state = max(self.last_counts, key=self.last_counts.get)
-                xs.append(val)
-                ys.append(self.last_counts[top_state] / total)
+        had_prior, prior = var in self.variables, self.variables.get(var)
+        try:
+            for val in values:
+                self.variables[var] = val
+                old_io = self.io
+                self.io = _NullIO()
+                try:
+                    self.cmd_run()
+                finally:
+                    self.io = old_io
+                if self.last_counts:
+                    total = sum(self.last_counts.values())
+                    top_state = max(self.last_counts, key=self.last_counts.get)
+                    xs.append(val)
+                    ys.append(self.last_counts[top_state] / total)
+        finally:
+            self._restore_var(var, had_prior, prior)
 
         if not xs:
             self.io.writeln("?No data to plot")
@@ -672,16 +696,18 @@ class QoLMixin:
     def cmd_clip(self, rest: str = '') -> None:
         """CLIP — copy last results to clipboard (if available)."""
         lines = []
+        sv = self._export_state() if not self.last_counts else None
         if self.last_counts:
             total = sum(self.last_counts.values())
             for s, c in sorted(self.last_counts.items(), key=lambda x: -x[1]):
-                lines.append(f"|{s}> {c}/{total} ({100*c/total:.1f}%)")
-        elif self.last_sv is not None:
-            n = self._active_nqubits
-            sv = np.ascontiguousarray(self.last_sv).ravel()
-            for i, a in enumerate(sv):
-                if abs(a) > 1e-8:
-                    lines.append(f"|{format(i, f'0{n}b')}> {a.real:+.4f}{a.imag:+.4f}j")
+                lines.append(f"|{self._bits(s)}> {c}/{total} ({100*c/total:.1f}%)")
+        elif sv is not None:
+            for row in self._amplitude_rows(sv, sep=' '):
+                if row.startswith('#'):
+                    lines.append(row)
+                    continue
+                state, re_, im_, _p = row.split(' ')
+                lines.append(f"|{state}> {float(re_):+.4f}{float(im_):+.4f}j")
         else:
             self.io.writeln("?NO RESULTS TO COPY")
             return

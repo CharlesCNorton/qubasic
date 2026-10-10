@@ -485,7 +485,8 @@ class FileIOMixin:
 
         Includes measurement counts, and statevector amplitudes if available.
         """
-        if self.last_counts is None and self.last_sv is None:
+        sv = self._export_state()
+        if self.last_counts is None and sv is None:
             self.io.writeln("?NO RESULTS — RUN first")
             return
         lines = []
@@ -494,15 +495,10 @@ class FileIOMixin:
             lines.append("state,count,probability")
             for state, count in sorted(self.last_counts.items(), key=lambda x: -x[1]):
                 lines.append(f"{self._bits(state)},{count},{count/total:.6f}")
-        if self.last_sv is not None:
+        if sv is not None:
             lines.append("")
             lines.append("state,amplitude_re,amplitude_im,probability")
-            sv = np.ascontiguousarray(self.last_sv).ravel()
-            for i, amp in enumerate(sv):
-                p = abs(amp)**2
-                if p > 1e-8:
-                    state = format(i, f'0{self.num_qubits}b')
-                    lines.append(f"{state},{amp.real:.8f},{amp.imag:.8f},{p:.8f}")
+            lines.extend(self._amplitude_rows(sv))
         if rest.strip():
             try:
                 path = self._sanitize_path(rest)
@@ -524,6 +520,35 @@ class FileIOMixin:
                 self.io.writeln(f"  {line}")
             if len(lines) > 20:
                 self.io.writeln(f"  ... ({len(lines)-20} more)")
+
+    # Amplitude rows written by CSV/CLIP: every non-zero amplitude up to this
+    # many, else this many of the most probable ones.
+    MAX_EXPORT_AMPLITUDES = 1 << 20
+
+    def _export_state(self):
+        """The state CSV/CLIP export: one already in memory, or (for up to 16
+        qubits) one computed on demand; a large deferred state is skipped."""
+        if self._last_sv is not None:
+            return self._last_sv
+        if self.num_qubits <= 16:
+            return self.last_sv
+        return None
+
+    def _amplitude_rows(self, sv, sep: str = ',') -> list[str]:
+        """'state,re,im,p' rows for non-zero amplitudes in OPTION ENDIAN order."""
+        from qubasic_core.statetools import nonzero_indices, top_k
+        flat = np.asarray(sv).reshape(-1)
+        n = int(flat.size).bit_length() - 1
+        idx, total = nonzero_indices(flat, 1e-4, self.MAX_EXPORT_AMPLITUDES)
+        note = []
+        if total > idx.size:
+            idx, _, _ = top_k(flat, self.MAX_EXPORT_AMPLITUDES, 1e-4)
+            idx = np.sort(idx)
+            note = [f"# {total} non-zero amplitudes; the {idx.size} most probable are listed"]
+        amps = flat[idx]
+        rows = [f"{self._bits(format(int(i), f'0{n}b'))}{sep}{a.real:.8f}{sep}{a.imag:.8f}"
+                f"{sep}{abs(a) ** 2:.8f}" for i, a in zip(idx, amps)]
+        return note + rows
 
     # ── File handles: OPEN, CLOSE, PRINT#, INPUT#, EOF, LPRINT ────────
 
@@ -625,6 +650,8 @@ class FileIOMixin:
         m = RE_PRINT_FILE.match(stmt)
         if not m:
             return False
+        if getattr(self.io, 'replay', False):
+            return True     # later live shots write nothing; the first shot did
         handle = int(m.group(1))
         data = m.group(2).strip()
         if handle not in self._file_handles:
@@ -685,6 +712,8 @@ class FileIOMixin:
         m = RE_LPRINT.match(stmt)
         if not m:
             return False
+        if getattr(self.io, 'replay', False):
+            return True
         data = m.group(1).strip()
         if (data.startswith('"') and data.endswith('"')):
             text = data[1:-1]

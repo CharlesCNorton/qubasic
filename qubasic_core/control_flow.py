@@ -21,8 +21,24 @@ from qubasic_core.statements import (
     SubStmt, EndSubStmt, FunctionStmt, EndFunctionStmt, CallStmt,
     LocalStmt, StaticStmt, SharedStmt,
     OnErrorStmt, ResumeStmt, ErrorStmt, AssertStmt, StopStmt,
-    OnMeasureStmt, OnTimerStmt,
+    OnMeasureStmt, OnTimerStmt, CompoundStmt,
 )
+
+
+class ResumePoint(int):
+    """A jump to statement `part` of a colon-compound on the line at index
+    int(self). The frame names the compound: ('line', ip) for a whole line,
+    ('clause', ip, text) for the clause of a single-line IF. Code that only
+    knows line indices reads it as that line's index."""
+
+    part: int
+    frame: tuple
+
+    def __new__(cls, ip: int, part: int, frame: tuple) -> 'ResumePoint':
+        obj = super().__new__(cls, ip)
+        obj.part = part
+        obj.frame = frame
+        return obj
 
 
 class ControlFlowMixin:
@@ -32,6 +48,130 @@ class ControlFlowMixin:
     self.arrays, self.locc_mode, self.locc, self._gosub_stack,
     self._eval_with_vars(), self._eval_condition(), self._substitute_vars().
     """
+
+    # The statement executing inside a colon-compound: (frame, part, parts),
+    # set by _run_compound; None outside one.
+    _cur_stmt: tuple | None = None
+
+    # ── Colon compounds and statement positions ─────────────────────
+
+    def _run_compound(self, parts: list[str], exec_part: Callable[[str], Any],
+                      loop_stack: list[dict[str, Any]], ip: int, frame: tuple,
+                      start: int = 0) -> Any:
+        """Run the statements of a colon-compound in order from `start`.
+
+        A loop opened here records its statement, so NEXT, WEND and LOOP
+        return to the statement after it, on this line or from a later one;
+        GOSUB returns to the statement after the GOSUB. A jump within this
+        compound continues here; any other jump, END or RETURN is returned."""
+        saved = self._cur_stmt
+        k = start
+        try:
+            while k < len(parts):
+                self._cur_stmt = (frame, k, parts)
+                result = exec_part(parts[k])
+                if result is None or result is ExecResult.ADVANCE:
+                    k += 1
+                elif isinstance(result, ResumePoint) and result.frame == frame:
+                    k = result.part
+                else:
+                    return result
+            return ExecResult.ADVANCE
+        finally:
+            self._cur_stmt = saved
+
+    def _resume_compound(self, rp: ResumePoint, parsed: Any, loop_stack: list[dict[str, Any]],
+                         ip: int, exec_part: Callable[[str], Any]) -> Any:
+        """Continue the compound a ResumePoint names, or None when the line
+        does not hold it (the caller then runs the line from its start)."""
+        if rp.frame[0] == 'clause':
+            clause = parse_stmt(rp.frame[2])
+            parts = list(clause.parts) if isinstance(clause, CompoundStmt) else [rp.frame[2]]
+        elif isinstance(parsed, CompoundStmt):
+            parts = list(parsed.parts)
+        else:
+            return None
+        return self._run_compound(parts, exec_part, loop_stack, ip, rp.frame, rp.part)
+
+    def _position(self, ip: int) -> tuple[tuple | None, int | None]:
+        """(frame, part) of the statement executing at line index ip."""
+        cur = self._cur_stmt
+        if cur is not None and cur[0][1] == ip:
+            return cur[0], cur[1]
+        return None, None
+
+    def _return_point(self, ip: int) -> int:
+        """Where GOSUB, ON GOSUB and CALL return: the next statement."""
+        cur = self._cur_stmt
+        if cur is not None and cur[0][1] == ip and cur[1] + 1 < len(cur[2]):
+            return ResumePoint(ip, cur[1] + 1, cur[0])
+        return ip + 1
+
+    def _mark_loop(self, entry: dict[str, Any], ip: int) -> dict[str, Any]:
+        """Record the compound statement a loop opens at, if any."""
+        frame, part = self._position(ip)
+        if frame is not None:
+            entry['frame'], entry['part'] = frame, part
+        return entry
+
+    @staticmethod
+    def _loop_body(loop: dict[str, Any]) -> int:
+        """Jump target for a loop's next pass: the statement after its opener."""
+        if 'frame' in loop:
+            return ResumePoint(loop['return_ip'], loop['part'] + 1, loop['frame'])
+        return loop['return_ip'] + 1
+
+    def _drop_loop(self, loop_stack: list[dict[str, Any]], kind: str, ip: int) -> None:
+        """Remove a stale entry for the loop opening here (re-entered by a
+        jump) along with every loop opened inside it."""
+        frame, part = self._position(ip)
+        for idx in range(len(loop_stack) - 1, -1, -1):
+            e = loop_stack[idx]
+            if (e.get('type') == kind and e.get('return_ip') == ip
+                    and e.get('frame') == frame and e.get('part') == part):
+                del loop_stack[idx:]
+                return
+
+    def _stmts_after(self, sorted_lines: list[int], ip: int):
+        """Statements after the one executing at line index ip, in program
+        order, as (ip, part, parsed, frame, n_parts); compounds flattened."""
+        cur = self._cur_stmt
+        if cur is not None and cur[0][1] == ip:
+            frame, k, parts = cur
+            for kk in range(k + 1, len(parts)):
+                yield ip, kk, parse_stmt(parts[kk]), frame, len(parts)
+        for j in range(ip + 1, len(sorted_lines)):
+            p = self._get_parsed(sorted_lines[j])
+            if isinstance(p, CompoundStmt):
+                for kk, part in enumerate(p.parts):
+                    yield j, kk, parse_stmt(part), ('line', j), len(p.parts)
+            else:
+                yield j, 0, p, None, 1
+
+    @staticmethod
+    def _after_stmt(j: int, kk: int, frame: tuple | None, n_parts: int) -> int:
+        """Jump target for the statement following (j, kk)."""
+        if frame is None or (kk + 1 >= n_parts and frame[0] == 'line'):
+            return j + 1
+        return ResumePoint(j, kk + 1, frame)
+
+    def _find_block_end(self, sorted_lines: list[int], ip: int, kind: str) -> int | None:
+        """Target just past the statement closing the innermost `kind` block
+        ('for', 'while', 'do') open at the current statement, or None."""
+        opener, closer = {'for': (ForStmt, NextStmt), 'while': (WhileStmt, WendStmt),
+                          'do': (DoStmt, LoopStmt)}[kind]
+        depth = 1
+        for j, kk, p, frame, n_parts in self._stmts_after(sorted_lines, ip):
+            if isinstance(p, opener):
+                depth += 1
+            elif isinstance(p, closer):
+                if kind == 'for':
+                    depth -= max(1, sum(1 for v in p.var.split(',') if v.strip()))
+                else:
+                    depth -= 1
+                if depth <= 0:
+                    return self._after_stmt(j, kk, frame, n_parts)
+        return None
 
     # ── Control flow helpers (decomposed from _exec_control_flow) ────
     #
@@ -101,7 +241,7 @@ class ControlFlowMixin:
         idx = int(self._eval_with_vars(idx_expr, run_vars)) - base
         if idx < 0:
             raise RuntimeError(f"ARRAY INDEX OUT OF RANGE: {name}({idx + base})")
-        dimmed = getattr(self, '_dimmed_arrays', set())
+        dimmed: set[str] = getattr(self, '_dimmed_arrays', set())
         fill = '' if name.endswith('$') else 0.0   # string arrays default to ""
         if name not in self.arrays:
             # Implicit array: created (and allowed to grow) on first assignment.
@@ -185,12 +325,16 @@ class ControlFlowMixin:
         # Quoted literal: emit verbatim (no substitution, no SPC/TAB).
         if (item[0] == '"' and item[-1] == '"') or (item[0] == "'" and item[-1] == "'"):
             return item[1:-1]
-        # A mid-circuit measurement bit (MEAS/SYNDROME -> var) has no single
-        # value in standard mode; it is resolved per shot inside the if_test.
-        # Show that instead of the placeholder 0.
+        # Quantum forms: STATE, QUBIT(q), ENTANGLEMENT(a, b), @REG.
+        quantum = self._try_quantum_print(item, run_vars)
+        if quantum is not None:
+            return quantum
+        # Printing a mid-circuit measurement bit makes the run go live.
         cb = getattr(self, '_classical_bits', None)
         if cb and item in cb:
-            return f"<{item}: mid-circuit bit, resolved per shot>"
+            from qubasic_core.live import MidCircuitRead
+            self._live_needed = True
+            raise MidCircuitRead(f"'{item}' is a mid-circuit measurement bit")
         text = self._substitute_vars(item, run_vars)
 
         def _spaces(m):
@@ -211,7 +355,25 @@ class ControlFlowMixin:
         # Quantum DATA tokens display in ket notation, not the storage form.
         if isinstance(val, str) and val.startswith('QSTATE:'):
             return f"|{val[7:]}>"
-        return str(val)
+        return self._basic_number(val)
+
+    @staticmethod
+    def _basic_number(val: Any) -> str:
+        """PRINT form of a value: numbers as BASIC prints them (a leading space
+        in place of a plus sign, a trailing space, whole numbers without a
+        decimal point); anything else as str()."""
+        if isinstance(val, bool) or not isinstance(val, (int, float)) and not (
+                hasattr(val, 'dtype') and getattr(val, 'ndim', 1) == 0
+                and val.dtype.kind in 'iuf'):
+            return str(val)
+        v = float(val)
+        if v != v or v in (float('inf'), float('-inf')):
+            text = str(v)
+        elif v.is_integer() and abs(v) < 1e15:
+            text = str(int(v))
+        else:
+            text = f"{v:.15g}".upper()
+        return ('' if v < 0 else ' ') + text + ' '
 
     def _cf_print(self, stmt: str, run_vars: dict[str, Any],
                   parsed: PrintStmt) -> tuple[bool, ExecOutcome]:
@@ -243,14 +405,14 @@ class ControlFlowMixin:
     def _cf_gosub(self, stmt: str, sorted_lines: list[int], ip: int,
                   parsed: GosubStmt) -> tuple[bool, int]:
         target = parsed.target
-        self._gosub_stack.append(ip + 1)
+        self._gosub_stack.append(self._return_point(ip))
         for idx, ln in enumerate(sorted_lines):
             if ln == target:
                 return True, idx
         raise RuntimeError(f"GOSUB {target}: LINE NOT FOUND")
 
     def _cf_for(self, stmt: str, run_vars: dict[str, Any], loop_stack: list[dict[str, Any]], ip: int,
-                parsed: ForStmt) -> tuple[bool, ExecOutcome]:
+                parsed: ForStmt, sorted_lines: list[int] | None = None) -> tuple[bool, ExecOutcome]:
         var = parsed.var
         start_expr, end_expr, step_expr = parsed.start_expr, parsed.end_expr, parsed.step_expr
         start = self._eval_with_vars(start_expr, run_vars)
@@ -272,76 +434,77 @@ class ControlFlowMixin:
             pass
         run_vars[var] = start
         self.variables[var] = start
-        loop_stack.append({'var': var, 'current': start, 'end': end,
-                           'step': step, 'return_ip': ip})
+        # A FOR reached again by a jump replaces its stale entry, along with
+        # any loops opened inside it.
+        for idx in range(len(loop_stack) - 1, -1, -1):
+            if loop_stack[idx].get('var') == var:
+                del loop_stack[idx:]
+                break
+        # Zero-trip: a range the step cannot reach skips the body entirely.
+        if (step > 0 and start > end) or (step < 0 and start < end):
+            target = (self._find_block_end(sorted_lines, ip, 'for')
+                      if sorted_lines is not None else None)
+            if target is None:
+                raise RuntimeError(f"FOR {var} without NEXT")
+            return True, target
+        loop_stack.append(self._mark_loop(
+            {'var': var, 'current': start, 'end': end, 'step': step, 'return_ip': ip}, ip))
         return True, ExecResult.ADVANCE
 
     def _cf_next(self, stmt: str, run_vars: dict[str, Any], loop_stack: list[dict[str, Any]],
                  parsed: NextStmt) -> tuple[bool, ExecOutcome]:
         # Supports bare ``NEXT`` (close the innermost FOR) and ``NEXT i, j``
-        # (close i, then j). Each named variable must match the FOR on top of
-        # the loop stack at that point.
+        # (close i, then j). A named NEXT closes any loops still open inside
+        # its FOR (left by a jump out of them).
         names = [v.strip() for v in parsed.var.split(',')] if parsed.var.strip() else ['']
         for name in names:
-            if not loop_stack or loop_stack[-1].get('var') is None:
+            idx = len(loop_stack) - 1
+            while idx >= 0 and (loop_stack[idx].get('var') is None
+                                or (name and loop_stack[idx]['var'] != name)):
+                idx -= 1
+            if idx < 0:
                 raise RuntimeError(f"NEXT {name}".rstrip() + " without matching FOR")
+            del loop_stack[idx + 1:]
             loop = loop_stack[-1]
             cur_var = loop['var']
-            if name and cur_var != name:
-                raise RuntimeError(f"NEXT {name} does not match current FOR {cur_var}")
             loop['current'] += loop['step']
+            # The counter takes the stepped value even when the loop ends, so
+            # after FOR i = 1 TO 10 runs out, i is 11 (as in QBASIC).
+            run_vars[cur_var] = loop['current']
+            self.variables[cur_var] = loop['current']
             if (loop['step'] > 0 and loop['current'] <= loop['end']) or \
                (loop['step'] < 0 and loop['current'] >= loop['end']):
-                run_vars[cur_var] = loop['current']
-                self.variables[cur_var] = loop['current']
-                return True, loop['return_ip'] + 1
+                return True, self._loop_body(loop)
             loop_stack.pop()
         return True, ExecResult.ADVANCE
-
-    def _find_matching_wend(self, sorted_lines: list[int], ip: int) -> int:
-        """Find the ip after the WEND matching the WHILE at ip.
-
-        Uses pre-computed jump table when available (O(1)), falls back
-        to linear scan with nesting depth tracking.
-        """
-        jt = getattr(self, '_jump_table', None)
-        if jt and ip in jt:
-            return jt[ip] + 1
-        depth = 1
-        scan = ip + 1
-        while scan < len(sorted_lines):
-            s = self.program[sorted_lines[scan]].strip().upper()
-            if s.startswith('WHILE '):
-                depth += 1
-            elif s == 'WEND':
-                depth -= 1
-                if depth == 0:
-                    return scan + 1
-            scan += 1
-        line_num = sorted_lines[ip]
-        raise RuntimeError(f"WHILE at line {line_num} has no matching WEND")
 
     def _cf_while(self, stmt: str, run_vars: dict[str, Any], loop_stack: list[dict[str, Any]],
                   sorted_lines: list[int], ip: int,
                   parsed: WhileStmt) -> tuple[bool, ExecOutcome]:
         cond = parsed.condition
+        self._drop_loop(loop_stack, 'while', ip)
         if self._eval_condition(cond, run_vars):
-            loop_stack.append({'type': 'while', 'cond': cond, 'return_ip': ip})
+            loop_stack.append(self._mark_loop({'type': 'while', 'cond': cond, 'return_ip': ip}, ip))
             return True, ExecResult.ADVANCE
-        else:
-            return True, self._find_matching_wend(sorted_lines, ip)
+        target = self._find_block_end(sorted_lines, ip, 'while')
+        if target is None:
+            raise RuntimeError(f"WHILE at line {sorted_lines[ip]} has no matching WEND")
+        return True, target
 
     def _cf_wend(self, run_vars: dict[str, Any], loop_stack: list[dict[str, Any]],
                  sorted_lines: list[int] | None = None, ip: int | None = None) -> tuple[bool, ExecOutcome] | None:
-        if not loop_stack or loop_stack[-1].get('type') != 'while':
+        idx = len(loop_stack) - 1
+        while idx >= 0 and loop_stack[idx].get('type') != 'while':
+            idx -= 1
+        if idx < 0:
             ctx = f" at line {sorted_lines[ip]}" if sorted_lines and ip is not None else ""
             raise RuntimeError(f"WEND{ctx} without matching WHILE")
+        del loop_stack[idx + 1:]
         loop = loop_stack[-1]
         if self._eval_condition(loop['cond'], run_vars):
-            return True, loop['return_ip']
-        else:
-            loop_stack.pop()
-            return True, ExecResult.ADVANCE
+            return True, self._loop_body(loop)
+        loop_stack.pop()
+        return True, ExecResult.ADVANCE
 
     def _cf_if_then(self, stmt: str, run_vars: dict[str, Any], loop_stack: list[dict[str, Any]],
                     sorted_lines: list[int], ip: int,
@@ -443,7 +606,7 @@ class ControlFlowMixin:
         PrintStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_print(st, rv, p),
         GotoStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_goto(st, sl, p),
         GosubStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_gosub(st, sl, ip, p),
-        ForStmt:         lambda s, st, p, ls, sl, ip, rv, ef: s._cf_for(st, rv, ls, ip, p),
+        ForStmt:         lambda s, st, p, ls, sl, ip, rv, ef: s._cf_for(st, rv, ls, ip, p, sl),
         NextStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_next(st, rv, ls, p),
         WhileStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_while(st, rv, ls, sl, ip, p),
         IfThenStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_if_then(st, rv, ls, sl, ip, ef, p),
@@ -481,6 +644,10 @@ class ControlFlowMixin:
         StopStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_stop(st, sl, ip, parsed=p),
         OnMeasureStmt:   lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_measure(st, parsed=p),
         OnTimerStmt:     lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_timer(st, parsed=p),
+        # A compound reaching control-flow dispatch (an IF clause in a
+        # FUNCTION body); the executors run line-level compounds themselves.
+        CompoundStmt:    lambda s, st, p, ls, sl, ip, rv, ef: (True, s._run_compound(
+            list(p.parts), lambda part: ef(part, ls, sl, ip, rv), ls, ip, ('clause', ip, st))),
     }
 
     def _exec_control_flow(

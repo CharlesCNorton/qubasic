@@ -75,6 +75,7 @@ from qubasic_core.pauliprop import PauliPropMixin
 from qubasic_core.qudits import QuditMixin
 from qubasic_core.bosonic import BosonicMixin
 from qubasic_core.resources import ResourceMixin
+from qubasic_core.live import LiveMixin
 from qubasic_core.errors import QBasicError, QBasicBuildError, QBasicRangeError
 from qubasic_core.io_protocol import StdIOPort
 from qubasic_core.parser import parse_stmt
@@ -136,6 +137,59 @@ def _resolve_named_state(name: str, n_qubits: int) -> np.ndarray:
     return sv
 
 
+def _has_channel(qc) -> bool:
+    """Whether a circuit applies a non-unitary channel (APPLYCHANNEL)."""
+    return any(inst.operation.name in ('kraus', 'superop', 'quantum_channel')
+               for inst in qc.data)
+
+
+def _circuit_fingerprint(qc) -> str:
+    """Stable digest of a circuit's registers and instructions.
+
+    Covers operation names, parameters (arrays by content), qubit and clbit
+    indices, nested control-flow blocks, if_test conditions, and the operator
+    and step count of Hamiltonian evolution gates.
+    """
+    import hashlib
+    from qiskit import QuantumCircuit as _QC
+    h = hashlib.blake2b(digest_size=16)
+
+    def feed(obj) -> None:
+        if isinstance(obj, np.ndarray):
+            h.update(obj.tobytes())
+        elif isinstance(obj, _QC):
+            h.update(_circuit_fingerprint(obj).encode())
+        elif hasattr(obj, 'data') and isinstance(getattr(obj, 'data', None), np.ndarray):
+            h.update(obj.data.tobytes())
+        elif isinstance(obj, (list, tuple)):
+            h.update(b'[')
+            for x in obj:
+                feed(x)
+            h.update(b']')
+        else:
+            h.update(repr(obj).encode())
+
+    h.update(repr([(r.name, r.size) for r in qc.qregs]).encode())
+    h.update(repr([(r.name, r.size) for r in qc.cregs]).encode())
+    for inst in qc.data:
+        op = inst.operation
+        h.update(op.name.encode())
+        feed(list(op.params))
+        h.update(repr([qc.find_bit(q).index for q in inst.qubits]).encode())
+        h.update(repr([qc.find_bit(c).index for c in inst.clbits]).encode())
+        cond = getattr(op, 'condition', None)
+        if cond is not None:
+            target, value = cond
+            h.update(repr((getattr(target, 'name', target), value)).encode())
+        oper = getattr(op, 'operator', None)
+        if oper is not None:
+            h.update(repr(oper).encode())
+            synth = getattr(op, 'synthesis', None)
+            h.update(repr((type(synth).__name__, getattr(synth, 'reps', None),
+                           getattr(synth, 'order', None))).encode())
+    return h.hexdigest()
+
+
 def _named_state_fits(name: str, n_qubits: int) -> bool:
     """Whether a named SET_STATE target fits the current qubit count."""
     dim = 2 ** n_qubits
@@ -155,8 +209,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                      NoiseMixin, StateDisplayMixin, QoLMixin, AlgorithmsMixin,
                      DynamicsMixin, QECMixin, QEC2Mixin, LogicalMixin,
                      BenchmarkingMixin, Algorithms2Mixin,
-                     PauliPropMixin, QuditMixin, BosonicMixin, ResourceMixin):
-    # Architecture: QBasicTerminal composes Engine (state) + 20 mixins (behavior).
+                     PauliPropMixin, QuditMixin, BosonicMixin, ResourceMixin, LiveMixin):
+    # Architecture: QBasicTerminal composes Engine (state) + 32 mixins (behavior).
     #
     # Mixin map (each provides specific methods; see TerminalProtocol for contract):
     #   ExecutorMixin     — build_circuit, _exec_line, _apply_gate_str, run_immediate
@@ -253,6 +307,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self._init_qudits()
         self._init_bosonic()
         self._init_logical()
+        self._init_live()
         # Device model for transpilation (None = unconstrained, all-to-all).
         self._coupling_map: list[list[int]] | None = None
         self._basis_gates: list[str] | None = None
@@ -265,32 +320,39 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     # ── Backend factory ─────────────────────────────────────────────
 
-    def _make_backend(self, method: str = 'statevector', *,
-                      include_noise: bool = False) -> 'AerSimulator':
-        """Build an AerSimulator respecting sim_device and optionally noise.
+    _PRECISION_METHODS = ('automatic', 'statevector', 'density_matrix', 'unitary', 'superop')
 
-        Centralizes backend construction so GPU, noise, and tuning options
-        propagate consistently to every execution path (cmd_run, cmd_step,
-        run_immediate, statevector extraction).
-        """
+    def _aer_options(self, method: str = 'statevector', *, include_noise: bool = True,
+                     precision: str | None = None) -> dict:
+        """AerSimulator options for one run: method, device, precision, noise,
+        and the tuning knobs set through the memory map ($D008-$D00B)."""
         opts: dict = {'method': method}
         if self.sim_device == 'GPU':
             opts['device'] = 'GPU'
+        prec = precision or self.sim_precision
+        if prec == 'single' and method in self._PRECISION_METHODS:
+            opts['precision'] = 'single'
         if include_noise:
             noise = self._noise_model
-            if not noise and hasattr(self, '_qubit_noise') and self._qubit_noise:
+            if not noise and self._qubit_noise:
                 noise = self._build_qubit_noise()
             if noise:
                 opts['noise_model'] = noise
-        if hasattr(self, '_fusion_enable'):
-            opts['fusion_enable'] = self._fusion_enable
-        if hasattr(self, '_mps_truncation'):
-            opts['matrix_product_state_truncation_threshold'] = self._mps_truncation
-        if hasattr(self, '_sv_parallel_threshold'):
-            opts['statevector_parallel_threshold'] = self._sv_parallel_threshold
-        if hasattr(self, '_es_approx_error'):
-            opts['extended_stabilizer_approximation_error'] = self._es_approx_error
-        return AerSimulator(**opts)
+        for attr, key in (('_fusion_enable', 'fusion_enable'),
+                          ('_mps_truncation', 'matrix_product_state_truncation_threshold'),
+                          ('_sv_parallel_threshold', 'statevector_parallel_threshold'),
+                          ('_es_approx_error', 'extended_stabilizer_approximation_error')):
+            if getattr(self, attr, None) is not None:
+                opts[key] = getattr(self, attr)
+        return opts
+
+    def _make_backend(self, method: str = 'statevector', *,
+                      include_noise: bool = False,
+                      precision: str | None = None) -> 'AerSimulator':
+        """Build an AerSimulator respecting device, precision, tuning and
+        (optionally) noise, so every execution path is configured alike."""
+        return AerSimulator(**self._aer_options(method, include_noise=include_noise,
+                                                precision=precision))
 
     def _build_qubit_noise(self):
         """Build a NoiseModel from per-qubit memory-mapped noise settings."""
@@ -540,6 +602,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         'IMPORT': 'cmd_import', 'TYPE': 'cmd_type',
         'SAMPLE': 'cmd_sample', 'ESTIMATE': 'cmd_estimate', 'BENCH': 'cmd_bench',
         'MINIMIZE': 'cmd_minimize', 'GRADIENT': 'cmd_gradient',
+        'PRECISION': 'cmd_precision',
         'FIDELITY': 'cmd_fidelity', 'TOMOGRAPHY': 'cmd_tomography', 'RB': 'cmd_rb',
         'COUPLING': 'cmd_coupling', 'BASIS': 'cmd_basis',
         'LOADQASM': 'cmd_loadqasm', 'SAVEPNG': 'cmd_savepng',
@@ -642,33 +705,44 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self._invalidate_run_state()
         self.num_qubits = n
         self.registers.clear()
-        # Memory framing is method-specific: the 2^n estimate only describes
-        # the statevector family.
-        _sv_like = self.sim_method in ('statevector', 'automatic', 'unitary',
-                                       'superop', 'density_matrix')
-        if self.sim_method == 'stabilizer' or (self.sim_method == 'automatic' and n > MAX_QUBITS):
-            tail = ("stabilizer tableau" if self.sim_method == 'stabilizer'
-                    else "automatic: stabilizer for Clifford circuits, MPS otherwise")
-            self.io.writeln(f"{n} QUBITS ALLOCATED  ({tail}; polynomial memory)")
+        self._report_width(n)
+
+    def _report_width(self, n: int) -> None:
+        """Describe what an n-qubit register costs under the current METHOD
+        and PRECISION, and what RUN will do if it does not fit."""
+        from qubasic_core import capacity as cap
+        method, prec = self.sim_method, self.sim_precision
+        if method == 'stabilizer':
+            self.io.writeln(f"{n} QUBITS ALLOCATED  (stabilizer tableau; polynomial memory)")
             return
-        if self.sim_method == 'matrix_product_state':
-            self.io.writeln(f"{n} QUBITS ALLOCATED  (MPS: memory scales with "
-                            f"entanglement, not 2^n)")
+        if method in ('matrix_product_state', 'extended_stabilizer'):
+            self.io.writeln(f"{n} QUBITS ALLOCATED  ({method}: memory set by the circuit's "
+                            f"structure, not 2^n)")
             return
-        est = _estimate_gb(n) if _sv_like else _estimate_gb(min(n, MAX_QUBITS))
-        self.io.writeln(f"{n} QUBITS ALLOCATED  (~{est:.1f} GB per instance)")
-        ram = _get_ram_gb()
-        if ram:
-            total, avail = ram
-            budget = total * RAM_BUDGET_FRACTION
-            if est > avail:
-                self.io.writeln(f"  WARNING: exceeds available RAM ({avail:.1f} GB free of {total:.0f} GB)")
-            elif est > budget * 0.5:
-                self.io.writeln(f"  NOTE: uses {est/budget*100:.0f}% of 80% RAM budget ({budget:.1f} GB)")
-            if n >= 16 and est > 0:
-                max_par = int(budget / est)
-                if max_par > 0:
-                    self.io.writeln(f"  Max parallel instances in 80% budget: ~{max_par}")
+        avail = cap.available_bytes()
+        sv_method = 'statevector' if method == 'automatic' else method
+        peak = cap.aer_peak_bytes(n, sv_method, prec)
+        label = f"~{cap.fmt_gb(peak)} per run" + (", single precision" if prec == 'single' else "")
+        self.io.writeln(f"{n} QUBITS ALLOCATED  ({sv_method} {label})")
+        if avail is None or cap.fits(peak, avail):
+            total = cap.total_bytes()
+            if total and peak and n >= 16:
+                par = int(total * RAM_BUDGET_FRACTION // peak)
+                if par > 0:
+                    self.io.writeln(f"  Max parallel instances in 80% budget: ~{par}")
+            return
+        free = cap.fmt_gb(avail)
+        if method == 'automatic':
+            single = cap.aer_peak_bytes(n, 'statevector', 'single')
+            if prec == 'double' and cap.fits(single, avail):
+                self.io.writeln(f"  exceeds {free} available; RUN uses single precision "
+                                f"(~{cap.fmt_gb(single)}) for non-Clifford circuits")
+            else:
+                self.io.writeln(f"  exceeds {free} available; RUN uses stabilizer for "
+                                f"Clifford circuits and matrix_product_state otherwise")
+        else:
+            hint = " (try PRECISION SINGLE)" if prec == 'double' and method in self._PRECISION_METHODS else ""
+            self.io.writeln(f"  WARNING: exceeds {free} available; RUN will refuse{hint}")
 
     def cmd_shots(self, rest: str) -> None:
         """Set or display the number of measurement shots."""
@@ -732,15 +806,51 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.sim_device = val
             self.io.writeln(f"DEVICE = {self.sim_device}")
         else:
-            self.sim_method = rest.strip().lower()
-            self.io.writeln(f"METHOD = {self.sim_method}")
             from qubasic_core.engine import METHOD_MAX_QUBITS
+            name = rest.strip().lower()
+            aliases = {'sv': 'statevector', 'mps': 'matrix_product_state',
+                       'dm': 'density_matrix', 'density': 'density_matrix',
+                       'auto': 'automatic', 'clifford': 'stabilizer'}
+            name = aliases.get(name, name)
+            if name not in METHOD_MAX_QUBITS:
+                import difflib
+                close = difflib.get_close_matches(name, list(METHOD_MAX_QUBITS), n=1)
+                hint = f" (did you mean {close[0]}?)" if close else ""
+                raise QBasicRangeError(
+                    f"UNKNOWN METHOD '{rest.strip()}'{hint}; one of "
+                    f"{', '.join(METHOD_MAX_QUBITS)}, or CPU/GPU")
+            self.sim_method = name
+            self._circuit_cache_key = None
+            self.io.writeln(f"METHOD = {self.sim_method}")
             cap = METHOD_MAX_QUBITS.get(self.sim_method, MAX_QUBITS)
             if self.num_qubits > cap:
                 self.num_qubits = cap
                 self._invalidate_run_state()
                 self.registers.clear()
                 self.io.writeln(f"  (QUBITS clamped to {cap}, this method's ceiling)")
+
+    def cmd_precision(self, rest: str = '') -> None:
+        """PRECISION [SINGLE|DOUBLE] — amplitude precision: SINGLE halves the
+        memory of statevector, density-matrix and numpy-engine runs, which buys
+        one more qubit at the statevector wall."""
+        arg = rest.strip().upper()
+        if not arg:
+            self.io.writeln(f"PRECISION = {self.sim_precision.upper()}")
+            return
+        if arg not in ('SINGLE', 'DOUBLE'):
+            raise QBasicRangeError("PRECISION takes SINGLE or DOUBLE")
+        new = arg.lower()
+        if new != self.sim_precision:
+            self.sim_precision = new
+            self._circuit_cache_key = None
+            self._circuit_cache = None
+            if self.locc is not None:
+                self.io.writeln("  (LOCC registers keep their precision until the next LOCC command)")
+        self.io.writeln(f"PRECISION = {arg}")
+        from qubasic_core import capacity as cap
+        widest = cap.max_qubits('statevector', new)
+        if widest is not None:
+            self.io.writeln(f"  widest statevector run that fits now: {widest} qubits")
 
     def _transpile_kwargs(self) -> dict:
         """coupling_map / basis_gates kwargs for transpile() (device model)."""
@@ -765,12 +875,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 **self._transpile_kwargs())
 
     def cmd_coupling(self, rest: str) -> None:
-        """COUPLING linear|ring|full|OFF|<edges> — constrain 2-qubit connectivity.
+        """COUPLING linear|ring|heavyhex|full|OFF|<edges> — constrain 2-qubit connectivity.
 
         Sets the device coupling map used when transpiling for RUN, so circuits
         are routed (SWAPs inserted) onto a topology. 'linear' is a 1D chain,
-        'ring' closes it, 'full'/'OFF' removes the constraint, and an explicit
-        list like '0-1, 1-2, 0-2' gives custom edges. All offline."""
+        'ring' closes it, 'heavyhex' is a connected piece of IBM's heavy-hex
+        lattice, 'full'/'OFF' removes the constraint, and an explicit list like
+        '0-1, 1-2, 0-2' gives custom edges. All offline."""
         arg = rest.strip()
         self._circuit_cache_key = None
         if not arg:
@@ -787,6 +898,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             cm = [[i, i + 1] for i in range(n - 1)]
         elif low == 'ring':
             cm = [[i, (i + 1) % n] for i in range(n)] if n > 2 else [[0, 1]]
+        elif low in ('heavyhex', 'heavy-hex'):
+            from qubasic_core.resources import heavy_hex_edges
+            cm = heavy_hex_edges(n)
         else:
             cm = []
             for tok in arg.replace(',', ' ').split():
@@ -805,8 +919,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             if [b, a] not in cm:
                 edges.append([b, a])
         self._coupling_map = edges
-        self.io.writeln(f"COUPLING = {low if low in ('linear', 'ring') else 'custom'} "
-                        f"({len(cm)} edge(s))")
+        named = low if low in ('linear', 'ring', 'heavyhex', 'heavy-hex') else 'custom'
+        self.io.writeln(f"COUPLING = {named} ({len(cm)} edge(s))")
 
     def cmd_basis(self, rest: str) -> None:
         """BASIS <gate list>|OFF — restrict transpilation to a native gate set.
@@ -1158,13 +1272,16 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         Returned as plain JSON-serializable values so a caller can read context
         instead of inferring it from prior commands.
         """
-        cmap = getattr(self, '_coupling_map', None)
+        from qubasic_core import capacity as cap
+        cmap = self._coupling_map
         return {
             'qubits': self.num_qubits,
             'shots': self.shots,
             'method': self.sim_method,
             'device': self.sim_device,
-            'seed': getattr(self, '_seed', None),
+            'precision': self.sim_precision,
+            'max_statevector_qubits': cap.max_qubits('statevector', self.sim_precision),
+            'seed': self._seed,
             'bit_order': ('big-endian (qubit 0 = leftmost bit)'
                           if getattr(self, '_endian_big', False)
                           else 'little-endian (qubit 0 = rightmost bit)'),
@@ -1202,6 +1319,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         w("  QUBASIC status")
         w(f"    qubits       {d['qubits']}    shots {d['shots']}    "
           f"method {d['method']}    device {d['device']}")
+        widest = d['max_statevector_qubits']
+        w(f"    precision    {d['precision']}"
+          + (f"    widest statevector run that fits now: {widest} qubits" if widest else ""))
         w(f"    seed         {d['seed']}")
         w(f"    bit order    {d['bit_order']}")
         w(f"    option base  {d['option_base']}")
@@ -1237,34 +1357,98 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             kw['seed_simulator'] = self._seed
         return kw
 
-    def _select_method(self, qc) -> str:
-        """Choose simulation method, auto-selecting for automatic.
+    def _select_method(self, qc) -> tuple[str, str]:
+        """Choose (method, precision) for a run.
 
-        Clifford detection comes first so large Clifford circuits use the
-        polynomial-time stabilizer simulator instead of MPS. Stabilizer is
-        only chosen when no noise (global or per-qubit) is active, since the
-        stabilizer backend cannot carry a noise model.
+        Under METHOD automatic: noiseless Clifford circuits use the stabilizer
+        simulator at any width; otherwise the statevector family runs while it
+        fits in available memory, at double precision when that fits and at
+        single precision when only that fits; past that, matrix_product_state.
+        Other methods run as set.
         """
-        method = self.sim_method
-        if method == 'automatic':
-            noiseless = not self._noise_model and not getattr(self, '_qubit_noise', None)
-            if noiseless and self._is_clifford(qc):
-                method = 'stabilizer'
-            elif self.num_qubits > 28:
-                method = 'matrix_product_state'
-        return method
+        from qubasic_core import capacity as cap
+        method, prec = self.sim_method, self.sim_precision
+        if method != 'automatic':
+            return method, prec
+        noiseless = not self._noise_model and not self._qubit_noise
+        if noiseless and self._is_clifford(qc):
+            return 'stabilizer', prec
+        n = self.num_qubits
+        if cap.fits(cap.aer_peak_bytes(n, 'statevector', prec)):
+            return 'automatic', prec
+        if prec == 'double' and cap.fits(cap.aer_peak_bytes(n, 'statevector', 'single')):
+            return 'statevector', 'single'
+        return 'matrix_product_state', prec
 
-    def _build_backend_opts(self, method: str) -> dict:
-        """Construct AerSimulator options dict for a given method."""
-        opts: dict = {'method': method}
-        if self.sim_device == 'GPU':
-            opts['device'] = 'GPU'
-        noise = self._noise_model
-        if not noise and hasattr(self, '_qubit_noise') and self._qubit_noise:
-            noise = self._build_qubit_noise()
-        if noise:
-            opts['noise_model'] = noise
-        return opts
+    def _build_backend_opts(self, method: str, precision: str | None = None) -> dict:
+        """AerSimulator options for a measured RUN (noise included)."""
+        return self._aer_options(method, include_noise=True, precision=precision)
+
+    def _check_fits(self, method: str, precision: str) -> None:
+        """Refuse a width-bound run that cannot fit in available memory."""
+        from qubasic_core import capacity as cap
+        n = self.num_qubits
+        peak = cap.aer_peak_bytes(n, 'statevector' if method == 'automatic' else method, precision)
+        if cap.fits(peak):
+            return
+        hint = []
+        if precision == 'double' and method in self._PRECISION_METHODS:
+            hint.append("PRECISION SINGLE")
+        if method in ('statevector', 'automatic'):
+            hint.append("METHOD matrix_product_state")
+        tail = f"; try {' or '.join(hint)}" if hint else ""
+        raise QBasicRangeError(
+            f"MEMORY: METHOD {method} at {n} qubits needs ~{cap.fmt_gb(peak)}, "
+            f"{cap.fmt_gb(cap.available_bytes())} available{tail}")
+
+    def _capture_mode(self, method: str, precision: str) -> str:
+        """How a measured run keeps its final state for STATE, BLOCH and the
+        other inspection commands: 'mid' saves it inside the run (no second
+        simulation; needs a copy's worth of memory), 'lazy' recomputes it with
+        a measure-free run on first use (1.04x the state), 'none' when even
+        that cannot fit."""
+        from qubasic_core import capacity as cap
+        n = self.num_qubits
+        if method in ('automatic', 'statevector') and not self._coupling_map:
+            if cap.fits(cap.aer_peak_bytes(n, 'statevector', precision, 'mid')):
+                return 'mid'
+        if cap.fits(cap.aer_peak_bytes(n, 'statevector', precision, 'end')):
+            return 'lazy'
+        return 'none'
+
+    def _defer_state_extraction(self, qc_sv, precision: str) -> None:
+        """Leave a source that computes the measure-free circuit's state on
+        first read of last_sv (one noisy trajectory when noise is active)."""
+        seed = self._seed
+        self._defer_state(lambda: self._extract_state_now(qc_sv, precision, seed))
+
+    def _extract_state_now(self, qc_sv, precision: str, seed=None):
+        """Simulate the measure-free circuit and return its final state, or
+        None (with a note) when it cannot fit in available memory."""
+        from qubasic_core import capacity as cap
+        n = qc_sv.num_qubits
+        peak = cap.aer_peak_bytes(n, 'statevector', precision, 'end')
+        if not cap.fits(peak):
+            hint = " (PRECISION SINGLE halves it)" if precision == 'double' else ""
+            self.io.writeln(f"  (no statevector: {n} qubits needs ~{cap.fmt_gb(peak)}, "
+                            f"{cap.fmt_gb(cap.available_bytes())} available{hint})")
+            return None
+        if peak is not None and peak > 1e9:
+            self.io.writeln(f"  (computing the {n}-qubit state, ~{cap.fmt_gb(peak)})")
+        try:
+            q2 = qc_sv.copy()
+            q2.save_statevector(label='qb_state')
+            backend = self._make_backend('statevector', include_noise=True, precision=precision)
+            kw: dict = {'shots': 1}
+            if seed is not None:
+                kw['seed_simulator'] = seed
+            res = backend.run(transpile(q2, backend,
+                                        optimization_level=self._transpile_opt_level),
+                              **kw).result()
+            return np.asarray(res.data()['qb_state'].data)
+        except Exception as e:
+            self.io.writeln(f"  (statevector unavailable: {e})")
+            return None
 
     def _extract_save_results(self, result) -> None:
         """Extract SAVE_EXPECT/SAVE_PROBS/SAVE_AMPS into BASIC variables."""
@@ -1282,12 +1466,6 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 if isinstance(val, np.ndarray):
                     self.arrays[var] = [complex(v) for v in val]
                 self.variables[var] = val
-
-    # Above this qubit count, a full 2^n statevector is too large to
-    # reconstruct for STATE/BLOCH and would dominate runtime (and risk OOM),
-    # defeating the point of the stabilizer/MPS backends. Measured runs above
-    # it skip extraction; STATE/BLOCH then report no state.
-    _SV_EXTRACT_MAX_QUBITS = 24
 
     def _density_from_qc(self, qc_sv):
         """Solve the density matrix of a measure-free circuit, for DENSITY.
@@ -1311,42 +1489,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         except Exception:
             return None
 
-    def _extract_statevector(self, qc_sv) -> None:
-        """Run the measurement-free circuit copy to get last_sv.
-
-        Includes noise when active so STATE/BLOCH/DENSITY reflect the
-        same noisy state as the histogram.  The SV is from one sample of
-        the noise channel (stochastic), which is physically correct.
-
-        Skipped above ``_SV_EXTRACT_MAX_QUBITS`` to avoid materializing a
-        2^n statevector that cannot be displayed anyway.
-        """
-        if getattr(self, '_pending_set_density', None) is not None:
-            # Mixed state: no pure statevector. Defer the density-matrix solve
-            # to DENSITY (lazy) so a measured run does not pay for it unused;
-            # keep the measure-free circuit to solve from.
-            self.last_sv = None
-            self._last_density = None
-            self._last_density_qc = (qc_sv if self.num_qubits <= self._SV_EXTRACT_MAX_QUBITS
-                                     else None)
-            return
-        if self.num_qubits > self._SV_EXTRACT_MAX_QUBITS:
-            self.last_sv = None
-            return
-        try:
-            qc_sv.save_statevector()
-            sv_backend = self._make_backend('statevector', include_noise=True)
-            _sv_kw = {}
-            if self._seed is not None:
-                _sv_kw['seed_simulator'] = self._seed
-            sv_result = sv_backend.run(
-                transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level),
-                **_sv_kw).result()
-            self.last_sv = np.array(sv_result.get_statevector())
-        except Exception:
-            self.last_sv = None
-
-    def _finalize_run(self, qc, method: str, t0: float) -> None:
+    def _finalize_run(self, qc, method: str, t0: float, precision: str | None = None) -> None:
         """Update status, manifest, metrics after a successful run."""
         dt = time.time() - t0
         depth = qc.depth()
@@ -1361,6 +1504,7 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             'num_qubits': self.num_qubits,
             'shots': self.shots,
             'method': method,
+            'precision': precision or self.sim_precision,
             'device': self.sim_device,
             'seed': self._seed,
             'noise_depol_p': self._noise_depol_p,
@@ -1369,67 +1513,125 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             'time_s': dt,
         }
 
-    def _run_no_measure(self, qc, qc_sv, t0: float) -> None:
-        """Execute the no-MEASURE path: statevector (or density matrix), no shots."""
-        too_large = self.num_qubits > self._SV_EXTRACT_MAX_QUBITS
-        if getattr(self, '_pending_set_density', None) is not None and not too_large:
-            # A mixed state has no statevector. Defer the density solve to
-            # DENSITY (lazy); keep the measure-free circuit. Saving a statevector
-            # here used to raise an untranslatable-circuit error from Aer.
+    def _run_no_measure(self, qc, qc_sv, t0: float, precision: str | None = None) -> None:
+        """Execute the no-MEASURE path: one measure-free statevector run that
+        keeps the final state (1.04x the state; Aer hands the buffer over), or
+        the lazily solved density matrix for a SET_DENSITY state."""
+        from qubasic_core import capacity as cap
+        prec = precision or self.sim_precision
+        n = self.num_qubits
+        peak = cap.aer_peak_bytes(n, 'statevector', prec, 'end')
+        fits = cap.fits(peak)
+        if self._pending_set_density is not None or _has_channel(qc_sv):
+            # A mixed state has no statevector: DENSITY solves it on demand
+            # from the measure-free circuit.
             self.last_sv = None
             self._last_density = None
             self._last_density_qc = qc_sv
-        elif too_large:
+        elif qc_sv.size() == 0:
+            # Nothing to simulate: the state is |0...0>, built when first read.
+            dtype = np.complex64 if prec == 'single' else np.complex128
+
+            def _zero_state(_n=n, _dtype=dtype):
+                sv = np.zeros(1 << _n, dtype=_dtype)
+                sv[0] = 1.0
+                return sv
+            self._defer_state(_zero_state)
+        elif not fits:
             self.last_sv = None
         else:
             try:
-                qc_sv.save_statevector()
-                sv_backend = self._make_backend('statevector', include_noise=True)
+                q2 = qc_sv.copy()
+                q2.save_statevector(label='qb_state')
+                sv_backend = self._make_backend('statevector', include_noise=True, precision=prec)
+                kw: dict = {'shots': 1}
+                if self._seed is not None:
+                    kw['seed_simulator'] = self._seed
                 sv_result = sv_backend.run(
-                    transpile(qc_sv, sv_backend, optimization_level=self._transpile_opt_level)).result()
-                self.last_sv = np.array(sv_result.get_statevector())
+                    transpile(q2, sv_backend, optimization_level=self._transpile_opt_level),
+                    **kw).result()
+                self.last_sv = np.asarray(sv_result.data()['qb_state'].data)
                 self._extract_save_results(sv_result)
             except (RuntimeError, ValueError, TypeError, KeyError):
                 self.last_sv = None
         self.last_counts = None
-        self._finalize_run(qc, self.sim_method, t0)
+        self._finalize_run(qc, 'statevector', t0, prec)
         depth = qc.depth()
         n_gates = qc.size()
         dt = time.time() - t0
-        self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits "
-                        f"in {dt:.2f}s  [depth={depth}, gates={n_gates}]")
-        if too_large:
-            self.io.writeln(f"(no MEASURE; {self.num_qubits} qubits exceeds the "
-                            f"{self._SV_EXTRACT_MAX_QUBITS}-qubit statevector display limit)")
+        tag = ", precision=single" if prec == 'single' else ""
+        self.io.writeln(f"\nRAN {len(self.program)} lines, {n} qubits "
+                        f"in {dt:.2f}s  [depth={depth}, gates={n_gates}{tag}]")
+        if self._last_density_qc is not None:
+            self.io.writeln("(no MEASURE; the state is mixed — use DENSITY to inspect)")
+        elif not fits:
+            hint = "; PRECISION SINGLE halves it" if prec == 'double' else ""
+            self.io.writeln(f"(no MEASURE; a {n}-qubit statevector needs ~{cap.fmt_gb(peak)}, "
+                            f"{cap.fmt_gb(cap.available_bytes())} available{hint})")
         else:
             self.io.writeln("(no MEASURE — use STATE, PROBS, or BLOCH to inspect)")
 
-    def _run_with_fallback(self, qc, backend_opts: dict, method: str) -> 'Any':
+    def _add_final_measurement(self, qc) -> None:
+        """Append the program's final measurement: its MEASURE subset into a
+        'sub' register, or every qubit."""
+        subset = self._measure_subset
+        if subset:
+            from qiskit.circuit import ClassicalRegister
+            cr = ClassicalRegister(len(subset), 'sub')
+            qc.add_register(cr)
+            for i, q in enumerate(subset):
+                qc.measure(q, cr[i])
+        else:
+            qc.measure_all()
+
+    def _keep_state(self, result, qc_sv, method: str, precision: str, capture: str) -> None:
+        """Keep the final state of a measured run: from the run itself when it
+        saved one, otherwise as a deferred extraction from the measure-free
+        circuit (computed on first use)."""
+        if method in ('unitary', 'superop'):
+            self.last_sv = None
+            return
+        if self._pending_set_density is not None or _has_channel(qc_sv):
+            # Mixed state: DENSITY solves the density matrix on demand.
+            self.last_sv = None
+            self._last_density = None
+            self._last_density_qc = qc_sv
+            return
+        if capture == 'mid':
+            try:
+                data = result.data()
+                if 'qb_state' in data:
+                    self.last_sv = np.asarray(data['qb_state'].data)
+                    return
+            except Exception:
+                pass
+        self._defer_state_extraction(qc_sv, precision)
+
+    def _run_with_fallback(self, qc, backend_opts: dict, method: str,
+                           capture: str = 'none') -> 'Any':
         """Run the circuit with shots, handling GPU and stabilizer fallbacks."""
         # str(NoiseModel) does not vary with channel parameters (amplitude_damping
         # 0.1 and 0.9 stringify identically), so fingerprint noise by the exact
         # NOISE command and the per-qubit memory-mapped noise instead — otherwise
         # changing noise strength between runs reuses the first circuit.
         _noise_key = (
-            getattr(self, '_noise_spec', None),
-            tuple(sorted(getattr(self, '_qubit_noise', {}).items())),
+            self._noise_spec,
+            id(self._noise_model) if self._noise_model is not None else None,
+            tuple(sorted(self._qubit_noise.items())),
         )
-        # Numeric variable bindings affect gate parameters baked into the
-        # transpiled circuit, so they must be part of the cache key. Without
-        # this, parameter sweeps that re-run via cmd_run (PLOT, ANIMATE) reuse
-        # the first circuit and the swept variable has no effect.
-        _var_key = tuple(sorted(
-            (k, v) for k, v in self.variables.items()
-            if isinstance(v, (int, float, bool)) and not k.startswith('_')
-        ))
+        # The built circuit itself is the key: every input that shapes it
+        # (program text, DEF/UNITARY/HAMILTONIAN/CHANNEL definitions, variable
+        # and array values, SET_STATE, POKE state prep) lands in its
+        # instructions, so a fingerprint of the instructions cannot go stale.
         _dev_key = (
             tuple(map(tuple, self._coupling_map)) if self._coupling_map else None,
             tuple(self._basis_gates) if self._basis_gates else None,
         )
         cache_key = (
-            tuple(sorted(self.program.items())),
-            self.num_qubits, method, self.sim_device,
-            _noise_key, _var_key, _dev_key,
+            _circuit_fingerprint(qc),
+            method, self.sim_device,
+            backend_opts.get('precision', 'double'), capture,
+            _noise_key, _dev_key,
             getattr(self, '_fusion_enable', None),
             getattr(self, '_mps_truncation', None),
             getattr(self, '_sv_parallel_threshold', None),
@@ -1491,13 +1693,33 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         self._scan_subs(sorted_lines)
         self._validate_program(sorted_lines)
 
-        # Build circuit
+        # LQUBITS ... CODE STEANE runs the program encoded.
+        if self._logical_mode and self._logical_mode.get('encoded'):
+            return self._run_steane(t0)
+
+        # A program that reads measurement results as numbers runs live.
+        self._live_needed = False
+        if self._needs_live(sorted_lines):
+            return self._run_live(t0, sorted_lines)
+
+        # Build circuit; its output is held so a build that turns out to need
+        # a live run prints nothing twice.
+        from qubasic_core.live import BufferedIO
+        held = BufferedIO(self.io)
+        real_io, self.io = self.io, held
         try:
             qc, has_measure = self.build_circuit()
         except KeyboardInterrupt:
+            self.io = real_io
+            held.flush()
             self.io.writeln("\n?INTERRUPTED")
             return
         except Exception as e:
+            self.io = real_io
+            if self._live_needed:
+                held.discard()
+                return self._run_live(t0, sorted_lines, carry=held)
+            held.flush()
             self.last_circuit = None
             # Trapped build-time errors resume inside build_circuit itself; an
             # exception arriving here with a handler armed means the handler
@@ -1541,36 +1763,45 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             else:
                 self.io.writeln(f"?BUILD ERROR: {e}")
             return
+        finally:
+            self.io = real_io
+        if self._live_needed:
+            held.discard()
+            return self._run_live(t0, sorted_lines, carry=held)
+        held.flush()
 
         qc_sv = qc.copy()
+        method, precision = self._select_method(qc_sv)
+        try:
+            self._check_fits(method, precision)
+        except QBasicRangeError as e:
+            self.io.writeln(f"?{e.message}")
+            return
 
+        capture = 'none'
+        run_qc = qc
         if self.sim_method in ('unitary', 'superop'):
             qc.save_unitary(label='unitary') if self.sim_method == 'unitary' else qc.save_superop(label='superop')
         elif has_measure:
-            subset = getattr(self, '_measure_subset', None)
-            if subset:
-                # Partial measurement: report counts over the chosen qubits only.
-                from qiskit.circuit import ClassicalRegister
-                cr = ClassicalRegister(len(subset), 'sub')
-                qc.add_register(cr)
-                for i, q in enumerate(subset):
-                    qc.measure(q, cr[i])
-            else:
-                qc.measure_all()
+            capture = self._capture_mode(method, precision)
+            if capture == 'mid':
+                run_qc = qc.copy()
+                run_qc.save_statevector(label='qb_state')
+                self._add_final_measurement(run_qc)
+            self._add_final_measurement(qc)
 
         self.last_circuit = qc
         self._last_transpiled = None
 
         # No-MEASURE path
         if not has_measure and self.sim_method not in ('unitary', 'superop'):
-            self._run_no_measure(qc, qc_sv, t0)
+            self._run_no_measure(qc, qc_sv, t0, precision)
             return
 
         # Run with shots
-        method = self._select_method(qc)
-        backend_opts = self._build_backend_opts(method)
+        backend_opts = self._build_backend_opts(method, precision)
         try:
-            result = self._run_with_fallback(qc, backend_opts, method)
+            result = self._run_with_fallback(run_qc, backend_opts, method, capture)
         except KeyboardInterrupt:
             return
         except Exception as e:
@@ -1630,18 +1861,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 self.last_counts = collapsed
 
         self._extract_save_results(result)
-
-        # Statevector extraction (noisy when noise is active)
-        if method not in ('unitary', 'superop'):
-            self._extract_statevector(qc_sv)
-        else:
-            self.last_sv = None
-
-        self._finalize_run(qc, method, t0)
+        self._keep_state(result, qc_sv, method, precision, capture)
+        self._finalize_run(qc, method, t0, precision)
 
         # Display results with execution metadata
         m = self._run_manifest
         _meta_parts = [f"method={m['method']}"]
+        if m.get('precision') == 'single':
+            _meta_parts.append("precision=single")
         if m['device'] != 'CPU':
             _meta_parts.append(f"device={m['device']}")
         if self._noise_model is not None:
@@ -1696,7 +1923,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                  if not k.startswith('_') and isinstance(v, (int, float, str, bool))}
         if uvars:
             out['variables'] = uvars
-        sv = self.last_sv
+        # Only small states go into JSON; reading a deferred state that would
+        # be dropped anyway would cost a simulation for nothing.
+        sv = self.last_sv if self.num_qubits <= 8 else None
         if sv is not None:
             svf = np.ascontiguousarray(sv).ravel()
             if svf.size <= 256:  # keep JSON output bounded
@@ -1709,40 +1938,25 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         return out
 
     def cmd_sample(self, rest: str = '') -> None:
-        """SAMPLE [shots] — sample the current circuit using SamplerV2 primitive."""
+        """SAMPLE [shots] — sample the program through Aer's SamplerV2 primitive:
+        the program's MEASURE subset (or every qubit), with the active noise
+        model, precision and SEED."""
         if not self.program:
             self.io.writeln("NOTHING TO SAMPLE")
             return
         shots = int(rest.strip()) if rest.strip() else self.shots
         try:
-            qc, has_measure = self.build_circuit()
-            if not has_measure:
-                qc.measure_all()
+            qc, _ = self.build_circuit()
+            method, precision = self._select_method(qc)
+            self._add_final_measurement(qc)
+            opts = self._aer_options(method, include_noise=True, precision=precision)
+            qc_t = self._transpile_routed(qc, AerSimulator(**opts))
             from qiskit_aer.primitives import SamplerV2
-            sampler = SamplerV2()
-            result = sampler.run([qc], shots=shots).result()
-            # Extract counts — SamplerV2 result format varies by Qiskit version.
-            # Try the V2 get_counts() on named data attributes first, then fall
-            # back to iterating data attributes for older layouts.
-            pub_result = result[0]
-            counts = {}
-            # V2 preferred path: named classical registers expose get_counts()
-            try:
-                for attr_name in dir(pub_result.data):
-                    if attr_name.startswith('_'):
-                        continue
-                    obj = getattr(pub_result.data, attr_name, None)
-                    if obj is not None and hasattr(obj, 'get_counts'):
-                        counts = dict(obj.get_counts())
-                        break
-            except Exception:
-                pass
-            # Fallback: try legacy get_counts directly on data
-            if not counts:
-                try:
-                    counts = dict(pub_result.data.get_counts())
-                except Exception:
-                    pass
+            sampler = SamplerV2(default_shots=shots, seed=self._seed,
+                                options={'backend_options': opts})
+            pub_result = sampler.run([qc_t]).result()[0]
+            register = 'sub' if self._measure_subset else 'meas'
+            counts = dict(getattr(pub_result.data, register).get_counts())
             self.last_counts = counts
             self.io.writeln(f"SAMPLED {shots} shots ({len(counts)} unique outcomes)")
             if counts:
@@ -1778,28 +1992,45 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             self.io.writeln(f"?ESTIMATE ERROR: {e}")
 
     def cmd_step(self) -> None:
-        """Step through program, showing state after each line."""
+        """Step through the program a line at a time, showing the state after
+        each. It runs as one live shot: MEAS collapses the state and IF, PRINT
+        and LET see the outcome."""
         if not self.program:
             self.io.writeln("NOTHING TO STEP")
             return
 
         from qubasic_core.exec_context import ExecContext
         from qubasic_core.scope import Scope
-
+        from qubasic_core.live import LiveState, LiveBackend
+        from qubasic_core import capacity as cap
+        peak = cap.numpy_peak_bytes(self.num_qubits, self.sim_precision)
+        if not cap.fits(peak):
+            self.io.writeln(f"?STEP: a {self.num_qubits}-qubit state needs ~{cap.fmt_gb(peak)}, "
+                            f"{cap.fmt_gb(cap.available_bytes())} available")
+            return
         sorted_lines = sorted(self.program.keys())
-        qc = QuantumCircuit(self.num_qubits)
+        self._gosub_stack = []
+        self._collect_data()
+        self._scan_subs(sorted_lines)
+        state = LiveState(self.num_qubits, self.sim_precision, self._live_noise())
+        self._prepare_run(state.qc)
         ctx = ExecContext(
             sorted_lines=sorted_lines, ip=0,
             run_vars=Scope(self.variables),
-            max_iterations=self._max_iterations, qc=qc,
+            max_iterations=self._max_iterations, qc=state.qc,
+            backend=LiveBackend(state, self._custom_gates),
         )
-        # Evolve the statevector incrementally: each step applies only the
-        # gates newly appended to qc, instead of re-simulating the whole
-        # circuit (O(total gates) rather than O(lines^2)).
-        from qubasic_core.gates import _apply_gate_np
-        step_sv = np.zeros(2 ** self.num_qubits, dtype=complex)
-        step_sv[0] = 1.0
-        prev_len = 0
+        self._live = state
+        prev_strict, self._strict_names = self._strict_names, False
+        try:
+            self._step_lines(ctx, state)
+        finally:
+            self._live = None
+            self._strict_names = prev_strict
+            self._step_auto = False
+
+    def _step_lines(self, ctx, state) -> None:
+        sorted_lines = ctx.sorted_lines
 
         self.io.writeln(f"STEP MODE \u2014 {len(sorted_lines)} lines, {self.num_qubits} qubits")
         self.io.writeln("Press ENTER to advance, A for auto-play, Q to quit\n")
@@ -1815,35 +2046,16 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             # Display current line
             self.io.writeln(f">> {line_num:5d}  {stmt}")
 
-            # Execute it
-            result = self._exec_line(stmt, parsed=parsed, ctx=ctx)
-
-            # Show state — apply only the gates appended on this step.
+            # Execute it, then show the state it leaves.
             try:
-                for instr in qc.data[prev_len:]:
-                    op = instr.operation
-                    nm = op.name.lower()
-                    if nm in ('measure', 'barrier', 'save_statevector', 'snapshot', 'reset'):
-                        continue
-                    q_idx = [qc.find_bit(q).index for q in instr.qubits]
-                    gate_key = GATE_ALIASES.get(nm.upper(), nm.upper())
-                    if gate_key in GATE_TABLE:
-                        mat = _np_gate_matrix(gate_key, tuple(float(p) for p in op.params))
-                    else:
-                        try:
-                            mat = np.asarray(op.to_matrix(), dtype=complex)
-                            q_idx = list(reversed(q_idx))  # qiskit LSB-first -> MSB-first
-                        except Exception:
-                            continue
-                    step_sv = _apply_gate_np(step_sv, mat, q_idx, self.num_qubits)
-                prev_len = len(qc.data)
-                sv = np.ascontiguousarray(step_sv).ravel()
-                step_sv = sv
-                self.last_sv = sv
-                self._checkpoint_sv(line_num)
-                self._print_sv_compact(sv)
-            except Exception:
-                self.io.writeln("   (state unavailable)")
+                result = self._exec_line(stmt, parsed=parsed, ctx=ctx)
+                sv = state.sv
+            except Exception as e:
+                self.io.writeln(f"?LINE {line_num}: {e}")
+                return
+            self.last_sv = sv
+            self._checkpoint_sv(line_num)
+            self._print_sv_compact(sv)
 
             # Wait for input (or auto-advance)
             if not getattr(self, '_step_auto', False):
@@ -1868,12 +2080,10 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 import time as _time
                 _time.sleep(getattr(self, '_step_delay', 0.5))
 
-            if isinstance(result, int):
-                ctx.ip = result
-            else:
-                ctx.ip += 1
+            if result is ExecResult.END:
+                break
+            self._advance(ctx, result)
 
-        self._step_auto = False
         self.io.writeln("DONE")
 
     # run_immediate provided by ExecutorMixin.
@@ -1885,13 +2095,20 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             DoStmt, LoopStmt, SubStmt, EndSubStmt, FunctionStmt, EndFunctionStmt,
             IfThenStmt,
         )
+        from qubasic_core.statements import CompoundStmt
         line_set = set(sorted_lines)
         for_depth = 0
         while_depth = 0
         do_depth = 0
         for_var_stack: list[str] = []
+        flat: list[tuple[int, Any]] = []
         for ln in sorted_lines:
-            parsed = self._get_parsed(ln)
+            top = self._get_parsed(ln)
+            if isinstance(top, CompoundStmt):
+                flat.extend((ln, parse_stmt(p)) for p in top.parts)
+            else:
+                flat.append((ln, top))
+        for ln, parsed in flat:
             if isinstance(parsed, GotoStmt) and parsed.target not in line_set:
                 raise RuntimeError(f"LINE {ln}: GOTO {parsed.target} — target line not found")
             if isinstance(parsed, GosubStmt) and parsed.target not in line_set:
@@ -1960,32 +2177,42 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     "(mid-circuit measurement used by IF). To collapse qubits "
                     "into the result histogram, use MEASURE <qubit>.")
             return False
-        qubit = int(self._eval_with_vars(m.group(1), run_vars))
+        qubit = self._resolve_qubit(m.group(1))
         var = m.group(2)
-        if 0 <= qubit < self.num_qubits:
-            b = backend or qc
-            if hasattr(b, 'add_classical_register'):
-                cr = b.add_classical_register(f'mc_{var}')
-                b.measure(qubit, cr[0])
-            else:
-                from qiskit.circuit import ClassicalRegister
-                cr = ClassicalRegister(1, f'mc_{var}')
-                qc.add_register(cr)
-                qc.measure(qubit, cr[0])
-            self._classical_bits[var] = cr
-            run_vars[var] = self.MEAS_CIRCUIT_MODE_VALUE
-            self.variables[var] = self.MEAS_CIRCUIT_MODE_VALUE
+        if self._live is not None:
+            bit = self._live.measure(qubit)
+            run_vars[var] = bit
+            self.variables[var] = bit
+            return True
+        self._measure_into_bit(qc, qubit, var, 'mc')
+        run_vars[var] = self.MEAS_CIRCUIT_MODE_VALUE
+        self.variables[var] = self.MEAS_CIRCUIT_MODE_VALUE
         return True
+
+    def _measure_into_bit(self, qc, qubit: int, var: str, prefix: str) -> None:
+        """Measure `qubit` into a fresh one-bit register recorded as `var`, so
+        IF var THEN ... compiles to feedforward on this outcome. Measuring the
+        same name again (in a loop) gets a new register; IF reads the latest."""
+        from qiskit.circuit import ClassicalRegister
+        taken = {r.name for r in qc.cregs}
+        name, k = f'{prefix}_{var}', 1
+        while name in taken:
+            name, k = f'{prefix}_{var}_{k}', k + 1
+        cr = ClassicalRegister(1, name)
+        qc.add_register(cr)
+        qc.measure(qubit, cr[0])
+        self._classical_bits[var] = cr
 
     def _try_exec_reset(self, stmt: str, qc, run_vars: dict, *, backend=None) -> bool:
         """Handle RESET qubit."""
         m = RE_RESET.match(stmt)
         if not m:
             return False
-        qubit = int(self._eval_with_vars(m.group(1), run_vars))
-        if 0 <= qubit < self.num_qubits:
-            b = backend or qc
-            b.reset(qubit)
+        qubit = self._resolve_qubit(m.group(1))
+        if self._live is not None:
+            self._live.reset(qubit)
+        else:
+            qc.reset(qubit)
         return True
 
     def _try_exec_unitary(self, stmt: str) -> bool:
@@ -2100,7 +2327,9 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         ch = ''
         try:
             import sys as _sys
-            if _sys.stdin.isatty():
+            if getattr(self.io, 'replay', False):
+                ch = self.io.read_line('')[:1]      # a later live shot replays
+            elif _sys.stdin.isatty():
                 if _sys.platform == 'win32':
                     import msvcrt
                     ch = msvcrt.getwch()
@@ -2113,6 +2342,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                         ch = _sys.stdin.read(1)
                     finally:
                         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                if hasattr(self.io, 'record'):
+                    self.io.record(ch)               # replayed by later shots
             else:
                 line = self.io.read_line('')
                 ch = line[0] if line else ''
@@ -2160,28 +2391,21 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         if not m:
             return False
         basis = m.group(1).upper()
-        qubit = int(self._eval_with_vars(m.group(2), run_vars))
-        if qubit < 0 or qubit >= self.num_qubits:
-            raise ValueError(f"QUBIT {qubit} OUT OF RANGE (0-{self.num_qubits-1})")
-        b = backend or qc
-        if basis == 'X':
-            b.apply_gate('H', (), [qubit]) if hasattr(b, 'apply_gate') else qc.h(qubit)
-        elif basis == 'Y':
-            if hasattr(b, 'apply_gate'):
-                b.apply_gate('SDG', (), [qubit])
-                b.apply_gate('H', (), [qubit])
-            else:
-                qc.sdg(qubit)
-                qc.h(qubit)
+        qubit = self._resolve_qubit(m.group(2))
         var = f"m{basis.lower()}_{qubit}"
-        if hasattr(b, 'add_classical_register'):
-            cr = b.add_classical_register(f'meas_{var}')
-            b.measure(qubit, cr[0])
-        else:
-            from qiskit.circuit import ClassicalRegister
-            cr = ClassicalRegister(1, f'meas_{var}')
-            qc.add_register(cr)
-            qc.measure(qubit, cr[0])
+        rotation = {'X': ['H'], 'Y': ['SDG', 'H'], 'Z': []}[basis]
+        live = self._live
+        if live is not None:
+            live.flush()
+            for g in rotation:
+                live.apply_named(g, (), [qubit])
+            bit = live.measure(qubit)
+            run_vars[var] = bit
+            self.variables[var] = bit
+            return True
+        for g in rotation:
+            self._apply_gate(qc, g, [], [qubit])
+        self._measure_into_bit(qc, qubit, var, 'meas')
         run_vars[var] = 0
         self.variables[var] = 0
         return True
@@ -2202,28 +2426,22 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             raise ValueError(
                 f"Qubit {anc} needed as ancilla but appears in stabilizer. "
                 f"Increase QUBITS by 1.")
-        b = backend or qc
-        if hasattr(b, 'apply_gate'):
-            b.apply_gate('H', (), [anc])
-            for p, q in zip(pauli_str, qubits):
-                if p != 'I':
-                    b.apply_gate(self._PAULI_TO_CONTROLLED[p], (), [anc, q])
-            b.apply_gate('H', (), [anc])
-            cr = b.add_classical_register(f'synd_{var}')
-            b.measure(anc, cr[0])
-            b.reset(anc)
-        else:
-            qc.h(anc)
-            for p, q in zip(pauli_str, qubits):
-                if p != 'I':
-                    gate_method = getattr(qc, self._PAULI_TO_CONTROLLED[p].lower())
-                    gate_method(anc, q)
-            qc.h(anc)
-            from qiskit.circuit import ClassicalRegister
-            cr = ClassicalRegister(1, f'synd_{var}')
-            qc.add_register(cr)
-            qc.measure(anc, cr[0])
-            qc.reset(anc)
+        gates = [('H', [anc])] + [(self._PAULI_TO_CONTROLLED[p], [anc, q])
+                                  for p, q in zip(pauli_str, qubits) if p != 'I'] + [('H', [anc])]
+        live = self._live
+        if live is not None:
+            live.flush()
+            for g, qs in gates:
+                live.apply_named(g, (), qs)
+            bit = live.measure(anc)
+            live.reset(anc)
+            run_vars[var] = bit
+            self.variables[var] = bit
+            return True
+        for g, qs in gates:
+            self._apply_gate(qc, g, [], qs)
+        self._measure_into_bit(qc, anc, var, 'synd')
+        qc.reset(anc)
         run_vars[var] = 0
         self.variables[var] = 0
         return True
@@ -2356,6 +2574,8 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
     def _try_exec_open_close(self, stmt: str) -> bool:
         m = RE_OPEN.match(stmt)
         if m:
+            if getattr(self.io, 'replay', False) and m.group(2).upper() != 'INPUT':
+                return True     # later live shots leave the first shot's file alone
             rest = stmt[4:].strip()
             self.cmd_open(rest)
             return True
@@ -2390,6 +2610,15 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                     if i < len(qubits):
                         full_pauli[self.num_qubits - 1 - qubits[i]] = p
                 op = SparsePauliOp(''.join(full_pauli))
+            if self._live is not None:
+                # Live run: the value at this point of this shot (mean over
+                # shots once the run ends).
+                from qiskit.quantum_info import Statevector
+                val = float(np.real(Statevector(self._live.sv).expectation_value(op)))
+                self._record_save('exp', var, val)
+                run_vars[var] = val
+                self.variables[var] = val
+                return True
             qc.save_expectation_value(op, list(range(self.num_qubits)), label=f'exp_{var}')
             # Placeholder until the run fills the real value via
             # _extract_save_results. Preserve any prior value instead of
@@ -2411,6 +2640,14 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         qubits = [int(q.strip()) for q in m.group(1).split(',') if q.strip()]
         var = m.group(2)
         try:
+            if self._live is not None:
+                from qiskit.quantum_info import Statevector
+                probs = Statevector(self._live.sv).probabilities(qubits)
+                self._record_save('prob', var, probs)
+                run_vars[var] = probs
+                self.variables[var] = probs
+                self.arrays[var] = probs.tolist()
+                return True
             qc.save_probabilities(qubits, label=f'prob_{var}')
             _prev = self.variables.get(var, 0)   # preserve prior value (see SAVE_EXPECT)
             run_vars[var] = _prev
@@ -2428,6 +2665,13 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
         indices = [int(q.strip()) for q in m.group(1).split(',') if q.strip()]
         var = m.group(2)
         try:
+            if self._live is not None:
+                amps = np.array(self._live.sv[indices], dtype=complex)
+                self._record_save('amp', var, amps)
+                run_vars[var] = amps
+                self.variables[var] = amps
+                self.arrays[var] = [complex(a) for a in amps]
+                return True
             qc.save_amplitudes(indices, label=f'amp_{var}')
             _prev = self.variables.get(var, 0)   # preserve prior value (see SAVE_EXPECT)
             run_vars[var] = _prev
@@ -2548,62 +2792,96 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     # ── Display ───────────────────────────────────────────────────────
 
+    _RE_PRINT_QUBIT = re.compile(r'QUBIT\s*\((.+)\)\s*$', re.IGNORECASE)
+    _RE_PRINT_ENT = re.compile(r'ENTANGLEMENT\s*\((.+)\)\s*$', re.IGNORECASE)
+
+    def _current_state(self) -> tuple[Any, int, list[int] | None]:
+        """(statevector, qubit count, LOCC register sizes) at the current point
+        of execution: the live per-shot state, the LOCC joint state, the state
+        of the circuit built so far during RUN, or the last run's state."""
+        live = getattr(self, '_live', None)
+        if live is not None:
+            return live.sv, live.n, None
+        if self.locc_mode and self.locc is not None and self.locc.joint:
+            return self.locc.sv, self.locc.n_total, list(self.locc.sizes)
+        qc = getattr(self, '_build_qc', None)
+        if qc is not None:
+            return (self._extract_state_now(qc.copy(), self.sim_precision, self._seed),
+                    qc.num_qubits, None)
+        return self.last_sv, self.num_qubits, None
+
     def _try_quantum_print(self, text: str, run_vars: dict) -> str | None:
-        """Handle quantum PRINT expressions. Returns formatted string or None."""
-        upper = text.strip().upper()
-        # PRINT @REG — Dirac notation for LOCC register
-        if self.locc_mode and self.locc and upper.startswith('@'):
+        """Quantum PRINT forms: STATE (Dirac notation), QUBIT(q) (P(1) and the
+        Bloch vector), ENTANGLEMENT(a, b) (entanglement of formation of the
+        two-qubit reduced state), and @REG (one LOCC register). Each reads the
+        state at the point the PRINT executes. Returns None for other text."""
+        item = text.strip()
+        upper = item.upper()
+        if upper.startswith('@') and self.locc_mode and self.locc is not None:
             reg = upper[1:].strip()
             if reg in self.locc.names:
-                sv = self.locc.get_sv(reg)
-                n = self.locc.get_n(reg)
-                return self._format_dirac(sv, n)
-        # PRINT QUBIT(n) — single-qubit Bloch info
-        m = re.match(r'QUBIT\s*\((\d+)\)', text, re.IGNORECASE)
-        if m and self.last_sv is not None:
-            q = int(m.group(1))
-            x, y, z = self._bloch_vector(self.last_sv, q)
-            p1 = self._peek(0x0100 + q * 8)
-            return f"q{q}: P(1)={p1:.4f} Bloch=({x:.3f},{y:.3f},{z:.3f})"
-        # PRINT ENTANGLEMENT(a,b) — entropy between qubits
-        m = re.match(r'ENTANGLEMENT\s*\((\d+)\s*,\s*(\d+)\)', text, re.IGNORECASE)
-        if m and self.last_sv is not None:
-            qa, qb = int(m.group(1)), int(m.group(2))
-            try:
-                from qiskit.quantum_info import Statevector, entropy, partial_trace
-                sv_obj = Statevector(np.ascontiguousarray(self.last_sv).ravel())
-                keep = [qa]
-                trace_out = [q for q in range(self.num_qubits) if q not in keep]
-                rho = partial_trace(sv_obj, trace_out)
-                ent = entropy(rho, base=2)
-                return f"S({qa},{qb}) = {ent:.6f} bits"
-            except Exception:
-                return f"S({qa},{qb}) = ?"
-        # PRINT STATE — full statevector in Dirac notation
-        if upper == 'STATE' and self.last_sv is not None:
-            return self._format_dirac(self.last_sv, self.num_qubits)
-        return None
+                if self.locc.joint:
+                    return self._format_dirac(self.locc.sv, self.locc.n_total,
+                                              list(self.locc.sizes))
+                return self._format_dirac(self.locc.svs[reg], self.locc.get_size(reg))
+            return None
+        m_q = self._RE_PRINT_QUBIT.match(item)
+        m_e = self._RE_PRINT_ENT.match(item)
+        if upper != 'STATE' and not m_q and not m_e:
+            return None
+        if self.locc_mode and self.locc is not None and not self.locc.joint:
+            return "<SPLIT registers have no joint state: PRINT @A, @B, ...>"
+        sv, n, segments = self._current_state()
+        if sv is None:
+            return "<no state>"
+        if upper == 'STATE':
+            return self._format_dirac(sv, n, segments)
+        from qubasic_core import statetools as st
+        if m_q:
+            q = int(self._eval_with_vars(m_q.group(1), run_vars))
+            if q < 0 or q >= n:
+                raise ValueError(f"QUBIT {q} OUT OF RANGE (0-{n - 1})")
+            x, y, z = st.bloch(sv, q, n)
+            return f"q{q}: P(1)={(1 - z) / 2:.4f} Bloch=({x:.3f},{y:.3f},{z:.3f})"
+        args = self._split_arg_list(m_e.group(1))
+        if len(args) != 2:
+            raise ValueError("ENTANGLEMENT takes two qubits: ENTANGLEMENT(a, b)")
+        qa, qb = (int(self._eval_with_vars(a, run_vars)) for a in args)
+        if qa == qb or not (0 <= qa < n and 0 <= qb < n):
+            raise ValueError(f"ENTANGLEMENT needs two different qubits in 0-{n - 1}")
+        c = st.concurrence(st.subsystem_rdm(sv, [qa, qb], n))
+        return f"E(q{qa},q{qb}) = {st.eof_from_concurrence(c):.6f} ebits (concurrence {c:.6f})"
 
-    def _format_dirac(self, sv, n_qubits: int) -> str:
-        """Format a statevector in Dirac notation."""
+    def _format_dirac(self, sv, n_qubits: int, segments: list[int] | None = None) -> str:
+        """Dirac notation of the first 16 non-zero amplitudes, in the active
+        OPTION ENDIAN order; `segments` splits a LOCC joint state into its
+        registers (A|B|...)."""
         from qubasic_core.engine import AMPLITUDE_THRESHOLD
-        sv_flat = np.ascontiguousarray(sv).ravel()
+        from qubasic_core.statetools import nonzero_indices
+        flat = np.asarray(sv).reshape(-1)
+        idx, total = nonzero_indices(flat, AMPLITUDE_THRESHOLD, 16)
         parts = []
-        for i, amp in enumerate(sv_flat):
-            if abs(amp) > AMPLITUDE_THRESHOLD:
-                state = format(i, f'0{n_qubits}b')
-                if abs(amp.imag) < AMPLITUDE_THRESHOLD:
-                    if abs(amp.real - 1.0) < 1e-6:
-                        parts.append(f"|{state}\u27E9")
-                    elif abs(amp.real + 1.0) < 1e-6:
-                        parts.append(f"-|{state}\u27E9")
-                    else:
-                        parts.append(f"{amp.real:+.4f}|{state}\u27E9")
+        for i in idx:
+            amp = complex(flat[int(i)])
+            bits = format(int(i), f'0{n_qubits}b')
+            if segments:
+                segs, pos = [], len(bits)
+                for size in segments:
+                    segs.append(bits[pos - size:pos])
+                    pos -= size
+                bits = '|'.join(segs)
+            state = self._bits(bits)
+            if abs(amp.imag) < AMPLITUDE_THRESHOLD:
+                if abs(amp.real - 1.0) < 1e-6:
+                    parts.append(f"|{state}\u27E9")
+                elif abs(amp.real + 1.0) < 1e-6:
+                    parts.append(f"-|{state}\u27E9")
                 else:
-                    parts.append(f"({amp.real:.3f}{amp.imag:+.3f}j)|{state}\u27E9")
-                if len(parts) >= 16:
-                    parts.append("...")
-                    break
+                    parts.append(f"{amp.real:+.4f}|{state}\u27E9")
+            else:
+                parts.append(f"({amp.real:.3f}{amp.imag:+.3f}j)|{state}\u27E9")
+        if total > len(parts):
+            parts.append("...")
         return " ".join(parts) if parts else "|0\u27E9"
 
     # cmd_state, cmd_hist, cmd_probs, cmd_bloch, cmd_circuit provided by StateDisplayMixin.
@@ -2662,13 +2940,12 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
 
     # LOCC execution (_locc_run, _locc_exec_line, etc.) provided by LOCCMixin.
 
-    # Control flow helpers (_cf_*, _exec_control_flow, _find_matching_wend)
-    # provided by ControlFlowMixin.
+    # Control flow helpers (_cf_*, _exec_control_flow) provided by ControlFlowMixin.
 
     # ── Help ──────────────────────────────────────────────────────────
 
     _EXPERIMENTAL_CMDS = frozenset({
-        'CONNECT', 'DISCONNECT', 'PROBE',
+        'PROBE',
     })
     _PARTIAL_CMDS = frozenset({
         'SAMPLE', 'ESTIMATE',  # SamplerV2/EstimatorV2 wrappers
@@ -2871,15 +3148,16 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
             qver = qiskit.__version__
         except Exception:
             qver = '?'
+        from qubasic_core import capacity as cap
         ram = _get_ram_gb()
         ram_str = f"{ram[0]:.0f} GB RAM" if ram else "RAM unknown"
-        max_q = 32
-        if ram:
-            from qubasic_core.engine import _estimate_gb
-            for n in range(32, 0, -1):
-                if _estimate_gb(n) < ram[1]:
-                    max_q = n
-                    break
+        max_d = cap.max_qubits('statevector', 'double')
+        max_s = cap.max_qubits('statevector', 'single')
+        if max_d is None:
+            width = "statevector width unknown (install psutil)"
+        else:
+            width = (f"max ~{max_d} statevector"
+                     + (f" ({max_s} single precision)" if max_s and max_s > max_d else ""))
         if hasattr(QBasicTerminal, '_gpu_cache'):
             gpu_str = QBasicTerminal._gpu_cache
         else:
@@ -2896,6 +3174,6 @@ class QBasicTerminal(Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoM
                 QBasicTerminal._gpu_cache = gpu_str
         info_line = f"Python {platform.python_version()} | Qiskit {qver} | {ram_str}{gpu_str}"
         config_line = (f"{self.num_qubits} qubits | {self.shots} shots | "
-                       f"max ~{max_q} statevector, 4096 stabilizer")
+                       f"{width}, 4096 stabilizer")
         self.io.writeln(BANNER_ART.format(info_line=info_line, config_line=config_line))
 

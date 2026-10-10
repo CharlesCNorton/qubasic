@@ -27,14 +27,18 @@ class QuditMixin:
     def _init_qudits(self) -> None:
         self._qd = 0
         self._qn = 0
-        self._qsv = None
+        self._qsv: np.ndarray = np.zeros(0, dtype=complex)   # set by QUDIT
 
     def _qudit_apply(self, mat, targets):
-        """Apply a single- or two-qudit matrix to the qudit statevector."""
+        """Apply a single- or two-qudit matrix to the qudit statevector.
+
+        Qudit q is digit q of the base-d index (qudit 0 least significant),
+        the qubit convention, so a state prints with qudit 0 rightmost.
+        """
         d, n = self._qd, self._qn
         k = len(targets)
         t = self._qsv.reshape([d] * n)
-        axes = [q for q in targets]
+        axes = [n - 1 - q for q in targets]
         t = np.tensordot(mat.reshape([d] * (2 * k)), t,
                          axes=(list(range(k, 2 * k)), axes))
         t = np.moveaxis(t, list(range(k)), axes)
@@ -130,11 +134,11 @@ class QuditMixin:
             return
         d, n = self._qd, self._qn
         self.io.writeln(f"\n  Qudit state (d={d}, {n} qudit(s)):")
-        for i, amp in enumerate(self._qsv):
-            if abs(amp) > 1e-9:
-                digits = np.base_repr(i, d).rjust(n, '0')
-                self.io.writeln(f"    |{digits}>  {amp.real:+.4f}{amp.imag:+.4f}j  "
-                                f"(P={abs(amp) ** 2:.4f})")
+        for i in np.flatnonzero(np.abs(self._qsv) > 1e-9):
+            amp = complex(self._qsv[i])
+            digits = self._bits(np.base_repr(int(i), d).rjust(n, '0'))
+            self.io.writeln(f"    |{digits}>  {amp.real:+.4f}{amp.imag:+.4f}j  "
+                            f"(P={abs(amp) ** 2:.4f})")
 
     def cmd_qmeasure(self, rest: str = '') -> None:
         """QMEASURE [shots] — sample qudit measurement outcomes."""
@@ -150,5 +154,5 @@ class QuditMixin:
         unique, counts = np.unique(draws, return_counts=True)
         self.io.writeln(f"\n  QMEASURE ({shots} shots, base-{d}):")
         for idx, c in sorted(zip(unique, counts), key=lambda x: -x[1]):
-            digits = np.base_repr(int(idx), d).rjust(n, '0')
+            digits = self._bits(np.base_repr(int(idx), d).rjust(n, '0'))
             self.io.writeln(f"    |{digits}>  {c}  ({100 * c / shots:.1f}%)")

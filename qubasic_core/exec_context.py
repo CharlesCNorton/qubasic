@@ -22,3 +22,6 @@ class ExecContext:
 
     # Backend abstraction (QiskitBackend or LOCCRegBackend)
     backend: Any = None
+
+    # Pending ResumePoint: the statement within line `ip` to continue from
+    resume: Any = None

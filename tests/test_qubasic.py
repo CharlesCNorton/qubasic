@@ -1498,7 +1498,7 @@ class TestBugFixes063(unittest.TestCase):
         t.variables['S'] = 2.8284271247
         t.process('10 PRINT "S ="; S', track_undo=False)
         _, out = capture(t.cmd_run)
-        self.assertIn('S =2.8284', out)
+        self.assertIn('S = 2.8284', out)
 
         t2 = QBasicTerminal()
         t2.num_qubits = 1
@@ -2021,7 +2021,7 @@ class TestExpressionStringRegressions(unittest.TestCase):
 
     def test_print_surfaces_errors_no_masking(self):
         # A valid (now case-insensitive) call evaluates instead of printing source.
-        self.assertEqual(self.t._eval_print_item('SQRT(9)', {}), '3.0')
+        self.assertEqual(self.t._eval_print_item('SQRT(9)', {}), ' 3 ')
         # A genuine error is raised, not silently printed as raw text.
         with self.assertRaises(Exception):
             self.t._eval_print_item('GARBAGEFUNC(3)', {})
@@ -2205,9 +2205,12 @@ class TestConventionFixesV2(unittest.TestCase):
         t2 = self._runp(['10 DIM a(3)', '20 LET a(1)=9', '30 REDIM PRESERVE a(5)', '40 LET v=a(1)'])
         self.assertEqual(t2.variables.get('v'), 9.0)
 
-    def test_meas_print_hint(self):
+    def test_meas_print_reads_outcome(self):
+        # PRINT of a measurement bit runs the program live and prints the bit.
         t = self._runp(['10 X 0', '20 MEAS 0 -> m', '30 PRINT m', '40 MEASURE'])
-        self.assertIn('mid-circuit', t._out)
+        self.assertEqual(t._out.splitlines()[0].strip(), '1')
+        self.assertIn('method=live', t._out)
+        self.assertEqual(t.last_counts, {'1': t.shots})
 
     def test_density_after_measure(self):
         t = QBasicTerminal(); t.num_qubits = 1
@@ -2218,12 +2221,12 @@ class TestConventionFixesV2(unittest.TestCase):
         _, dout = capture(t.cmd_density, '')
         self.assertIn('Density matrix', dout)
 
-    def test_meas_bit_classical_use_errors(self):
+    def test_meas_bit_classical_use(self):
         t = QBasicTerminal(); t.num_qubits = 1
         for l in ['10 X 0', '20 MEAS 0 -> m', '30 LET y = m + 1', '40 MEASURE']:
             t.process(l, track_undo=False)
-        _, out = capture(t.cmd_run)
-        self.assertIn('mid-circuit', out)
+        capture(t.cmd_run)
+        self.assertEqual(t.variables['y'], 2.0)
 
     def test_string_array_default_empty(self):
         t = QBasicTerminal(); t.num_qubits = 1

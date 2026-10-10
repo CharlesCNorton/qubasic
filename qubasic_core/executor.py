@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from qiskit import QuantumCircuit, transpile
@@ -20,6 +20,22 @@ from qubasic_core.errors import QBasicBuildError, QBasicRangeError
 
 if TYPE_CHECKING:
     from qubasic_core.exec_context import ExecContext
+
+
+def _feedforward_test(condition: str, names) -> tuple[str, int] | None:
+    """(bit name, value it must read) when an IF condition tests one
+    measurement bit in a form a dynamic circuit can branch on, else None."""
+    s = condition.strip()
+    m = re.match(r'NOT\s+(\w+)$', s, re.IGNORECASE)
+    if m and m.group(1) in names:
+        return m.group(1), 0
+    if re.match(r'\w+$', s) and s in names:
+        return s, 1
+    m = re.match(r'(\w+)\s*(==|=|!=|<>)\s*([01])$', s)
+    if m and m.group(1) in names:
+        val = int(m.group(3))
+        return m.group(1), (val if m.group(2) in ('==', '=') else 1 - val)
+    return None
 
 
 class ExecutorMixin:
@@ -101,18 +117,12 @@ class ExecutorMixin:
 
         return any(scan(self.program[ln], frozenset()) for ln in sorted_lines)
 
-    def build_circuit(self) -> tuple['QuantumCircuit', bool]:
-        """Compile program lines into a QuantumCircuit. Returns (circuit, has_measure)."""
-        from qubasic_core.exec_context import ExecContext
-        from qubasic_core.statements import MeasureStmt, CompoundStmt
-        from qubasic_core.scope import Scope
-        from qubasic_core.backend import QiskitBackend
-
-        qc = QuantumCircuit(self.num_qubits)
+    def _prepare_run(self, qc) -> None:
+        """Reset per-run state and emit pending state preparation into qc."""
         # Fresh mid-circuit measurement registry for this build (dynamic IF).
-        self._classical_bits = {}
+        self._classical_bits: dict[str, Any] = {}
         # Partial-measurement subset (None = measure all at the end).
-        self._measure_subset = None
+        self._measure_subset: list[int] | None = None
         # Density matrix (and circuit) captured by a SET_DENSITY run; the
         # matrix is solved lazily by DENSITY from the stored circuit.
         self._last_density = None
@@ -132,10 +142,31 @@ class ExecutorMixin:
             from qiskit.quantum_info import DensityMatrix
             from qiskit_aer.library import SetDensityMatrix
             qc.append(SetDensityMatrix(DensityMatrix(_pend_d)), list(range(self.num_qubits)))
-        backend = QiskitBackend(qc, self._apply_gate)
+        self._on_measure_fired = False
+        # Error trapping arms when this run executes ON ERROR GOTO, never from
+        # a previous run's state.
+        self._error_target = None
+        self._in_error_handler = False
+
+    def build_circuit(self, backend=None, *, start_ip: int = 0,
+                      stop_ip: int | None = None) -> tuple['QuantumCircuit', bool]:
+        """Compile program lines into a QuantumCircuit. Returns (circuit, has_measure).
+
+        With a live backend (see qubasic_core.live) the lines execute against
+        its per-shot state instead, from line index start_ip up to stop_ip."""
+        from qubasic_core.exec_context import ExecContext
+        from qubasic_core.scope import Scope
+        from qubasic_core.backend import QiskitBackend
+
+        live = backend is not None
+        qc = backend.qc if live else QuantumCircuit(self.num_qubits)
+        if start_ip == 0:
+            self._prepare_run(qc)
+        if backend is None:
+            backend = QiskitBackend(qc, self._apply_gate)
         ctx = ExecContext(
             sorted_lines=sorted(self.program.keys()),
-            ip=0,
+            ip=start_ip,
             run_vars=Scope(self.variables),
             max_iterations=self._max_iterations,
             qc=qc,
@@ -143,15 +174,30 @@ class ExecutorMixin:
         )
         # Reachability scan catches MEASURE inside subroutines and IF clauses,
         # not just literal top-level MEASURE lines.
-        has_measure = self._program_has_measure(ctx.sorted_lines)
-        self._on_measure_fired = False
-        # Error trapping arms when this run executes ON ERROR GOTO, never from
-        # a previous run's state.
-        self._error_target = None
-        self._in_error_handler = False
-        handler_lines_run = 0
+        has_measure = False if live else self._program_has_measure(ctx.sorted_lines)
+        # The circuit under construction, so PRINT STATE / QUBIT(q) inside a
+        # program can read the state at that line (a live run reads its own).
+        self._build_qc = None if live else qc
+        try:
+            self._build_loop(ctx, qc, stop_ip)
+        finally:
+            self._build_qc = None
+        return qc, has_measure or bool(self._build_saw_measure)
 
-        while ctx.ip < len(ctx.sorted_lines):
+    def _build_loop(self, ctx, qc, stop_ip: int | None = None) -> None:
+        """Execute program lines into qc (the body of build_circuit)."""
+        prev, self._strict_names = self._strict_names, False
+        try:
+            self._build_lines(ctx, qc, stop_ip)
+        finally:
+            self._strict_names = prev
+
+    def _build_lines(self, ctx, qc, stop_ip: int | None) -> None:
+        from qubasic_core.statements import MeasureStmt, CompoundStmt
+        handler_lines_run = 0
+        self._build_saw_measure = False
+        end = len(ctx.sorted_lines) if stop_ip is None else stop_ip
+        while ctx.ip < end:
             ctx.iteration_count += 1
             if ctx.iteration_count > ctx.max_iterations:
                 raise RuntimeError(f"LOOP LIMIT ({ctx.max_iterations}) — possible infinite loop")
@@ -181,7 +227,7 @@ class ExecutorMixin:
                     continue
 
             if isinstance(parsed, MeasureStmt):
-                has_measure = True
+                self._build_saw_measure = True
                 if parsed.qubits:
                     self._measure_subset = [
                         self._resolve_qubit(q)
@@ -201,13 +247,15 @@ class ExecutorMixin:
             if isinstance(parsed, CompoundStmt):
                 for part in parsed.parts:
                     if part.strip().upper() == 'MEASURE':
-                        has_measure = True
+                        self._build_saw_measure = True
 
-            if hasattr(self, '_profile_line_start'):
-                self._profile_line_start(line_num)
+            self._profile_line_start(line_num)
+            gates_before = qc.size()
             try:
                 result = self._exec_line(stmt, parsed=parsed, ctx=ctx)
             except QBasicBuildError as e:
+                if self._live_needed:
+                    raise
                 _handler_ip = self._handle_error(e, line_num, ctx.sorted_lines)
                 if _handler_ip is None:
                     raise QBasicBuildError(
@@ -216,23 +264,33 @@ class ExecutorMixin:
                 ctx.ip = _handler_ip
                 continue
             except Exception as e:
+                # A measurement bit read as a number makes the run go live;
+                # no ON ERROR handler may take that.
+                if self._live_needed:
+                    raise
                 _handler_ip = self._handle_error(e, line_num, ctx.sorted_lines)
                 if _handler_ip is None:
                     raise RuntimeError(f"LINE {line_num}: {e}") from None
                 ctx.ip = _handler_ip
                 continue
             finally:
-                if hasattr(self, '_profile_line_end'):
-                    self._profile_line_end(line_num)
+                self._profile_line_end(line_num, qc.size() - gates_before)
 
             if result is ExecResult.END:
                 break
-            elif isinstance(result, int):
-                ctx.ip = result
-            else:
-                ctx.ip += 1
+            self._advance(ctx, result)
 
-        return qc, has_measure
+    @staticmethod
+    def _advance(ctx, result) -> None:
+        """Move ctx past a line: to a jump target (and the statement within
+        it, for a ResumePoint) or to the next line."""
+        from qubasic_core.control_flow import ResumePoint
+        if isinstance(result, int):
+            ctx.ip = int(result)
+            ctx.resume = result if isinstance(result, ResumePoint) else None
+        else:
+            ctx.ip += 1
+            ctx.resume = None
 
     def _exec_line(self, stmt, qc=None, loop_stack=None, sorted_lines=None,
                    ip=0, run_vars=None, parsed=None, *, ctx=None):
@@ -272,6 +330,23 @@ class ExecutorMixin:
         if parsed is None:
             from qubasic_core.parser import parse_stmt
             parsed = parse_stmt(stmt)
+
+        def _part(sub):
+            return self._exec_line(sub, qc=qc, loop_stack=loop_stack,
+                                   sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
+
+        # Continuing inside this line's compound (or one of its IF clauses).
+        if ctx is not None and ctx.resume is not None:
+            rp, ctx.resume = ctx.resume, None
+            if int(rp) == ip:
+                resumed = self._resume_compound(rp, parsed, loop_stack, ip, _part)
+                if resumed is not None:
+                    return resumed
+        if isinstance(parsed, CompoundStmt):
+            # A line run by an executor loop (ctx) is a whole line; otherwise
+            # the compound is an IF clause.
+            frame = ('line', ip) if ctx is not None else ('clause', ip, stmt)
+            return self._run_compound(list(parsed.parts), _part, loop_stack, ip, frame)
         if isinstance(parsed, BarrierStmt):
             if hasattr(qc, 'barrier'):
                 qc.barrier()
@@ -286,11 +361,6 @@ class ExecutorMixin:
             return self._gosub_stack.pop()
         if isinstance(parsed, AtRegStmt) and not self.locc_mode:
             raise ValueError("@register syntax requires LOCC mode (try: LOCC <n1> <n2>)")
-        if isinstance(parsed, CompoundStmt):
-            for sub in parsed.parts:
-                self._exec_line(sub, qc=qc, loop_stack=loop_stack,
-                                sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
-            return ExecResult.ADVANCE
 
         # 1b. Dynamic circuit: IF on a mid-circuit measurement bit (set by MEAS)
         #     compiles to a Qiskit if_test, so the conditional gate is applied at
@@ -329,13 +399,6 @@ class ExecutorMixin:
         if self._try_stmt_handlers(stmt, qc, run_vars, backend=_backend):
             return ExecResult.ADVANCE
 
-        # 4. Colon-separated (legacy fallback for unparsed compound)
-        if ':' in stmt:
-            for sub in self._split_colon_stmts(stmt):
-                self._exec_line(sub, qc=qc, loop_stack=loop_stack,
-                                sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
-            return ExecResult.ADVANCE
-
         # 5. Gate application
         _backend = ctx.backend if ctx else None
 
@@ -345,7 +408,7 @@ class ExecutorMixin:
             if info is not None:
                 n_params, n_qubits = info
                 args = list(parsed.args)
-                params = [self._eval_with_vars(a, run_vars) for a in args[:n_params]]
+                params = [self._eval_operand(a, run_vars) for a in args[:n_params]]
                 qubits = [self._resolve_qubit(a) for a in args[n_params:n_params + n_qubits]]
                 try:
                     if _backend:
@@ -385,22 +448,17 @@ class ExecutorMixin:
         """If `condition` tests a mid-circuit measurement bit, return
         (classical_register, target_value); else None.
 
-        Handled forms: ``c``, ``NOT c``, ``c == 0|1``, ``c != 0|1``.
+        Handled forms: ``c``, ``NOT c``, ``c = 0|1``, ``c <> 0|1`` (and the
+        ``==`` / ``!=`` spellings).
         """
         cb = getattr(self, '_classical_bits', None)
         if not cb:
             return None
-        s = condition.strip()
-        m = re.match(r'NOT\s+(\w+)$', s, re.IGNORECASE)
-        if m and m.group(1) in cb:
-            return cb[m.group(1)], 0
-        if re.match(r'\w+$', s) and s in cb:
-            return cb[s], 1
-        m = re.match(r'(\w+)\s*(==|!=)\s*([01])$', s)
-        if m and m.group(1) in cb:
-            val = int(m.group(3))
-            return cb[m.group(1)], (val if m.group(2) == '==' else 1 - val)
-        return None
+        hit = _feedforward_test(condition, cb)
+        if hit is None:
+            return None
+        name, val = hit
+        return cb[name], val
 
     def _exec_dynamic_if(self, qc, tgt, parsed, loop_stack, sorted_lines, ip, run_vars) -> None:
         """Emit a Qiskit if_test (with optional else) for an IF on a measured bit.
@@ -642,57 +700,28 @@ class ExecutorMixin:
         if upper == 'MEASURE':
             return  # handled at run level
 
-        # CTRL gate ctrl_qubit, target_qubit(s) -- controlled version of any gate
+        # CTRL <gate> [params,] control, target(s) -- one control on any gate
         m_ctrl = RE_CTRL.match(stmt)
         if m_ctrl:
-            from qiskit.circuit.library import (HGate, XGate, YGate, ZGate,
-                SGate, TGate, SdgGate, TdgGate, SXGate, SwapGate)
-            gate_name = m_ctrl.group(1).upper()
-            args = [a.strip() for a in m_ctrl.group(2).replace(',', ' ').split()]
-            ctrl_qubit = self._resolve_qubit(args[0])
-            target_qubits = [self._resolve_qubit(a) for a in args[1:]]
-            gate_map = {
-                'H': HGate(), 'X': XGate(), 'Y': YGate(), 'Z': ZGate(),
-                'S': SGate(), 'T': TGate(), 'SDG': SdgGate(), 'TDG': TdgGate(),
-                'SX': SXGate(), 'SWAP': SwapGate(),
-            }
-            all_qubits = [ctrl_qubit] + target_qubits
-            if gate_name in gate_map:
-                gate = gate_map[gate_name].control(1)
-                if backend and hasattr(backend, 'append_controlled'):
-                    backend.append_controlled(gate, all_qubits)
-                else:
-                    qc.append(gate, all_qubits)
-            elif gate_name in self._custom_gates:
-                from qiskit.circuit.library import UnitaryGate
-                gate = UnitaryGate(self._custom_gates[gate_name]).control(1)
-                if backend and hasattr(backend, 'append_controlled'):
-                    backend.append_controlled(gate, all_qubits)
-                else:
-                    qc.append(gate, all_qubits)
+            canonical, params, qubits = self._modifier_operands(
+                'CTRL', m_ctrl.group(1), m_ctrl.group(2))
+            gate = self._gate_object(canonical, params).control(1)
+            if backend and hasattr(backend, 'append_controlled'):
+                backend.append_controlled(gate, qubits)
             else:
-                raise ValueError(f"CTRL {gate_name}: gate not found")
+                qc.append(gate, qubits)
             return
 
-        # INV gate qubit(s) -- inverse/dagger of a single gate
+        # INV <gate> [params,] qubit(s) -- inverse (dagger) of one gate
         m_inv = RE_INV.match(stmt)
         if m_inv:
-            gate_name = m_inv.group(1).upper()
-            inv_args = m_inv.group(2)
-            tokens = self._tokenize_gate(f"{gate_name} {inv_args}")
-            gate_key = GATE_ALIASES.get(gate_name, gate_name)
-            info = self._gate_info(gate_key)
-            if info is not None:
-                n_params, n_qubits_needed = info
-                t_args = tokens[1:]
-                params = [self.eval_expr(a) for a in t_args[:n_params]]
-                qubits_inv = [self._resolve_qubit(a) for a in t_args[n_params:n_params+n_qubits_needed]]
-                sub_qc = QuantumCircuit(n_qubits_needed)
-                self._apply_gate(sub_qc, gate_key, params, list(range(n_qubits_needed)))
-                if backend and hasattr(backend, 'append_inverse'):
-                    backend.append_inverse(sub_qc, qubits_inv)
-                else:
-                    qc.append(sub_qc.inverse(), qubits_inv)
+            canonical, params, qubits = self._modifier_operands(
+                'INV', m_inv.group(1), m_inv.group(2))
+            gate = self._gate_object(canonical, params).inverse()
+            if backend and hasattr(backend, 'append_controlled'):
+                backend.append_controlled(gate, qubits)
+            else:
+                qc.append(gate, qubits)
             return
 
         # Parse: GATE [params] qubits
@@ -717,7 +746,7 @@ class ExecutorMixin:
                 f"{gate_name} needs {n_params} param(s) and {n_qubits} qubit(s), "
                 f"got {len(args)} arg(s)")
 
-        params = [self.eval_expr(a) for a in args[:n_params]]
+        params = [self._eval_operand(a) for a in args[:n_params]]
         qubits = [self._resolve_qubit(a) for a in args[n_params:n_params+n_qubits]]
 
         # Apply gate through backend when available
@@ -732,6 +761,39 @@ class ExecutorMixin:
                     f"duplicate qubit arguments in {gate_name}"
                 ) from None
             raise
+
+    def _modifier_operands(self, keyword: str, gate_name: str, arg_text: str,
+                           limit: int | None = None) -> tuple[str, list, list[int]]:
+        """Operands of CTRL/INV: (gate, params, qubits). For CTRL the control
+        qubit comes first in `qubits`, then the gate's own qubits."""
+        canonical = GATE_ALIASES.get(gate_name.upper(), gate_name.upper())
+        info = self._gate_info(canonical)
+        if info is None:
+            raise ValueError(f"{keyword} {gate_name.upper()}: gate not found")
+        n_params, n_q = info
+        args = self._tokenize_gate(f"{canonical} {arg_text}")[1:]
+        controls = 1 if keyword == 'CTRL' else 0
+        if len(args) != n_params + controls + n_q:
+            ctl = "1 control and " if controls else ""
+            raise ValueError(
+                f"{keyword} {canonical} needs {n_params} parameter(s), {ctl}"
+                f"{n_q} target qubit(s); got {len(args)} argument(s)")
+        params = [self._eval_operand(a) for a in args[:n_params]]
+        qubits = [self._resolve_qubit(a, n_qubits=limit) for a in args[n_params:]]
+        if len(set(qubits)) != len(qubits):
+            raise QBasicBuildError(f"duplicate qubit arguments in {keyword} {canonical}")
+        return canonical, params, qubits
+
+    def _gate_object(self, canonical: str, params: list):
+        """A Qiskit gate instance for a built-in or UNITARY-defined gate."""
+        if canonical in self._custom_gates:
+            from qiskit.circuit.library import UnitaryGate
+            return UnitaryGate(self._custom_gates[canonical], label=canonical)
+        from qiskit.circuit.library import get_standard_gate_name_mapping
+        lib = get_standard_gate_name_mapping().get(canonical.lower())
+        if lib is None:
+            raise ValueError(f"GATE {canonical} NOT IMPLEMENTED")
+        return type(lib)(*params)
 
     def _tokenize_gate(self, stmt: str) -> list[str]:
         """Split gate statement into tokens, handling commas and register notation.
@@ -774,7 +836,7 @@ class ExecutorMixin:
             q = start + idx
         else:
             try:
-                q = int(self.eval_expr(arg))
+                q = int(self._eval_operand(arg))
             except Exception:
                 raise ValueError(f"CANNOT RESOLVE QUBIT: {arg}")
         if q < 0 or q >= limit:
@@ -837,10 +899,17 @@ class ExecutorMixin:
         # an unchanged |psi> would be spurious, so skip the statevector dump.
         if qc.size() == 0:
             return
-        qc.save_statevector()
+        from qubasic_core import capacity as cap
+        peak = cap.aer_peak_bytes(self.num_qubits, 'statevector', self.sim_precision, 'end')
+        if not cap.fits(peak):
+            self.last_circuit = qc
+            self.io.writeln(f"  (applied; a {self.num_qubits}-qubit state needs "
+                            f"~{cap.fmt_gb(peak)}, so it is not shown)")
+            return
+        qc.save_statevector(label='qb_state')
         backend = self._make_backend('statevector')
-        result = backend.run(transpile(qc, backend)).result()
-        sv = np.array(result.get_statevector())
+        result = backend.run(transpile(qc, backend), shots=1).result()
+        sv = np.asarray(result.data()['qb_state'].data)
         self.last_sv = sv
         self.last_circuit = qc
         self._print_sv_compact(sv)

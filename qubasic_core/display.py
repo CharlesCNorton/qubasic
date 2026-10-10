@@ -164,9 +164,21 @@ class DisplayMixin:
         self.io.writeln('')
 
     def _print_statevector(self, sv, n_qubits=None):
-        """Print non-zero amplitudes of the statevector."""
-        sv = np.ascontiguousarray(sv).ravel()
+        """Print the first non-zero amplitudes of the statevector (index order).
+
+        Only the shown amplitudes are formatted; the rest are counted in one
+        vectorized pass, so a large state prints in seconds.
+        """
+        from qubasic_core.statetools import nonzero_indices
+        sv = np.asarray(sv).reshape(-1)
         n = n_qubits if n_qubits is not None else self.num_qubits
+        idx, total = nonzero_indices(sv, AMPLITUDE_THRESHOLD, MAX_DISPLAY_AMPLITUDES)
+        rows = []
+        for i in idx:
+            amp = complex(sv[int(i)])
+            rows.append((f"|{self._bits(format(int(i), f'0{n}b'))}\u27E9",
+                         f"{amp.real:+.4f}{amp.imag:+.4f}j", abs(amp) ** 2))
+        remaining = total - len(rows)
 
         if _RICH:
             table = _RichTable(show_header=True, header_style="bold cyan",
@@ -175,22 +187,10 @@ class DisplayMixin:
             table.add_column("Amplitude", justify="right")
             table.add_column("P", justify="right")
             self._rich_print(f"\n  [bold]Statevector ({n} qubits):[/bold]")
-            count = 0
-            for i, amp in enumerate(sv):
-                if abs(amp) > AMPLITUDE_THRESHOLD:
-                    state = self._bits(format(i, f'0{n}b'))
-                    prob = abs(amp)**2
-                    table.add_row(
-                        f"|{state}\u27E9",
-                        f"{amp.real:+.4f}{amp.imag:+.4f}j",
-                        f"{prob:.4f}")
-                    count += 1
-                    if count >= MAX_DISPLAY_AMPLITUDES:
-                        remaining = sum(1 for a in sv[i+1:]
-                                        if abs(a) > AMPLITUDE_THRESHOLD)
-                        if remaining:
-                            table.add_row("...", "", f"+{remaining} more")
-                        break
+            for ket, amp_s, prob in rows:
+                table.add_row(ket, amp_s, f"{prob:.4f}")
+            if remaining > 0:
+                table.add_row("...", "", f"+{remaining} more")
             try:
                 self._rich_print(table)
                 self._rich_print()
@@ -199,60 +199,46 @@ class DisplayMixin:
                 pass  # fall through to plain-text path below
 
         self.io.writeln(f"\n  Statevector ({n} qubits):")
-        count = 0
-        for i, amp in enumerate(sv):
-            if abs(amp) > AMPLITUDE_THRESHOLD:
-                state = self._bits(format(i, f'0{n}b'))
-                prob = abs(amp)**2
-                self.io.writeln(f"  |{state}\u27E9  {amp.real:+.4f}{amp.imag:+.4f}j  "
-                               f"(P={prob:.4f})")
-                count += 1
-                if count >= MAX_DISPLAY_AMPLITUDES:
-                    remaining = sum(1 for a in sv[i+1:] if abs(a) > AMPLITUDE_THRESHOLD)
-                    if remaining:
-                        self.io.writeln(f"  ... and {remaining} more non-zero amplitudes")
-                    break
+        for ket, amp_s, prob in rows:
+            self.io.writeln(f"  {ket}  {amp_s}  (P={prob:.4f})")
+        if remaining > 0:
+            self.io.writeln(f"  ... and {remaining} more non-zero amplitudes")
         self.io.writeln('')
 
     def _print_sv_compact(self, sv):
-        """Compact statevector display for step mode."""
+        """Compact statevector display for step mode (first 8 non-zero terms)."""
+        from qubasic_core.statetools import nonzero_indices
+        sv = np.asarray(sv).reshape(-1)
         n = self.num_qubits
+        idx, _ = nonzero_indices(sv, AMPLITUDE_THRESHOLD, 9, count=False)
         parts = []
-        for i, amp in enumerate(sv):
-            if abs(amp) > AMPLITUDE_THRESHOLD:
-                state = self._bits(format(i, f'0{n}b'))
-                if abs(amp.imag) < AMPLITUDE_THRESHOLD:
-                    parts.append(f"{amp.real:+.3f}|{state}\u27E9")
-                else:
-                    parts.append(f"({amp.real:.2f}{amp.imag:+.2f}j)|{state}\u27E9")
-                if len(parts) >= 8:
-                    parts.append("...")
-                    break
+        for i in idx[:8]:
+            amp = complex(sv[int(i)])
+            state = self._bits(format(int(i), f'0{n}b'))
+            if abs(amp.imag) < AMPLITUDE_THRESHOLD:
+                parts.append(f"{amp.real:+.3f}|{state}\u27E9")
+            else:
+                parts.append(f"({amp.real:.2f}{amp.imag:+.2f}j)|{state}\u27E9")
+        if len(idx) > 8:
+            parts.append("...")
         self.io.writeln(f"   |\u03C8\u27E9 = {' '.join(parts)}")
 
-    def _print_probs(self, sv):
-        """Print probability distribution with histogram."""
-        n = self.num_qubits
-        probs = []
-        for i, amp in enumerate(sv):
-            p = abs(amp)**2
-            if p > AMPLITUDE_THRESHOLD:
-                state = self._bits(format(i, f'0{n}b'))
-                probs.append((state, p))
+    def _print_probs(self, sv, n_qubits=None):
+        """Print the most probable outcomes with a histogram bar each."""
+        from qubasic_core.statetools import top_k
+        n = n_qubits if n_qubits is not None else self.num_qubits
+        idx, probs, total = top_k(sv, MAX_HISTOGRAM_STATES, AMPLITUDE_THRESHOLD)
 
-        probs.sort(key=lambda x: -x[1])
-        display = probs[:MAX_HISTOGRAM_STATES]
+        self.io.writeln(f"\n  Probability distribution ({total} non-zero):\n")
+        max_p = float(probs[0]) if probs.size else 1.0
 
-        self.io.writeln(f"\n  Probability distribution ({len(probs)} non-zero):\n")
-        max_p = max(p for _, p in display) if display else 1
-
-        for state, p in display:
-            bar_len = int(HISTOGRAM_BAR_WIDTH * p / max_p)
-            bar = '\u2588' * bar_len
+        for i, p in zip(idx, probs):
+            state = self._bits(format(int(i), f'0{n}b'))
+            bar = '\u2588' * int(HISTOGRAM_BAR_WIDTH * p / max_p)
             self.io.writeln(f"  |{state}\u27E9  {p*100:6.2f}%  {bar}")
 
-        if len(probs) > MAX_HISTOGRAM_STATES:
-            self.io.writeln(f"  ... and {len(probs)-MAX_HISTOGRAM_STATES} more states")
+        if total > MAX_HISTOGRAM_STATES:
+            self.io.writeln(f"  ... and {total - MAX_HISTOGRAM_STATES} more states")
         self.io.writeln('')
 
     def _print_bloch_single(self, sv, qubit, n_qubits=None):
@@ -318,23 +304,10 @@ class DisplayMixin:
         self.io.writeln(f"{_ket1:^{W+4}}")
 
     def _bloch_vector(self, sv, qubit, n_qubits=None):
-        """Compute the Bloch vector for a single qubit from the statevector."""
+        """Bloch vector (x, y, z) of one qubit: <X> = 2 Re(rho_10),
+        <Y> = 2 Im(rho_10), <Z> = rho_00 - rho_11, from the reduced state."""
+        from qubasic_core.statetools import bloch
         n = n_qubits if n_qubits is not None else self.num_qubits
-        sv_arr = np.array(sv).reshape([2] * n)
-
-        target_axis = n - 1 - qubit
-        tensor = np.moveaxis(sv_arr, target_axis, 0)
-        t0 = tensor[0].flatten()
-        t1 = tensor[1].flatten()
-
-        rho_00 = np.sum(np.abs(t0)**2)
-        rho_11 = np.sum(np.abs(t1)**2)
-        # conj(t0)*t1 sums to rho_10 = <1|rho|0>. <X> = 2 Re(rho_10) (Re is
-        # symmetric in rho_01/rho_10), and <Y> = -2 Im(rho_01) = +2 Im(rho_10).
-        rho_10 = np.sum(np.conj(t0) * t1)
-
-        x = float(2 * rho_10.real)
-        y = float(2 * rho_10.imag)
-        z = float(rho_00 - rho_11)
-
-        return x, y, z
+        if qubit < 0 or qubit >= n:
+            raise ValueError(f"QUBIT {qubit} OUT OF RANGE (0-{n - 1})")
+        return bloch(sv, qubit, n)

@@ -92,9 +92,11 @@ class LOCCExecutionMixin:
                             f"{max_q}-qubit LOCC w/ SEND (override: LOCC SHOTCAP <n>)")
             shots = effective_cap
 
-        # Execute deterministic prefix once (skip if jumps make it unsafe)
+        # Execute deterministic prefix once (skip if jumps make it unsafe, or
+        # when noise is active: each shot needs its own noise draws)
         self.locc.reset()
-        if has_prefix_jumps or first_send_ip == 0 or first_send_ip is None:
+        noisy = getattr(self.locc, 'noise_param', 0.0) > 0
+        if has_prefix_jumps or noisy or first_send_ip == 0 or first_send_ip is None:
             send_ip = 0  # no safe prefix — re-exec from start
         else:
             prefix_vars = dict(self.variables)
@@ -113,18 +115,31 @@ class LOCCExecutionMixin:
         counts_joint: dict[str, int] = {}
         t0 = time.time()
         progress_interval = max(1, shots // 10)
+        # Only the first shot prints; later shots replay its INPUT answers.
+        from qubasic_core.live import ShotIO
+        real_io = self.io
+        shot_io = ShotIO(real_io)
+        first_vars: dict = {}
 
         for shot in range(shots):
             # Restore to post-prefix state
             self.locc.restore(snap)
             self.variables.clear()
             self.variables.update(snap_vars)
+            if shot:
+                shot_io.start_replay()
+            self.io = shot_io
             try:
                 self._locc_execute_program(sorted_lines, start_ip=send_ip,
                                            run_vars=Scope(self.variables))
             except (RuntimeError, ValueError) as e:
+                self.io = real_io
                 self.io.writeln(f"?RUNTIME ERROR: {e}")
                 return
+            finally:
+                self.io = real_io
+            if shot == 0:
+                first_vars = dict(self.variables)
             if has_measure:
                 if self.locc.joint:
                     out = _sample_one_np(self.locc.sv, self.locc.n_total)
@@ -153,6 +168,9 @@ class LOCCExecutionMixin:
 
         if shots > 50 and sys.stdout.isatty():
             self.io.write(" " * 40 + '\r')
+        # Variables read as the first (printed) shot left them.
+        self.variables.clear()
+        self.variables.update(first_vars)
         dt = time.time() - t0
         self.io.writeln(f"\nRAN {len(self.program)} lines, LOCC {mode} "
                         f"{sizes_str}q, {shots} shots in {dt:.2f}s")
@@ -173,16 +191,32 @@ class LOCCExecutionMixin:
         noisy = getattr(self.locc, 'noise_param', 0.0) > 0
 
         if noisy and has_measure:
-            # Per-shot execution so noise fires independently each time
+            # Per-shot execution so noise fires independently each time; only
+            # the first shot prints.
+            from qubasic_core.live import ShotIO
             per_reg: dict[str, dict[str, int]] = {name: {} for name in self.locc.names}
             counts_joint: dict[str, int] = {}
+            real_io = self.io
+            shot_io = ShotIO(real_io)
+            base_vars = dict(self.variables)
+            first_vars: dict = {}
             for _shot in range(self.shots):
                 self.locc.reset()
+                self.variables.clear()
+                self.variables.update(base_vars)
+                if _shot:
+                    shot_io.start_replay()
+                self.io = shot_io
                 try:
                     self._locc_execute_program(sorted_lines)
                 except (RuntimeError, ValueError) as e:
+                    self.io = real_io
                     self.io.writeln(f"?RUNTIME ERROR: {e}")
                     return
+                finally:
+                    self.io = real_io
+                if _shot == 0:
+                    first_vars = dict(self.variables)
                 if self.locc.joint:
                     out = _sample_one_np(self.locc.sv, self.locc.n_total)
                     parts = []
@@ -199,6 +233,8 @@ class LOCCExecutionMixin:
                     per_reg[name][bits] = per_reg[name].get(bits, 0) + 1
                 jkey = '|'.join(parts)
                 counts_joint[jkey] = counts_joint.get(jkey, 0) + 1
+            self.variables.clear()
+            self.variables.update(first_vars)
             dt = time.time() - t0
             self.io.writeln(f"\nRAN {len(self.program)} lines, LOCC {mode} "
                             f"{sizes_str}q, {self.shots} shots in {dt:.2f}s")
@@ -247,29 +283,33 @@ class LOCCExecutionMixin:
         _parsed = [self._get_parsed(ln) for ln in sorted_lines]
         _stmts = [self.program[ln].strip() for ln in sorted_lines]
         n_lines = len(sorted_lines)
-        while ctx.ip < n_lines:
-            ctx.iteration_count += 1
-            if ctx.iteration_count > ctx.max_iterations:
-                raise RuntimeError(f"LOOP LIMIT ({ctx.max_iterations}) — possible infinite loop")
-            if isinstance(_parsed[ctx.ip], MeasureStmt):
-                ctx.ip += 1
-                continue
-            if stop_before_send and isinstance(_parsed[ctx.ip], SendStmt):
-                return ctx.ip
-            try:
-                result = self._locc_exec_line(_stmts[ctx.ip], ctx.loop_stack, sorted_lines, ctx.ip, run_vars, parsed=_parsed[ctx.ip])
-            except Exception as e:
-                raise RuntimeError(f"LINE {sorted_lines[ctx.ip]}: {e}") from None
-            if result is ExecResult.END:
-                break
-            elif isinstance(result, int):
-                ctx.ip = result
-            else:
-                ctx.ip += 1
+        prev_strict, self._strict_names = self._strict_names, False
+        try:
+            while ctx.ip < n_lines:
+                ctx.iteration_count += 1
+                if ctx.iteration_count > ctx.max_iterations:
+                    raise RuntimeError(f"LOOP LIMIT ({ctx.max_iterations}) — possible infinite loop")
+                if isinstance(_parsed[ctx.ip], MeasureStmt):
+                    ctx.ip += 1
+                    continue
+                if stop_before_send and isinstance(_parsed[ctx.ip], SendStmt):
+                    return ctx.ip
+                try:
+                    result = self._locc_exec_line(_stmts[ctx.ip], ctx.loop_stack, sorted_lines,
+                                                  ctx.ip, run_vars, parsed=_parsed[ctx.ip], ctx=ctx)
+                except Exception as e:
+                    raise RuntimeError(f"LINE {sorted_lines[ctx.ip]}: {e}") from None
+                if result is ExecResult.END:
+                    break
+                self._advance(ctx, result)
+        finally:
+            self._strict_names = prev_strict
         return ctx.ip
 
-    def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars, *, parsed=None):
-        """Execute one line in LOCC mode."""
+    def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars, *, parsed=None,
+                        ctx=None):
+        """Execute one line in LOCC mode (ctx: the executor loop's context,
+        for a whole line; absent for a compound's parts and IF clauses)."""
         from qubasic_core.parser import parse_stmt
         from qubasic_core.statements import (
             SendStmt, ShareStmt, AtRegStmt, CompoundStmt,
@@ -277,6 +317,16 @@ class LOCCExecutionMixin:
         )
         if parsed is None:
             parsed = parse_stmt(stmt)
+
+        def _part(sub):
+            return self._locc_exec_line(sub, loop_stack, sorted_lines, ip, run_vars)
+
+        if ctx is not None and ctx.resume is not None:
+            rp, ctx.resume = ctx.resume, None
+            if int(rp) == ip:
+                resumed = self._resume_compound(rp, parsed, loop_stack, ip, _part)
+                if resumed is not None:
+                    return resumed
 
         # Fast-path for terminals
         if isinstance(parsed, (RemStmt, MeasureStmt, BarrierStmt)):
@@ -288,9 +338,8 @@ class LOCCExecutionMixin:
                 raise RuntimeError("RETURN WITHOUT GOSUB")
             return self._gosub_stack.pop()
         if isinstance(parsed, CompoundStmt):
-            for sub in parsed.parts:
-                self._locc_exec_line(sub, loop_stack, sorted_lines, ip, run_vars)
-            return ExecResult.ADVANCE
+            frame = ('line', ip) if ctx is not None else ('clause', ip, stmt)
+            return self._run_compound(list(parsed.parts), _part, loop_stack, ip, frame)
 
         # Fast-path for LOCC-specific statements
         if isinstance(parsed, SendStmt):
@@ -404,41 +453,27 @@ class LOCCExecutionMixin:
             if gate_name == 'BARRIER':
                 continue
 
-            # CTRL modifier
+            # CTRL modifier: one control on any built-in or UNITARY gate
             m_ctrl = RE_CTRL.match(stmt)
             if m_ctrl:
-                inner_name = GATE_ALIASES.get(m_ctrl.group(1).upper(), m_ctrl.group(1).upper())
-                args = [a.strip() for a in m_ctrl.group(2).replace(',', ' ').split()]
-                ctrl_qubit = self._resolve_qubit(args[0], n_qubits=n_reg)
-                target_qubits = [self._resolve_qubit(a, n_qubits=n_reg) for a in args[1:]]
-                inner_matrix = _np_gate_matrix(inner_name, ())
-                dim = inner_matrix.shape[0]
-                n_inner_qubits = int(np.log2(dim))
-                if len(target_qubits) != n_inner_qubits:
-                    raise ValueError(
-                        f"CTRL {inner_name} needs 1 control + {n_inner_qubits} "
-                        f"target qubit(s), got {len(target_qubits)} target(s)")
+                canonical, params, qubits = self._modifier_operands(
+                    'CTRL', m_ctrl.group(1), m_ctrl.group(2), limit=n_reg)
+                inner, targets = self._np_operand(canonical, params, qubits[1:])
+                dim = inner.shape[0]
                 controlled = np.eye(2 * dim, dtype=complex)
-                controlled[dim:, dim:] = inner_matrix
-                self.locc.apply_matrix(reg, controlled, [ctrl_qubit] + target_qubits)
+                controlled[dim:, dim:] = inner
+                self.locc.apply_matrix(reg, controlled, [qubits[0]] + targets)
                 continue
 
             # INV modifier
             m_inv = RE_INV.match(stmt)
             if m_inv:
-                inner_name = GATE_ALIASES.get(m_inv.group(1).upper(), m_inv.group(1).upper())
-                inv_args = [a.strip() for a in m_inv.group(2).replace(',', ' ').split()]
-                info = self._gate_info(inner_name)
-                if info is None:
-                    raise ValueError(f"UNKNOWN GATE: {inner_name}")
-                n_params, n_qubits_needed = info
-                params = tuple(self.eval_expr(a) for a in inv_args[:n_params])
-                qubits = [self._resolve_qubit(a, n_qubits=n_reg) for a in inv_args[n_params:n_params+n_qubits_needed]]
-                matrix = _np_gate_matrix(inner_name, tuple(params)).conj().T
-                self.locc.apply_matrix(reg, matrix, qubits)
+                canonical, params, qubits = self._modifier_operands(
+                    'INV', m_inv.group(1), m_inv.group(2), limit=n_reg)
+                inner, targets = self._np_operand(canonical, params, qubits)
+                self.locc.apply_matrix(reg, inner.conj().T, targets)
                 continue
 
-            # Standard gate — through backend
             info = self._gate_info(gate_name)
             if info is None:
                 raise ValueError(f"UNKNOWN GATE: {gate_name}")
@@ -449,4 +484,19 @@ class LOCCExecutionMixin:
                                  f"{n_qubits_needed} qubits")
             params = tuple(self.eval_expr(a) for a in args[:n_params])
             qubits = [self._resolve_qubit(a, n_qubits=n_reg) for a in args[n_params:n_params+n_qubits_needed]]
-            backend.apply_gate(gate_name, params, qubits)
+            if gate_name in self._custom_gates:
+                matrix, targets = self._np_operand(gate_name, params, qubits)
+                self.locc.apply_matrix(reg, matrix, targets)
+            else:
+                backend.apply_gate(gate_name, params, qubits)
+
+    def _np_operand(self, canonical: str, params, qubits: list[int]) -> tuple[np.ndarray, list[int]]:
+        """(matrix, qubits) in the numpy engine's MSB-first convention.
+
+        Built-in gate matrices are MSB-first over the listed qubits already. A
+        UNITARY matrix follows Qiskit's order, where the first listed qubit is
+        the least significant bit of its index, so its qubit list is reversed.
+        """
+        if canonical in self._custom_gates:
+            return np.asarray(self._custom_gates[canonical]), list(reversed(qubits))
+        return _np_gate_matrix(canonical, tuple(params)), list(qubits)

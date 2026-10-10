@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.19.0 (2026-10-10)
+
+### Added
+- Live execution: a program that reads a mid-circuit measurement bit as a number (PRINT, LET, comparisons, GOTO, loops) runs shot by shot on a numpy statevector, with MEAS returning the collapsed outcome. Only the first shot prints, later shots replay its INPUT answers and write no files, and the summary reads `method=live`. Afterwards variables hold the first shot's values and SAVE_EXPECT/SAVE_PROBS the mean over shots. Noise models run as quantum trajectories with readout error. MEASURE_X/Y/Z and SYNDROME bits behave the same. IF <bit> THEN <gates> still compiles to a dynamic circuit.
+- `LQUBITS <n> CODE STEANE [PHYS p]` simulates the program encoded: [[7,1,3]] blocks, transversal Clifford gates, depolarizing noise after every physical gate and on readout, a syndrome-extraction round with conditional corrections after every logical gate, and block-wise decoded readout on the stabilizer simulator. RUN reports the total variation distance from the ideal distribution (`_LOGICAL_TVD`). The other codes are labeled as modeled.
+- `PRECISION SINGLE|DOUBLE` (also `$D00C`): complex64 amplitudes for Aer statevector-family methods, LOCC, STEP and live runs.
+- Memory model (`qubasic_core/capacity.py`): runs are sized against the RAM available at the moment, and one that cannot fit is refused with its requirement and the alternatives. The banner, QUBITS, STATUS and RAM report the widest statevector run at each precision.
+- Entanglement and state analysis without dense 2^n x 2^n matrices (`qubasic_core/statetools.py`): reduced density matrices accumulated block by block, used by ENTROPY, NEGATIVITY, CONCURRENCE, EXPECT, CONSISTENCY, BLOCH and HEATMAP.
+- `PRINT STATE`, `PRINT QUBIT(q)` and `PRINT ENTANGLEMENT(a, b)` inside a program show the state at that line.
+- HEATMAP shows pairwise quantum mutual information; `HEATMAP CONCURRENCE` shows concurrence.
+- Exact minimum-weight perfect matching decoder (rustworkx blossom on the code's matching graph with boundary nodes; `MATCH`, alias `UF`). Lookup tables are built in order of error weight, and the default decoder is lookup while the syndrome space allows and matching beyond. THRESHOLD takes decoder flags and `TRIALS n`.
+- DEVICE heavyhex builds Qiskit's heavy-hex coupling map. Device noise sits on coupled pairs only.
+
+### Changed
+- Colon compounds run every statement whatever it is (`PRINT 1: PRINT 2`, `LET a = 1: LET b = 2`, `RESET 0: X 0`), and a colon inside a string is text. GOTO, GOSUB, RETURN and END inside a compound take effect. An IF owns the rest of its line, as do REM, `'` and DEF.
+- Loops follow QBASIC. Single-line loops (`FOR I = 1 TO 3: H I: NEXT I`) and loops opened mid-line work. A FOR whose range the step cannot reach is zero-trip, and the counter ends one step past the limit. WHILE and DO keep one loop-stack entry per loop. NEXT, WEND and LOOP close loops a jump left open. EXIT FOR/WHILE/DO search statement by statement. GOSUB, ON GOSUB and CALL return to the next statement on the line, inside IF clauses as well.
+- A single `=` inside an expression is equality (`IF x = 2 THEN`, `flag = a = b`). `^` is exponentiation and `MOD` the BASIC remainder (sign of the dividend). SGN, SQR, ATN, CINT, CLNG, CSNG and CDBL are available. A bare `PRINT` prints a blank line.
+- In a running program an unassigned variable reads 0 (`""` for `name$`); qubit indices, gate parameters, matrix literals and prompt commands still reject unknown names.
+- PRINT formats numbers as BASIC does: a leading space for non-negative values, a trailing space, whole numbers without a decimal point, exponents as `1E+20`.
+- SELECT CASE takes value lists, `a TO b` ranges, `IS <op> v` comparisons, exact string cases and `CASE v: statement` on one line.
+- STEP runs as one live shot, so MEAS collapses the displayed state and IF/PRINT see the outcome. STEP honors END.
+- LOCC runs print on the first shot only, keep the first shot's variables, and re-execute the prefix per shot when noise is active.
+- APPLYCHANNEL leaves METHOD unchanged. Shots sample the channel as trajectories, and a run without MEASURE keeps the mixed state for DENSITY.
+- The exact LINDBLAD path keeps the Hamiltonian and jump operators sparse and reaches 10 qubits.
+- A RUN with no gates skips the simulator.
+- Measured runs keep their final state from inside the same simulation when memory allows. Otherwise it is computed on first use.
+- The transpile cache is keyed on a digest of the built circuit, so DEF, UNITARY, SET_STATE and variable changes rebuild it.
+- The numpy engine (LOCC, STEP, live runs) updates states in place, block by block.
+- AMPEST is maximum-likelihood amplitude estimation over the program's state (`AMPEST [m] <qubit | |bits>> [SHOTS n]`), with a Fisher-information spread.
+- HHL uses a signed clock register and a uniformly controlled RY, and reports fidelity and post-selection probability.
+- CTRL takes gate parameters and UNITARY gates in both execution paths; UNITARY gates run in LOCC mode.
+- OPTION ENDIAN applies to CSV, CLIP, COMPARE, ANIMATE, Lindblad populations and qudit output (qudit 0 rightmost).
+- MEAS and RESET reject out-of-range qubits. A MEAS repeated in a loop compiles, with feedforward reading the latest outcome. SYNDROME and MEASURE_X/Y/Z bits drive IF feedforward.
+- The web REPL serializes requests on its one terminal, compares the token in constant time, caps request size, and treats INPUT as end of input. The Jupyter kernel captures output per cell and asks INPUT through the notebook when allowed.
+- Time-travel checkpoints hold up to 64 MiB each within a 256 MiB budget.
+- LQUBITS OFF restores the noise model that was active before.
+- SAMPLE samples the program's MEASURE subset (or every qubit) with the active noise model, precision and SEED.
+- METHOD rejects unknown method names. POKE $D000 clamps to the method's qubit ceiling.
+- PAULIPROP refuses programs that measure or reset.
+- PROFILE reports the gates each line adds.
+- CHAIN and MERGE read files that begin with a byte-order mark.
+
 ## 0.18.0 (2026-07-03)
 
 ### Added

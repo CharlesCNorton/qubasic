@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
+
+# Amplitudes per block for chunked in-place updates (64 MiB at complex128).
+# States at or below this size are updated in one block.
+_CHUNK_AMPS = 1 << 22
 
 # ═══════════════════════════════════════════════════════════════════════
 # Gate tables: name -> (num_params, num_qubits)
@@ -211,74 +217,159 @@ def _np_gate_matrix(name: str, params: tuple[float, ...] = ()) -> np.ndarray:
     return builder(params)
 
 
+def _blocks(psi: np.ndarray, n_qubits: int, pinned: dict[int, int] | None = None,
+            keep: tuple[int, ...] = (), max_amps: int | None = None):
+    """Yield views that tile psi (shape [2]*n) without copying.
+
+    `pinned` fixes axes to one index ({axis: 0|1}); the remaining free axes
+    not in `keep` are split, leading axes first, until a block holds at most
+    max_amps amplitudes. Pinned and split axes become length-1 slices, so
+    every block keeps all n axes and stays a writable view.
+    """
+    if max_amps is None:
+        max_amps = _CHUNK_AMPS
+    pinned = pinned or {}
+    free = [a for a in range(n_qubits) if a not in pinned and a not in keep]
+    per_block = 1 << (n_qubits - len(pinned))
+    split: list[int] = []
+    for a in free:
+        if per_block <= max_amps:
+            break
+        split.append(a)
+        per_block >>= 1
+    for bits in itertools.product((0, 1), repeat=len(split)):
+        sl: list = [slice(None)] * n_qubits
+        for a, v in pinned.items():
+            sl[a] = slice(v, v + 1)
+        for a, v in zip(split, bits):
+            sl[a] = slice(v, v + 1)
+        yield psi[tuple(sl)]
+
+
+def _as_tensor(sv: np.ndarray, n_qubits: int) -> np.ndarray:
+    """A [2]*n view of a C-contiguous statevector (raises if it would copy)."""
+    if not sv.flags.c_contiguous:
+        raise ValueError("statevector must be C-contiguous for in-place updates")
+    return sv.reshape([2] * n_qubits)
+
+
+def _apply_gate_inplace(
+    sv: np.ndarray, matrix: np.ndarray, qubits: list[int], n_qubits: int,
+) -> np.ndarray:
+    """Apply a k-qubit gate to a contiguous statevector in place.
+
+    The matrix is MSB-first over `qubits` (qubits[0] is the most significant
+    bit of its row index). Work proceeds in blocks of at most _CHUNK_AMPS
+    amplitudes, so the scratch memory is one block rather than a second copy
+    of the state. Returns sv.
+    """
+    k = len(qubits)
+    if k == 0:
+        return sv
+    psi = _as_tensor(sv, n_qubits)
+    axes = [n_qubits - 1 - q for q in qubits]
+    gate_t = np.asarray(matrix, dtype=sv.dtype).reshape([2] * (2 * k))
+    src, dst = list(range(k, 2 * k)), list(range(k))
+    for block in _blocks(psi, n_qubits, keep=tuple(axes)):
+        res = np.tensordot(gate_t, block, axes=(src, axes))
+        block[...] = np.moveaxis(res, dst, axes)
+    return sv
+
+
 def _apply_gate_np(
     sv: np.ndarray, matrix: np.ndarray, qubits: list[int], n_qubits: int,
 ) -> np.ndarray:
-    """Apply a k-qubit gate to a statevector using numpy tensordot.
+    """Apply a k-qubit gate and return a new flat statevector (input unchanged)."""
+    out = np.array(sv, dtype=np.result_type(sv, np.complex64), copy=True).reshape(-1)
+    return _apply_gate_inplace(out, matrix, qubits, n_qubits)
 
-    Returns a tensor of shape [2]*n (possibly non-contiguous view).
-    This avoids an extra 32 GB copy for large qubit counts.
-    The caller stores the result directly; previous sv is freed.
+
+def _subspace_norm2(psi: np.ndarray, n_qubits: int, axis: int, value: int) -> float:
+    """Sum of |amplitude|^2 over the half of psi where `axis` == value."""
+    total = 0.0
+    for block in _blocks(psi, n_qubits, pinned={axis: value}):
+        total += float(np.vdot(block, block).real)
+    return total
+
+
+def _marginal_p1(sv: np.ndarray, qubit: int, n_qubits: int) -> float:
+    """Probability that `qubit` reads 1, without copying the state."""
+    return _subspace_norm2(_as_tensor(sv, n_qubits), n_qubits, n_qubits - 1 - qubit, 1)
+
+
+def _measure_inplace(sv: np.ndarray, qubit: int, n_qubits: int) -> int:
+    """Born-rule measurement of one qubit; collapses sv in place.
+
+    Draws from numpy's global generator (so SEED reproduces runs). When both
+    marginals underflow, the state resets to |0...0> and the outcome is 0.
     """
-    k = len(qubits)
-    sv_t = sv.reshape([2] * n_qubits)  # view if already contiguous
-    axes = [n_qubits - 1 - q for q in qubits]
-    gate_t = matrix.reshape([2] * (2 * k))
-    # Contract gate's input axes (k..2k-1) with sv's target axes
-    result = np.tensordot(gate_t, sv_t, axes=(list(range(k, 2*k)), axes))
-    # Move gate output axes (0..k-1) to the target positions (view, no copy)
-    return np.moveaxis(result, list(range(k)), axes)
+    psi = _as_tensor(sv, n_qubits)
+    ax = n_qubits - 1 - qubit
+    p0 = _subspace_norm2(psi, n_qubits, ax, 0)
+    p1 = _subspace_norm2(psi, n_qubits, ax, 1)
+    total = p0 + p1
+    if total < 1e-300:
+        sv[...] = 0
+        sv[0] = 1.0
+        return 0
+    outcome = 0 if np.random.random() < p0 / total else 1
+    if outcome == 0 and p0 < 1e-300:
+        outcome = 1
+    elif outcome == 1 and p1 < 1e-300:
+        outcome = 0
+    scale = 1.0 / np.sqrt(p0 if outcome == 0 else p1)
+    for block in _blocks(psi, n_qubits, pinned={ax: 1 - outcome}):
+        block[...] = 0
+    for block in _blocks(psi, n_qubits, pinned={ax: outcome}):
+        block *= scale
+    return outcome
 
 
 def _measure_np(
     sv: np.ndarray, qubit: int, n_qubits: int,
 ) -> tuple[int, np.ndarray]:
-    """Mid-circuit measurement with Born-rule sampling and state collapse.
+    """Measure one qubit; returns (outcome, collapsed copy). Input unchanged."""
+    out = np.array(sv, dtype=np.result_type(sv, np.complex64), copy=True).reshape(-1)
+    outcome = _measure_inplace(out, qubit, n_qubits)
+    return outcome, out
 
-    Computes marginal probabilities for |0> and |1> on the target qubit,
-    samples an outcome, and collapses + renormalizes the statevector.
-    Includes a numerical floor to avoid division-by-zero when both
-    marginals underflow to zero.
+
+def _sample_counts(sv: np.ndarray, n_qubits: int, shots: int) -> dict[str, int]:
+    """Sample measurement outcomes from a statevector.
+
+    States of at most _CHUNK_AMPS amplitudes are sampled in one draw. Larger
+    states draw a multinomial split of the shots over contiguous chunks, then
+    sample within each chunk, so scratch memory stays one chunk.
     """
-    sv = np.ascontiguousarray(sv).reshape([2] * n_qubits)
-    ax = n_qubits - 1 - qubit
-    idx_0: list = [slice(None)] * n_qubits
-    idx_1: list = [slice(None)] * n_qubits
-    idx_0[ax] = 0
-    idx_1[ax] = 1
-    p0 = float(np.sum(np.abs(sv[tuple(idx_0)])**2))
-    p1 = float(np.sum(np.abs(sv[tuple(idx_1)])**2))
-    total = p0 + p1
-    if total < 1e-300:
-        # Numerical underflow: both marginals are essentially zero.
-        # Default to outcome 0 and return a normalized |0> on this qubit.
-        new_sv = np.zeros(2**n_qubits, dtype=complex)
-        new_sv[0] = 1.0
-        return 0, new_sv
-    outcome = 0 if np.random.random() < p0 / total else 1
-    # Guard: if the chosen outcome has negligible probability, force the other.
-    if outcome == 0 and p0 < 1e-300:
-        outcome = 1
-    elif outcome == 1 and p1 < 1e-300:
-        outcome = 0
-    new_sv = np.zeros_like(sv)
-    if outcome == 0:
-        new_sv[tuple(idx_0)] = sv[tuple(idx_0)] / np.sqrt(p0)
+    flat = np.asarray(sv).reshape(-1)
+    size = flat.size
+    if size <= _CHUNK_AMPS:
+        probs = np.abs(flat) ** 2
+        probs /= probs.sum()
+        indices = np.random.choice(size, size=shots, p=probs)
     else:
-        new_sv[tuple(idx_1)] = sv[tuple(idx_1)] / np.sqrt(p1)
-    return outcome, new_sv.reshape(-1)
+        starts = list(range(0, size, _CHUNK_AMPS))
+        masses = np.array([float(np.vdot(flat[s:s + _CHUNK_AMPS],
+                                          flat[s:s + _CHUNK_AMPS]).real) for s in starts])
+        per = np.random.multinomial(shots, masses / masses.sum())
+        parts = []
+        for s, k in zip(starts, per):
+            if k == 0:
+                continue
+            pr = np.abs(flat[s:s + _CHUNK_AMPS]) ** 2
+            pr /= pr.sum()
+            parts.append(s + np.random.choice(pr.size, size=int(k), p=pr))
+        indices = np.concatenate(parts)
+    unique, ucounts = np.unique(indices, return_counts=True)
+    return {format(int(idx), f'0{n_qubits}b'): int(cnt) for idx, cnt in zip(unique, ucounts)}
 
 
 def _sample_np(sv: np.ndarray, n_qubits: int, shots: int) -> dict[str, int]:
     """Sample measurement outcomes from a statevector."""
-    probs = np.abs(np.ascontiguousarray(sv).ravel())**2
-    probs /= probs.sum()
-    indices = np.random.choice(probs.size, size=shots, p=probs)
-    unique, ucounts = np.unique(indices, return_counts=True)
-    return {format(idx, f'0{n_qubits}b'): int(cnt) for idx, cnt in zip(unique, ucounts)}
+    return _sample_counts(sv, n_qubits, shots)
 
 
 def _sample_one_np(sv: np.ndarray, n_qubits: int) -> str:
     """Sample a single measurement outcome."""
-    counts = _sample_np(sv, n_qubits, 1)
+    counts = _sample_counts(sv, n_qubits, 1)
     return next(iter(counts))

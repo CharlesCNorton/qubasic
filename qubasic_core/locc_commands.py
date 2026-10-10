@@ -1,4 +1,4 @@
-"""QUBASIC LOCC commands mixin — cmd_locc, cmd_send, cmd_share, cmd_connect, cmd_disconnect, cmd_loccinfo."""
+"""QUBASIC LOCC commands mixin — cmd_locc, cmd_send, cmd_share, cmd_loccinfo."""
 
 import re
 

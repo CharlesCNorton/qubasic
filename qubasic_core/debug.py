@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 MAX_SV_CHECKPOINTS = 200
-from typing import Any
+# Time-travel history: one checkpoint may hold at most CHECKPOINT_MAX_BYTES
+# (a 22-qubit double-precision state), and the history keeps the newest
+# checkpoints within CHECKPOINT_BUDGET_BYTES.
+CHECKPOINT_MAX_BYTES = 64 << 20
+CHECKPOINT_BUDGET_BYTES = 256 << 20
 
 from qubasic_core.engine import (
     ExecResult, ExecOutcome,
@@ -132,20 +137,22 @@ class DebugMixin:
     # ── Time-travel debugging ─────────────────────────────────────────
 
     def _checkpoint_sv(self, line_num: int) -> None:
-        """Save a statevector checkpoint (for small qubit counts).
+        """Save a statevector checkpoint for REWIND/FORWARD.
 
-        Only checkpoints systems with <= 12 qubits to keep memory reasonable.
-        12 qubits = 2^12 complex128 = ~64KB per checkpoint.
-        At MAX_SV_CHECKPOINTS=200 that is ~12MB total, versus ~1GB for 16-qubit
-        systems at the old limit.
+        A state up to CHECKPOINT_MAX_BYTES (22 qubits at double precision) is
+        kept; the oldest checkpoints are dropped beyond MAX_SV_CHECKPOINTS
+        entries or CHECKPOINT_BUDGET_BYTES in total.
         """
-        if self.last_sv is not None and self.num_qubits <= 12:
-            import numpy as np
-            self._sv_checkpoints.append((line_num, np.array(self.last_sv).copy()))
-            if len(self._sv_checkpoints) > MAX_SV_CHECKPOINTS:
-                excess = len(self._sv_checkpoints) - MAX_SV_CHECKPOINTS
-                del self._sv_checkpoints[:excess]
-            self._tt_position = len(self._sv_checkpoints) - 1
+        sv = self._last_sv
+        if sv is None or sv.nbytes > CHECKPOINT_MAX_BYTES:
+            return
+        import numpy as np
+        self._sv_checkpoints.append((line_num, np.array(sv, copy=True)))
+        total = sum(c.nbytes for _, c in self._sv_checkpoints)
+        while self._sv_checkpoints and (len(self._sv_checkpoints) > MAX_SV_CHECKPOINTS
+                                        or total > CHECKPOINT_BUDGET_BYTES):
+            total -= self._sv_checkpoints.pop(0)[1].nbytes
+        self._tt_position = len(self._sv_checkpoints) - 1
 
     def cmd_rewind(self, rest: str = '') -> None:
         """REWIND [N] — go back N steps in the statevector history."""

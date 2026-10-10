@@ -59,12 +59,9 @@ MAX_BLOCH_DISPLAY = 8
 HISTOGRAM_BAR_WIDTH = 35
 AMPLITUDE_THRESHOLD = 1e-8
 MAX_INCLUDE_DEPTH = 8
-# Realistic multiplier for Qiskit Aer statevector simulation:
-#   1x  statevector itself (2^n complex128 = 2^n * 16 bytes)
-#  ~1x  transpilation intermediates and circuit representation
-#  ~1x  Aer internal copy during simulation and measurement collapse
-# Conservative estimate; actual overhead varies by method and circuit depth.
-OVERHEAD_FACTOR = 3.0
+# Peak memory of an Aer statevector run relative to the raw state; the full
+# model (state capture, single precision, numpy engines) is in capacity.py.
+from qubasic_core.capacity import AER_FACTOR as OVERHEAD_FACTOR  # noqa: E402
 RAM_BUDGET_FRACTION = 0.8
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -101,9 +98,10 @@ except ImportError:
 
 
 
-def _estimate_gb(n_qubits: int) -> float:
-    """Estimate realistic memory for one n-qubit statevector including overhead."""
-    return (2 ** n_qubits) * 16 * OVERHEAD_FACTOR / 1e9
+def _estimate_gb(n_qubits: int, precision: str = 'double') -> float:
+    """Peak memory (GB) of an n-qubit statevector run that returns counts."""
+    from qubasic_core.capacity import aer_peak_bytes
+    return (aer_peak_bytes(n_qubits, 'statevector', precision) or 0) / 1e9
 
 
 def _get_ram_gb() -> tuple[float, float] | None:

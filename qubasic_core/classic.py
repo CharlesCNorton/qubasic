@@ -12,6 +12,7 @@ from qubasic_core.engine import (
     RE_DO, RE_LOOP_STMT, RE_EXIT,
     RE_SWAP, RE_DEF_FN, RE_OPTION_BASE,
 )
+from qubasic_core.statements import SelectCaseStmt, CaseStmt, EndSelectStmt
 
 
 class ClassicMixin:
@@ -27,6 +28,8 @@ class ClassicMixin:
         self._data_ptr: int = 0
         self._data_cache_key: tuple | None = None
         self._option_base: int = 0
+        # OPTION ENDIAN BIG shows bitstrings with qubit 0 leftmost.
+        self._endian_big: bool = False
         self._user_fns: dict[str, dict[str, Any]] = {}
         self._select_stack: list[Any] = []
 
@@ -141,7 +144,7 @@ class ClassicMixin:
             targets = [int(t.strip()) for t in m.group(2).split(',') if t.strip()]
         if 1 <= idx <= len(targets):
             target = targets[idx - 1]
-            self._gosub_stack.append(ip + 1)
+            self._gosub_stack.append(self._return_point(ip))
             for i, ln in enumerate(sorted_lines):
                 if ln == target:
                     return True, i
@@ -153,57 +156,82 @@ class ClassicMixin:
     def _cf_select_case(self, stmt: str, run_vars: dict[str, Any],
                         sorted_lines: list[int], ip: int, *, parsed=None) -> tuple[bool, ExecOutcome] | None:
         if parsed is not None:
-            test_val = self._eval_with_vars(parsed.expr, run_vars)
+            expr = parsed.expr
         else:
             m = RE_SELECT_CASE.match(stmt)
             if not m:
                 return None
-            test_val = self._eval_with_vars(m.group(1).strip(), run_vars)
+            expr = m.group(1).strip()
+        ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else dict(run_vars)
+        test_val = self._safe_eval(expr, extra_ns=ns)
         self._select_stack.append(test_val)
-        # Scan forward for matching CASE
-        scan = ip + 1
+        # The first CASE at this nesting level that matches runs its block
+        # (the statements after it, on its line and the lines below).
         depth = 1
-        while scan < len(sorted_lines):
-            s = self.program[sorted_lines[scan]].strip().upper()
-            if s.startswith('SELECT CASE'):
+        for j, kk, p, frame, n_parts in self._stmts_after(sorted_lines, ip):
+            if isinstance(p, SelectCaseStmt):
                 depth += 1
-            elif s == 'END SELECT':
+            elif isinstance(p, EndSelectStmt):
                 depth -= 1
                 if depth == 0:
                     self._select_stack.pop()
-                    return True, scan + 1  # no matching case
-            elif depth == 1 and s.startswith('CASE '):
-                case_val = s[5:].strip()
-                if case_val == 'ELSE':
-                    return True, scan + 1  # execute CASE ELSE block
-                try:
-                    if float(test_val) == float(self._eval_with_vars(case_val, run_vars)):
-                        return True, scan + 1  # execute this CASE block
-                except (ValueError, TypeError):
-                    if str(test_val) == case_val:
-                        return True, scan + 1
-            scan += 1
+                    return True, self._after_stmt(j, kk, frame, n_parts)
+            elif depth == 1 and isinstance(p, CaseStmt) and \
+                    self._case_matches(p.value, test_val, run_vars):
+                return True, self._after_stmt(j, kk, frame, n_parts)
         raise RuntimeError("SELECT CASE without END SELECT")
+
+    _CASE_OPS = {'=': lambda a, b: a == b, '<>': lambda a, b: a != b,
+                 '<': lambda a, b: a < b, '<=': lambda a, b: a <= b,
+                 '>': lambda a, b: a > b, '>=': lambda a, b: a >= b}
+
+    def _case_matches(self, spec: str, test_val: Any, run_vars: dict[str, Any]) -> bool:
+        """Whether a CASE clause matches the SELECT value: CASE ELSE, a list of
+        values, ranges (lo TO hi) and comparisons (IS > v), as in QBASIC.
+        String cases compare exactly."""
+        if spec.strip().upper() == 'ELSE':
+            return True
+        ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else dict(run_vars)
+
+        def value(expr: str) -> Any:
+            v = self._safe_eval(expr.strip(), extra_ns=ns)
+            return v if isinstance(v, str) else float(v)
+
+        target = test_val if isinstance(test_val, str) else float(test_val)
+        for item in self._split_arg_list(spec):
+            try:
+                m = re.match(r'IS\s*(<=|>=|<>|=|<|>)\s*(.+)$', item, re.IGNORECASE)
+                if m:
+                    if self._CASE_OPS[m.group(1)](target, value(m.group(2))):
+                        return True
+                    continue
+                m = re.match(r'(.+?)\s+TO\s+(.+)$', item, re.IGNORECASE)
+                if m:
+                    if value(m.group(1)) <= target <= value(m.group(2)):
+                        return True
+                    continue
+                if target == value(item):
+                    return True
+            except TypeError:
+                continue    # a string case against a number (or vice versa)
+        return False
 
     def _cf_case(self, stmt: str, sorted_lines: list[int], ip: int, *, parsed=None) -> tuple[bool, ExecOutcome] | None:
         if parsed is None:
             m = RE_CASE.match(stmt)
             if not m:
                 return None
-        # If we reach a CASE during execution, skip to END SELECT (we already matched)
+        # Reaching another CASE ends the matched block: continue after END SELECT.
         depth = 1
-        scan = ip + 1
-        while scan < len(sorted_lines):
-            s = self.program[sorted_lines[scan]].strip().upper()
-            if s.startswith('SELECT CASE'):
+        for j, kk, p, frame, n_parts in self._stmts_after(sorted_lines, ip):
+            if isinstance(p, SelectCaseStmt):
                 depth += 1
-            elif s == 'END SELECT':
+            elif isinstance(p, EndSelectStmt):
                 depth -= 1
                 if depth == 0:
                     if self._select_stack:
                         self._select_stack.pop()
-                    return True, scan + 1
-            scan += 1
+                    return True, self._after_stmt(j, kk, frame, n_parts)
         return True, ExecResult.ADVANCE
 
     def _cf_end_select(self, stmt: str, *, parsed=None) -> tuple[bool, ExecOutcome] | None:
@@ -215,23 +243,6 @@ class ClassicMixin:
         return None
 
     # ── DO / LOOP ─────────────────────────────────────────────────────
-
-    def _find_matching_loop(self, sorted_lines: list[int], ip: int) -> int:
-        jt = getattr(self, '_jump_table', None)
-        if jt and ip in jt:
-            return jt[ip]
-        depth = 1
-        scan = ip + 1
-        while scan < len(sorted_lines):
-            s = self.program[sorted_lines[scan]].strip().upper()
-            if s.startswith('DO'):
-                depth += 1
-            elif s.startswith('LOOP'):
-                depth -= 1
-                if depth == 0:
-                    return scan
-            scan += 1
-        raise RuntimeError(f"DO at line {sorted_lines[ip]} has no matching LOOP")
 
     def _cf_do(self, stmt: str, run_vars: dict[str, Any],
                loop_stack: list[dict[str, Any]],
@@ -245,16 +256,19 @@ class ClassicMixin:
                 return None
             kind = m.group(1)  # WHILE or UNTIL or None
             cond = m.group(2)  # condition or None
+        self._drop_loop(loop_stack, 'do', ip)
         if kind and cond:
             # Pre-test
             result = self._eval_condition(cond, run_vars)
             if kind.upper() == 'UNTIL':
                 result = not result
             if not result:
-                # Skip to after LOOP
-                loop_ip = self._find_matching_loop(sorted_lines, ip)
-                return True, loop_ip + 1
-        loop_stack.append({'type': 'do', 'return_ip': ip, 'kind': kind, 'cond': cond})
+                target = self._find_block_end(sorted_lines, ip, 'do')
+                if target is None:
+                    raise RuntimeError(f"DO at line {sorted_lines[ip]} has no matching LOOP")
+                return True, target
+        loop_stack.append(self._mark_loop(
+            {'type': 'do', 'return_ip': ip, 'kind': kind, 'cond': cond}, ip))
         return True, ExecResult.ADVANCE
 
     def _cf_loop(self, stmt: str, run_vars: dict[str, Any],
@@ -269,8 +283,12 @@ class ClassicMixin:
                 return None
             loop_kind = m.group(1)
             loop_cond = m.group(2)
-        # Only handle as DO/LOOP keyword if we're inside a DO block
-        if not loop_stack or loop_stack[-1].get('type') != 'do':
+        # Only handle as DO/LOOP keyword if we're inside a DO block (loops a
+        # jump left open inside it are closed here).
+        idx = len(loop_stack) - 1
+        while idx >= 0 and loop_stack[idx].get('type') != 'do':
+            idx -= 1
+        if idx < 0:
             # Bare "LOOP" (no WHILE/UNTIL) that matches a SUB name should
             # be handed off to subroutine expansion, not treated as a keyword.
             is_bare = loop_kind is None  # no WHILE/UNTIL suffix
@@ -280,6 +298,7 @@ class ClassicMixin:
             # without a DO — both are errors or no-ops.  Return None so the
             # caller can decide (gate dispatch will surface an error if needed).
             return None
+        del loop_stack[idx + 1:]
         loop = loop_stack[-1]
         # Post-test condition on LOOP
         kind = loop_kind
@@ -289,7 +308,7 @@ class ClassicMixin:
             if kind.upper() == 'UNTIL':
                 result = not result
             if result:
-                return True, loop['return_ip']
+                return True, self._loop_body(loop)
             else:
                 loop_stack.pop()
                 return True, ExecResult.ADVANCE
@@ -299,12 +318,12 @@ class ClassicMixin:
             if loop['kind'].upper() == 'UNTIL':
                 result = not result
             if result:
-                return True, loop['return_ip']
+                return True, self._loop_body(loop)
             else:
                 loop_stack.pop()
                 return True, ExecResult.ADVANCE
         # Infinite DO/LOOP (no condition) — loop forever
-        return True, loop['return_ip']
+        return True, self._loop_body(loop)
 
     # ── EXIT ──────────────────────────────────────────────────────────
 
@@ -317,49 +336,19 @@ class ClassicMixin:
             if not m:
                 return None
             kind = m.group(1).upper()
-        if kind == 'FOR':
-            # Find matching NEXT
-            scan = ip + 1
-            depth = 1
-            while scan < len(sorted_lines):
-                s = self.program[sorted_lines[scan]].strip().upper()
-                if s.startswith('FOR '):
-                    depth += 1
-                elif s.startswith('NEXT '):
-                    depth -= 1
-                    if depth == 0:
-                        if loop_stack and loop_stack[-1].get('var'):
-                            loop_stack.pop()
-                        return True, scan + 1
-                scan += 1
-        elif kind == 'WHILE':
-            scan = ip + 1
-            depth = 1
-            while scan < len(sorted_lines):
-                s = self.program[sorted_lines[scan]].strip().upper()
-                if s.startswith('WHILE '):
-                    depth += 1
-                elif s == 'WEND':
-                    depth -= 1
-                    if depth == 0:
-                        if loop_stack and loop_stack[-1].get('type') == 'while':
-                            loop_stack.pop()
-                        return True, scan + 1
-                scan += 1
-        elif kind == 'DO':
-            scan = ip + 1
-            depth = 1
-            while scan < len(sorted_lines):
-                s = self.program[sorted_lines[scan]].strip().upper()
-                if s.startswith('DO'):
-                    depth += 1
-                elif s.startswith('LOOP'):
-                    depth -= 1
-                    if depth == 0:
-                        if loop_stack and loop_stack[-1].get('type') == 'do':
-                            loop_stack.pop()
-                        return True, scan + 1
-                scan += 1
+        if kind in ('FOR', 'WHILE', 'DO'):
+            # Leave the innermost loop of that kind (and any loops inside it)
+            # for the statement after its NEXT / WEND / LOOP.
+            want = kind.lower()
+            idx = len(loop_stack) - 1
+            while idx >= 0 and not (
+                    (want == 'for' and loop_stack[idx].get('var') is not None)
+                    or loop_stack[idx].get('type') == want):
+                idx -= 1
+            target = self._find_block_end(sorted_lines, ip, want)
+            if idx >= 0 and target is not None:
+                del loop_stack[idx:]
+                return True, target
         elif kind in ('SUB', 'FUNCTION'):
             return True, ExecResult.END
         raise RuntimeError(f"EXIT {kind}: no matching block")
@@ -398,16 +387,6 @@ class ClassicMixin:
             body = m.group(3).strip()
         self._user_fns[name] = {'params': params, 'body': body}
         return True, ExecResult.ADVANCE
-
-    def _call_user_fn(self, name: str, args: list[float]) -> float:
-        """Call a DEF FN function."""
-        fn = self._user_fns.get(name.upper())
-        if fn is None:
-            raise ValueError(f"UNDEFINED FUNCTION: {name}")
-        ns = {}
-        for i, pname in enumerate(fn['params']):
-            ns[pname] = args[i] if i < len(args) else 0
-        return float(self._safe_eval(fn['body'], extra_ns=ns))
 
     # ── OPTION BASE ───────────────────────────────────────────────────
 

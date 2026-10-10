@@ -275,7 +275,7 @@ class ProgramMgmtMixin:
         saved_arrays = {k: list(v) if isinstance(v, list) else v
                         for k, v in self.arrays.items()}
         self.program.clear()
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8-sig') as f:
             lines = [l.rstrip('\n\r') for l in f.readlines()]
         self._load_lines_with_defs(
             lines, lambda line: self.process(line, track_undo=False))
@@ -301,7 +301,7 @@ class ProgramMgmtMixin:
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8-sig') as f:
             lines = [l.rstrip('\n\r') for l in f.readlines()]
         existing_before = set(self.program.keys())
         count = self._load_lines_with_defs(

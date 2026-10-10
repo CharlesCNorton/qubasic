@@ -54,6 +54,13 @@ def _replace_dollar_outside_strings(expr_str: str) -> str:
 
 _LOGICAL_SUBS = [
     (re.compile(r'<>|><'), '!='),
+    # A lone = inside an expression is BASIC's equality test (IF x = 2).
+    (re.compile(r'(?<![<>=!])=(?!=)'), '=='),
+    # ^ is BASIC's power operator (XOR below becomes Python's ^ afterwards).
+    (re.compile(r'\^'), '**'),
+    # MOD rides on @, the one spare operator at the precedence of * / and %;
+    # the evaluator maps @ to BASIC's MOD.
+    (re.compile(r'\bMOD\b', re.IGNORECASE), ' @ '),
     (re.compile(r'\bAND\b', re.IGNORECASE), ' and '),
     (re.compile(r'\bOR\b', re.IGNORECASE), ' or '),
     (re.compile(r'\bNOT\b', re.IGNORECASE), ' not '),
@@ -136,11 +143,40 @@ def _basic_round(x: Any, ndigits: Any = None) -> float:
     return (r / f) if nd else float(r)
 
 
+def _basic_mod(a: Any, b: Any) -> int:
+    """BASIC MOD: operands rounded to integers, remainder taking the sign of
+    the dividend (-7 MOD 3 = -1)."""
+    ia, ib = int(_basic_round(a)), int(_basic_round(b))
+    if ib == 0:
+        raise ZeroDivisionError
+    return int(math.fmod(ia, ib))
+
+
+def _sgn(x: Any) -> int:
+    return (x > 0) - (x < 0)
+
+
 class ExpressionMixin:
     """AST-based safe expression evaluation. No eval().
 
     Requires: TerminalProtocol — uses self.variables, self.arrays.
     """
+
+    # Unassigned names are an error while this is set. A running program
+    # clears it, so its unassigned variables read as 0 (or ""), as in BASIC;
+    # qubit indices, gate parameters and matrix literals stay strict.
+    _strict_names: bool = True
+
+    def _eval_operand(self, expr: str, run_vars: dict[str, Any] | None = None) -> Any:
+        """Evaluate a quantum operand (gate parameter, qubit index) with
+        unassigned names rejected."""
+        prev, self._strict_names = self._strict_names, True
+        try:
+            if run_vars is None:
+                return self.eval_expr(expr)
+            return self._eval_with_vars(expr, run_vars)
+        finally:
+            self._strict_names = prev
 
     _SAFE_FUNCS = {
         'sin': math.sin, 'cos': math.cos, 'tan': math.tan,
@@ -152,6 +188,9 @@ class ExpressionMixin:
         'abs': abs, 'int': math.floor, 'fix': math.trunc, 'float': float,
         'min': min, 'max': max, 'round': _basic_round, 'len': len,
         'ceil': math.ceil, 'floor': math.floor,
+        # QBASIC spellings: SGN, SQR, ATN, and the conversions (CINT rounds).
+        'sgn': _sgn, 'sqr': math.sqrt, 'atn': math.atan,
+        'cint': _basic_round, 'clng': _basic_round, 'csng': float, 'cdbl': float,
     }
     _SAFE_CONSTS = {
         'PI': math.pi, 'pi': math.pi,
@@ -164,6 +203,7 @@ class ExpressionMixin:
         ast.Add: operator.add, ast.Sub: operator.sub,
         ast.Mult: operator.mul, ast.Div: operator.truediv,
         ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+        ast.MatMult: _basic_mod,          # MOD (rewritten to @)
         ast.Pow: operator.pow,
         ast.USub: operator.neg, ast.UAdd: operator.pos,
         ast.Not: operator.not_,
@@ -190,17 +230,18 @@ class ExpressionMixin:
                 return node.value
             raise ValueError(f"UNSUPPORTED CONSTANT: {node.value!r}")
         if isinstance(node, ast.Name):
-            # A mid-circuit measurement bit has no classical value (it is
-            # resolved per shot); reading it outside an IF feedforward is an
-            # error rather than a silent placeholder 0.
+            # A mid-circuit measurement bit read as a number makes the program
+            # run live (shot by shot); the circuit build stops here.
             cb = getattr(self, '_classical_bits', None)
             if cb and node.id in cb:
-                raise ValueError(
-                    f"'{node.id}' is a mid-circuit measurement bit; its value is "
-                    f"per-shot, so it can't be read in a classical expression "
-                    f"(use IF {node.id} for feedforward, or LOCC mode for a live value)")
+                from qubasic_core.live import MidCircuitRead
+                self._live_needed = True
+                raise MidCircuitRead(f"'{node.id}' is a mid-circuit measurement bit")
             if node.id in ns:
                 return ns[node.id]
+            if not self._strict_names:
+                # Classic BASIC: an unassigned variable reads as 0 ("" for name$).
+                return '' if node.id.endswith('_S_') else 0
             raise ValueError(f"UNDEFINED: {node.id}")
         if isinstance(node, ast.UnaryOp):
             op = self._AST_OPS.get(type(node.op))
@@ -393,7 +434,11 @@ class ExpressionMixin:
             tree = ast.parse(text.strip(), mode='eval')
         except SyntaxError as e:
             raise ValueError(f"MATRIX SYNTAX ERROR: {e}") from None
-        return self._ast_eval_matrix(tree.body, ns)
+        prev, self._strict_names = self._strict_names, True
+        try:
+            return self._ast_eval_matrix(tree.body, ns)
+        finally:
+            self._strict_names = prev
 
     def _ast_eval_matrix(self, node: ast.AST, ns: dict[str, Any]) -> Any:
         """Evaluate an AST node that should resolve to a nested list of numbers."""

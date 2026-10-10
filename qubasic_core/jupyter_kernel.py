@@ -13,7 +13,6 @@ interactive session with persistent state. Requires ipykernel (installed with
 
 from __future__ import annotations
 
-import io
 import sys
 
 
@@ -42,9 +41,22 @@ def _make_kernel_class():
 
         def do_execute(self, code, silent, store_history=True,
                        user_expressions=None, allow_stdin=False, **kwargs):
-            buf = io.StringIO()
-            old = sys.stdout
-            sys.stdout = buf
+            from qubasic_core.web_repl import BufferIO
+            kernel = self
+
+            class CellIO(BufferIO):
+                """Cell output; INPUT asks through the notebook when the
+                frontend allows stdin."""
+
+                def read_line(self, prompt: str) -> str:
+                    if not allow_stdin:
+                        return super().read_line(prompt)
+                    return kernel.raw_input(prompt)
+
+            port = CellIO()
+            old_io, old_stdout = self.term.io, sys.stdout
+            self.term.io = port
+            sys.stdout = port.buf
             status = 'ok'
             try:
                 lines = [l.rstrip('\r\n') for l in code.split('\n')]
@@ -52,10 +64,10 @@ def _make_kernel_class():
                     lines, lambda line: self.term.process(line, track_undo=False))
             except Exception as e:
                 status = 'error'
-                print(f"?ERROR: {e}")
+                port.writeln(f"?ERROR: {e}")
             finally:
-                sys.stdout = old
-            out = buf.getvalue()
+                self.term.io, sys.stdout = old_io, old_stdout
+            out = port.buf.getvalue()
             if out and not silent:
                 self.send_response(self.iopub_socket, 'stream',
                                    {'name': 'stdout', 'text': out})

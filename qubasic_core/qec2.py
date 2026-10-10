@@ -96,6 +96,28 @@ def _css_logicals(Hx: np.ndarray, Hz: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return coset_basis(Hz, Hx), coset_basis(Hx, Hz)
 
 
+def _css_from_strings(code: dict) -> dict:
+    """Matrix form (Hx, Hz, Lx, Lz) of a CSS string-stabilizer code, the shape
+    the BP+OSD decoder takes."""
+    n = code['n']
+    hx, hz = [], []
+    for s in code['stab']:
+        kinds = set(s) - {'I'}
+        row = np.array([ch != 'I' for ch in s], dtype=np.uint8)
+        if kinds == {'X'}:
+            hx.append(row)
+        elif kinds == {'Z'}:
+            hz.append(row)
+        else:
+            raise ValueError("BP+OSD needs a CSS code (pure X or pure Z stabilizers)")
+    Hx = np.array(hx, dtype=np.uint8) if hx else np.zeros((0, n), np.uint8)
+    Hz = np.array(hz, dtype=np.uint8) if hz else np.zeros((0, n), np.uint8)
+    Lx = np.array([[ch in 'XY' for ch in code['lx']]], dtype=np.uint8)
+    Lz = np.array([[ch in 'ZY' for ch in code['lz']]], dtype=np.uint8)
+    return {'n': n, 'Hx': Hx, 'Hz': Hz, 'Lx': Lx, 'Lz': Lz, 'name': code['name'],
+            'alphabet': code.get('alphabet', 'IXYZ')}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Bivariate-bicycle codes (Bravyi et al. family)
 # ═══════════════════════════════════════════════════════════════════════
@@ -330,14 +352,20 @@ class QEC2Mixin:
     def _qec_bb_rate(self, code: dict, p: float, trials: int, rng) -> float:
         Hx, Hz, Lx, Lz = code['Hx'], code['Hz'], code['Lx'], code['Lz']
         n = code['n']
-        # Depolarizing: marginal X (or Z) flip probability is 2p/3.
-        p_marg = 2.0 * p / 3.0
+        bitflip = code.get('alphabet') == 'IX'
+        # Depolarizing: marginal X (or Z) flip probability is 2p/3; a bit-flip
+        # code sees X errors at rate p only.
+        p_marg = p if bitflip else 2.0 * p / 3.0
         fails = 0
         for _ in range(trials):
-            hit = rng.random(n) < p
-            which = rng.integers(0, 3, n)
-            ex = (hit & ((which == 0) | (which == 1))).astype(np.uint8)
-            ez = (hit & ((which == 2) | (which == 1))).astype(np.uint8)
+            if bitflip:
+                ex = (rng.random(n) < p).astype(np.uint8)
+                ez = np.zeros(n, dtype=np.uint8)
+            else:
+                hit = rng.random(n) < p
+                which = rng.integers(0, 3, n)
+                ex = (hit & ((which == 0) | (which == 1))).astype(np.uint8)
+                ez = (hit & ((which == 2) | (which == 1))).astype(np.uint8)
             failed = False
             for H, L, e in ((Hz, Lz, ex), (Hx, Lx, ez)):
                 s = H.dot(e) % 2

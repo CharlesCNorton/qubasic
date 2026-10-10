@@ -171,10 +171,15 @@ BARRIER                Optimization barrier
 RESET 0                Reset qubit to |0>
 ```
 
-### Multi-gate lines
+### Multi-statement lines
 ```
 10 H 0 : CX 0,1 : RZ PI/4, 0    Colon-separated
+10 FOR I = 0 TO 3: H I: NEXT I   Any statements, loops included
 ```
+
+A colon outside a string separates statements, whatever they are. An `IF`
+owns the rest of its line (`IF c THEN A: B ELSE C: D`), and so do `REM`,
+`'` comments and `DEF` bodies.
 
 ## Configuration
 
@@ -183,6 +188,7 @@ QUBITS 8             Set qubit count (ceiling is per METHOD)
 SHOTS 2048           Set measurement shots
 METHOD statevector   Set simulation method
 METHOD GPU           Set simulation device
+PRECISION SINGLE     complex64 amplitudes: half the memory, one more qubit (DOUBLE to restore)
 STATUS               Show every active mode (qubits, method, LOCC, noise, ...)
 STATUS JSON          Same, as machine-readable JSON
 ```
@@ -190,7 +196,9 @@ STATUS JSON          Same, as machine-readable JSON
 ### Simulation methods
 `automatic`, `statevector`, `density_matrix`, `stabilizer`, `matrix_product_state`, `extended_stabilizer`, `unitary`, `superop`
 
-Automatic selection: stabilizer for Clifford-only circuits, MPS for >28 qubits, statevector otherwise.
+Automatic selection: stabilizer for noiseless Clifford circuits at any width;
+otherwise statevector while it fits in available memory (at double precision,
+then single), and matrix_product_state beyond.
 
 Qubit ceilings are per method: the 32-qubit wall is a statevector memory
 limit only. `stabilizer` reaches 4096 qubits (polynomial tableau),
@@ -211,11 +219,20 @@ CLEAR x                  Remove a variable
 
 Functions and keywords are case-insensitive (`SQRT` and `sqrt` both work).
 
+Inside a running program an unassigned variable reads as 0 (`""` for a
+`name$` string), so `count = count + 1` needs no initialization. Qubit
+indices, gate parameters and matrix literals still reject unknown names, as
+do commands typed at the prompt.
+
+`PRINT` shows numbers as BASIC does: a leading space in place of a plus sign,
+a trailing space, and whole values without a decimal point (`PRINT 1; -2.5`
+prints ` 1 -2.5 `).
+
 ### Constants
 `PI`, `TAU`, `E`, `SQRT2`, `True`, `False` (reserved; not usable as variable names)
 
 ### Math functions
-`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`, `log`, `exp`, `abs`, `int` (floors), `fix` (truncates), `float`, `min`, `max`, `round`, `ceil`, `floor`, `len`
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`, `log`, `exp`, `abs`, `int` (floors), `fix` (truncates), `float`, `min`, `max`, `round`, `ceil`, `floor`, `len`, and the QBASIC spellings `SGN`, `SQR`, `ATN`, `CINT`, `CLNG`, `CSNG`, `CDBL`
 
 ### Runtime functions
 `RND(x)` random, `TIMER` elapsed seconds, `FRE(0)` free RAM bytes, `POS(0)` cursor column, `PEEK(addr)` memory read, `USR(addr)` call routine
@@ -224,8 +241,8 @@ Functions and keywords are case-insensitive (`SQRT` and `sqrt` both work).
 `LEFT$(s,n)`, `RIGHT$(s,n)`, `MID$(s,n,len)`, `CHR$(n)`, `STR$(n)`, `HEX$(n)`, `BIN$(n)`, `ASC(c)`, `VAL(s)`, `INSTR(haystack,needle)`, `LEN(s)`
 
 ### Operators
-Arithmetic: `+`, `-`, `*`, `/`, `//`, `%`, `**`
-Comparison: `==`, `!=`, `<>`, `<`, `>`, `<=`, `>=` (yield -1 for true, 0 for false; chain Python-style, so `0 <= x <= 10` works)
+Arithmetic: `+`, `-`, `*`, `/`, `//`, `%`, `**` or `^` (power), `MOD` (operands rounded to integers, sign of the dividend: `-7 MOD 3` = -1)
+Comparison: `=`, `==`, `<>`, `!=`, `<`, `>`, `<=`, `>=` (yield -1 for true, 0 for false; chain Python-style, so `0 <= x <= 10` works). Inside an expression a single `=` compares, so `IF x = 2 THEN` and `flag = a = b` read as in BASIC.
 Logical: `AND`, `OR`, `NOT`, `XOR`
 Bitwise: `AND`, `OR`, `XOR` on integers (`6 AND 3` = 2); `NOT` is logical
 Hex/binary literals: `&HFF`, `&B10110`
@@ -259,8 +276,8 @@ OPTION BASE 1           Set array index base
 10 WHILE n < 10 / WEND
 10 DO WHILE x > 0 / LOOP
 10 DO / LOOP UNTIL x == 0
-10 IF flag == 1 THEN H 0 ELSE X 0
-10 SELECT CASE x / CASE 1 / CASE 2 / CASE ELSE / END SELECT
+10 IF flag = 1 THEN H 0 ELSE X 0
+10 SELECT CASE x / CASE 1, 2 / CASE 3 TO 8 / CASE IS > 8 / CASE ELSE / END SELECT
 10 ON n GOTO 100, 200, 300
 10 ON n GOSUB 100, 200
 10 DATA 1, 2, 3, "hello"
@@ -269,6 +286,15 @@ RESTORE
 EXIT FOR / EXIT WHILE / EXIT DO
 END
 ```
+
+Loops behave as in QBASIC. A FOR whose range the step cannot reach skips its
+body, and after the loop runs out the counter holds the first value past the
+limit. A loop may sit on one line (`FOR I = 1 TO 3: H I: NEXT I`) or open
+mid-line and close on a later one. GOSUB, ON GOSUB and CALL return to the
+statement after the call, inside the same line or IF clause. A NEXT, WEND or
+LOOP closes any loops a jump left open inside its own. SELECT CASE takes
+value lists, `lo TO hi` ranges, `IS <op> v` comparisons and exact string
+cases; `CASE v: statement` puts the case body on the same line.
 
 ## Subroutines
 
@@ -484,9 +510,32 @@ simulation time based on the actual outcome (no LOCC mode needed).
 ```
 10 H 0
 20 MEAS 0 -> c           Mid-circuit measurement into classical bit c
-30 IF c THEN X 0         Feedforward correction (also: IF c == 0, NOT c, with ELSE)
+30 IF c THEN X 0         Feedforward correction (also: IF c = 0, NOT c, c <> 1, with ELSE)
 40 MEASURE
 ```
+
+A program that uses a measured bit any other way (PRINT c, LET y = c + 1,
+IF a <> b, a GOTO chosen by it, a repeat-until-success loop) runs live: each
+shot executes the program from the top on a numpy statevector, MEAS collapses
+the state and returns its outcome, and every statement sees real bits. The
+summary line reads `method=live`. Only the first shot prints; later shots
+replay its INPUT answers and write no files, so the run reads as one
+execution followed by the histogram over all shots. Afterwards the variables
+hold the first shot's values and `SAVE_EXPECT`/`SAVE_PROBS` the mean over the
+shots. An active noise model runs as quantum trajectories, readout error
+included. `MEASURE_X/Y/Z` and `SYNDROME` bits work the same way.
+
+```
+10 H 0
+20 MEAS 0 -> m
+30 IF m = 1 THEN GOTO 50
+40 RESET 0: GOTO 10      Repeat until the qubit reads 1
+50 PRINT "tries done"
+60 MEASURE
+```
+
+`STEP` runs the same way, as one live shot: MEAS collapses the state you are
+watching.
 
 ## Mixed states
 
@@ -519,11 +568,16 @@ HAMILTONIAN H = ISING 1.0 0.5           Builders: ISING, HEISENBERG, HUBBARD, RY
 HAMILTONIAN H = MOLECULE H2 0.7414      H2/STO-3G (built-in integrals engine, no pyscf)
 10 EVOLVE H, 1.5, 20                     Trotterized e^{-iHt} (time, steps) in a circuit
 10 SAVE_EXPECT H -> e                    <H> of a declared Hamiltonian (VQE cost)
-LINDBLAD NONE, 1.0, 200, 1.0 SM 0        Open-system master-equation evolution (dense, <=5 qubits)
+LINDBLAD NONE, 1.0, 200, 1.0 SM 0        Open-system master-equation evolution (exact, <=10 qubits)
 LINDBLAD H, 1.0, 200, 1.0 SM 0 TRAJ 500  Monte Carlo wavefunction unraveling (<=15 qubits)
 CHANNEL AD = [[1,0],[0,0.95]] ; [[0,0.31],[0,0]]   Define a Kraus channel
 10 APPLYCHANNEL AD 0                      Apply a custom channel
 ```
+
+The exact LINDBLAD path integrates the density matrix with RK4, the
+Hamiltonian and the jump operators kept sparse. A channel applied with
+APPLYCHANNEL is sampled as quantum trajectories across shots; a run without
+MEASURE keeps the mixed state for DENSITY.
 
 `MOLECULE H2 [R]` computes the exact 4-qubit Jordan-Wigner Hamiltonian from a
 self-contained STO-3G integrals engine (Gaussian s-orbital closed forms, RHF
@@ -535,9 +589,9 @@ by symmetry). Exact diagonalization at R = 0.7414 reproduces the FCI energy
 ```
 QEC STEANE               Show a code (REP [d], STEANE, SHOR, SURFACE [d]) and its stabilizers
 QEC BB [l m]             Bivariate-bicycle qLDPC (6 6 -> [[72,12,6]], 12 6 -> [[144,12,12]])
-LOGICAL_ERROR_RATE STEANE 0.02   Monte-Carlo logical error rate (optimal lookup decoder)
-LOGICAL_ERROR_RATE SURFACE 0.02 UF       Union-find / matching decoder
-LOGICAL_ERROR_RATE SURFACE 11 0.05 MWPM  Batched pymatching MWPM (large distances)
+LOGICAL_ERROR_RATE STEANE 0.02   Monte-Carlo logical error rate (decoder chosen automatically)
+LOGICAL_ERROR_RATE SURFACE 11 0.05 MATCH Exact minimum-weight matching (blossom; alias UF)
+LOGICAL_ERROR_RATE SURFACE 11 0.05 MWPM  Batched pymatching MWPM (needs the [qec] extra)
 LOGICAL_ERROR_RATE SURFACE 21 0.001 CIRCUIT 1000000  Circuit-level noise (stim + pymatching)
 LOGICAL_ERROR_RATE BB 0.01       BB codes decode with the internal BP+OSD
 THRESHOLD REP 0.0 0.5 11         Sweep p across distances 3/5/7 (crossing at 0.5)
@@ -547,10 +601,14 @@ LATTICE 0 1              Lattice-surgery joint Zbar-Zbar measurement of two patc
 
 Codes: repetition (any odd distance), Steane [[7,1,3]], Shor [[9,1,3]], rotated
 surface, and the bivariate-bicycle qLDPC family (parity checks built from the
-cyclic-shift polynomials, k verified by GF(2) ranks). Decoders: an optimal
-minimum-weight lookup table (all codes), a union-find / matching decoder (`UF`),
-batched pymatching MWPM (`MWPM`), and an internal belief-propagation +
-ordered-statistics decoder (BP+OSD-0) for the qLDPC codes.
+cyclic-shift polynomials, k verified by GF(2) ranks). Decoders: a
+minimum-weight lookup table, built in order of error weight, while the code's
+syndrome space allows (`LOOKUP`); exact minimum-weight perfect matching on the
+code's matching graph with boundary nodes (rustworkx blossom, `MATCH`) beyond
+it; batched pymatching MWPM (`MWPM`); and an internal belief-propagation +
+ordered-statistics decoder (BP+OSD-0, `BP`) for the qLDPC codes. The default
+picks lookup while feasible and matching after that. The Monte Carlo is
+vectorized over trials and decodes each distinct syndrome once.
 
 `CIRCUIT` switches from code capacity to full circuit-level noise: stim
 generates the noisy syndrome-extraction circuit (d rounds of gates,
@@ -561,19 +619,32 @@ patch (944 physical qubits, 9240 detectors) samples at ~13k shots/s.
 ### Logical-qubit mode
 
 ```
-LQUBITS 2 CODE SURFACE 5 PHYS 1e-3   Program on 2 LOGICAL qubits (surface, d=5)
+LQUBITS 2 CODE STEANE PHYS 1e-3      Program on 2 LOGICAL qubits, simulated encoded
+LQUBITS 2 CODE SURFACE 5 PHYS 1e-3   ...or on a modeled surface code, d=5
 10 H 0                                Gates now act on logical qubits
-20 CX 0,1                             CX compiles to a lattice-surgery merge+split
+20 CX 0,1
 30 MEASURE
 RUN                                   Histogram of LOGICAL outcomes
 LQUBITS OFF                           Back to physical qubits
 ```
 
-While active, every operation carries the code's per-op logical error channel
-(from the code-capacity rate for the chosen code, distance, and physical p),
-measurement carries a logical readout flip, and RUN appends the
-lattice-surgery report: surgery ops, syndrome rounds, physical-qubit total,
-wall time at 1 us/round, and the cumulative logical error budget.
+`CODE STEANE` simulates the encoded program. Each logical qubit is a
+[[7,1,3]] block of 7 physical qubits prepared in |0_L>, and logical Clifford
+gates (H, S, SDG, SX, X, Y, Z, CX, CY, CZ, SWAP) are transversal. Depolarizing
+noise at the physical rate follows every physical gate and the readout. A
+round of syndrome extraction with conditional corrections follows every
+logical gate, and the readout is decoded block by block. The circuit runs on
+the stabilizer simulator (2 logical qubits are 15 physical), and RUN reports
+the decoded histogram with its total variation distance from the ideal
+distribution (`_LOGICAL_TVD`). T gates and rotations have no transversal
+form on this code and are refused.
+
+The other codes are modeled. Every operation carries the code's per-op
+logical error channel (from the code-capacity rate for the chosen code,
+distance, and physical p), measurement carries a logical readout flip, and
+RUN appends the lattice-surgery report: surgery ops, syndrome rounds,
+physical-qubit total, wall time at 1 us/round, and the cumulative logical
+error budget.
 
 ## Benchmarking and verification
 
@@ -592,7 +663,8 @@ PAULIPROP ZZ 0 1         Pauli-propagation expectation (Heisenberg, truncated)
 
 ```
 IQPE 4 0 UGATE           Iterative phase estimation of a UNITARY eigenphase
-AMPEST 5 0               Amplitude estimation of the marked amplitude
+AMPEST 5 0               Amplitude estimation of the program's state (good = qubit 0 reads 1)
+AMPEST 5 |101>           ...good = a basis state, in the displayed bit order
 10 AMPLIFY 101            One amplitude-amplification (Grover) step
 QWALK 5                  Discrete-time quantum walk on a cycle
 10 GRAPHSTATE 0-1, 1-2    Prepare a graph/cluster state (MBQC resource)
@@ -600,7 +672,17 @@ QWALK 5                  Discrete-time quantum walk on a cycle
 QKERNEL 0.5 0.3 ; 0.4 0.2    Quantum kernel |<phi(x)|phi(y)>|^2
 SHOR 15                  Order finding / factoring of small N
 HHL 1 0 0 2 1 1          Solve a 2x2 Hermitian system A x = v
+HEATMAP                  Pairwise quantum mutual information grid (HEATMAP CONCURRENCE: concurrence)
 ```
+
+AMPEST is maximum-likelihood amplitude estimation over the program (the
+state preparation A, measure-free and unitary): it runs Q^k A|0> for k = 0, 1,
+2, 4, ..., counts good outcomes, maximizes the joint likelihood, and reports
+the Fisher-information spread alongside the exact amplitude when the state
+is small enough to compute. HHL runs phase estimation on a signed clock
+register (negative eigenvalues read as two's complement) and a uniformly
+controlled RY, then reports the post-selected solution's fidelity to the
+classical A^-1 v and the post-selection success probability.
 
 ## Beyond qubits
 
@@ -714,10 +796,10 @@ $F000-$FFFF   User SYS Routines
 | +6 | Re(beta) |
 | +7 | Im(beta) |
 
-### QPU config ($D000-$D00B)
+### QPU config ($D000-$D00C)
 | Address | Name | Values |
 |---------|------|--------|
-| $D000 | num_qubits | 1-32 |
+| $D000 | num_qubits | 1 to the METHOD's ceiling |
 | $D001 | shots | 1+ |
 | $D002 | sim_method | 0=auto, 1=statevector, 2=stabilizer, 3=MPS, 4=density |
 | $D003 | sim_device | 0=CPU, 1=GPU |
@@ -729,6 +811,7 @@ $F000-$FFFF   User SYS Routines
 | $D009 | mps_truncation | float threshold |
 | $D00A | sv_parallel_threshold | int |
 | $D00B | es_approx_error | float |
+| $D00C | precision | 0=double, 1=single |
 
 ### QPU status ($D010-$D014, read-only)
 | Address | Name |
@@ -821,7 +904,7 @@ FORWARD 1                Go forward 1 checkpoint
 HISTORY                  Show all checkpoints with current position
 ```
 
-Checkpoints are saved during STEP mode for circuits up to 16 qubits. Each checkpoint stores the full statevector after that gate application.
+Checkpoints are saved during STEP mode. Each stores the full statevector after that line, at most 64 MiB per checkpoint (22 qubits at double precision) and 256 MiB in total, the oldest dropped first.
 
 ## Error handling
 
@@ -858,16 +941,27 @@ Quantum state names (`|+>`, `|0>`, `|1>`, `|->`, `|BELL>`, `|GHZ>`, `|GHZ3>`, `|
 
 ## Performance
 
-### Auto-scaling
-QBASIC detects available RAM, estimates per-instance memory, and reports maximum qubit count and parallelism budget at startup and via the `RAM` command.
+### Memory
+QUBASIC sizes every run against the RAM available at that moment. A
+statevector run that returns counts peaks at about 1.04x the state (16 bytes
+per amplitude at double precision, 8 at single), and a measure-free run that
+keeps its final state costs the same, because Aer hands the buffer over. A
+measured run keeps its final state from inside the same simulation when a
+second copy fits; otherwise STATE, BLOCH and the other inspection commands
+compute it on first use. The numpy engine (LOCC, live runs, STEP) updates
+states in place, block by block, so its peak is the state plus one 64 MiB
+block. A run that cannot fit is refused with the memory it needs and what to
+change (`PRECISION SINGLE`, `METHOD matrix_product_state`). The banner,
+`QUBITS`, `STATUS` and `RAM` report the widest statevector run at each
+precision for the memory available now.
 
 ### Simulation method selection
-- **automatic**: stabilizer for Clifford-only circuits, MPS for >28 qubits, statevector otherwise
+- **automatic**: stabilizer for noiseless Clifford circuits; statevector while it fits (double, then single precision); MPS beyond
 - **stabilizer**: polynomial-time for Clifford circuits (H, S, CX, SWAP, etc.)
-- **matrix_product_state**: memory-efficient for low-entanglement circuits; handles the full 32-qubit range that would exhaust statevector
+- **matrix_product_state**: memory-efficient for low-entanglement circuits; memory set by entanglement, not width
 - **extended_stabilizer**: approximate simulation for near-Clifford circuits
-- **statevector**: exact, limited by RAM (~28 qubits on 16GB)
-- **density_matrix**: includes mixed states, ~14 qubits on 16GB
+- **statevector**: exact; width limited by available memory (see RAM)
+- **density_matrix**: includes mixed states; 4^n entries, about half the statevector width
 - **unitary**: returns the full unitary matrix of the circuit
 - **superop**: returns the superoperator (quantum channel)
 
@@ -881,10 +975,10 @@ POKE $D00B, 0.01         Extended stabilizer approximation error
 ```
 
 ### Circuit caching
-Transpiled circuits are cached between RUN calls when the program and configuration have not changed. Cache invalidates on any program edit, qubit count change, method change, or tuning parameter change.
+Transpiled circuits are cached between RUN calls, keyed on a digest of the built circuit itself (every instruction, parameter, register and condition) together with the method, precision, device, noise and tuning settings, so any change that alters the circuit, including DEF, UNITARY, SET_STATE or variable values, rebuilds it.
 
 ### LOCC optimization
-Programs with SEND use prefix/suffix splitting: the deterministic prefix (before first SEND) executes once, the statevector is snapshotted, and only the suffix (from SEND onward) re-executes per shot. Falls back to full re-execution if the prefix contains GOTO/GOSUB.
+Programs with SEND use prefix/suffix splitting: the deterministic prefix (before first SEND) executes once, the statevector is snapshotted, and only the suffix (from SEND onward) re-executes per shot. It falls back to full re-execution when the prefix contains a jump or loop, or when noise is active (each shot draws its own noise). Only the first shot prints. Live runs reuse a deterministic prefix the same way.
 
 ## JSON output
 
@@ -909,6 +1003,10 @@ qubasic_core/
   engine_state.py        Engine: standalone state container
   terminal.py            QBasicTerminal: REPL + command dispatch
   engine.py              Constants, gate tables, numpy simulation, LOCCEngine
+  gates.py               Gate matrices and the in-place, block-wise numpy engine
+  capacity.py            Memory model: peak bytes per method/precision, what fits
+  statetools.py          Reduced density matrices, entropies, entanglement measures
+  live.py                Shot-by-shot execution for programs that read measurements
   parser.py              60+ typed Stmt objects from raw strings
   statements.py          Stmt type definitions
   exec_context.py        ExecContext: unified execution state
@@ -922,7 +1020,7 @@ qubasic_core/
   locc.py                LOCC commands, execution, display
   analysis.py            EXPECT, ENTROPY, DENSITY, BENCH, RAM
   qec2.py                Circuit-level QEC (stim/pymatching), BB qLDPC, BP+OSD
-  logical.py             LQUBITS logical-qubit mode + lattice-surgery report
+  logical.py             LQUBITS: encoded Steane simulation, modeled codes, surgery report
   qchem.py               STO-3G molecular Hamiltonians (MOLECULE H2)
   jupyter_kernel.py      Jupyter kernel (qubasic --install-kernel)
   web_repl.py            Browser REPL (qubasic --web)
@@ -939,11 +1037,11 @@ qubasic_core/
   demos.py               Built-in demo circuits
   protocol.py            TerminalProtocol (mixin contract)
   mock_backend.py        MockAerSimulator for fast testing
-tests/                   Test suites (test_qubasic.py, test_features.py)
+tests/                   Test suites (unit, feature, golden-script, numpy engine, BASIC semantics and live runs)
 examples/                Sample .qb programs
 ```
 
-`Engine` holds all program state. `QBasicTerminal` inherits `Engine` + 20 mixins. Execution methods live on `QBasicTerminal`, so headless/agent use should instantiate `QBasicTerminal` (the `Engine` base is a state container only).
+`Engine` holds all program state. `QBasicTerminal` inherits `Engine` + 32 mixins. Execution methods live on `QBasicTerminal`, so headless/agent use should instantiate `QBasicTerminal` (the `Engine` base is a state container only).
 
 ## License
 

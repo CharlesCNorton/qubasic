@@ -122,10 +122,9 @@ class BenchmarkingMixin:
                         qc.append(random_unitary(4, seed=int(rng.integers(1 << 30))), [a, b])
                 probs = np.abs(Statevector(qc).data) ** 2
                 median = float(np.median(probs))
-                heavy = {format(i, f'0{n}b') for i, p in enumerate(probs) if p > median}
                 qcm = qc.copy(); qcm.measure_all()
                 counts = backend.run(transpile(qcm, backend), shots=shots).result().get_counts()
-                hop = sum(c for b, c in counts.items() if b in heavy) / shots
+                hop = sum(c for b, c in counts.items() if probs[int(b, 2)] > median) / shots
                 hops.append(hop)
             mean_hop = float(np.mean(hops))
             passed = mean_hop > 2.0 / 3.0
@@ -248,7 +247,7 @@ class BenchmarkingMixin:
                     for _d in range(m):
                         layer = []
                         for q in range(n):
-                            gate = rng.choice(['h', 's', 'x', 'id'])
+                            gate = ('h', 's', 'x', 'id')[int(rng.integers(4))]
                             getattr(qc, gate)(q); layer.append((gate, q))
                         for q in range(0, n - 1, 2):
                             qc.cx(q, q + 1); layer.append(('cx', q))
@@ -362,18 +361,13 @@ class BenchmarkingMixin:
             self.io.writeln("?NO STATE — RUN first")
             return
         n = self._active_nqubits
-        parts = rest.split()
+        parts = rest.replace(',', ' ').split()
         a, b = (int(parts[0]), int(parts[1])) if len(parts) >= 2 else (0, 1)
         try:
-            from qiskit.quantum_info import Statevector, partial_trace
-            sv_obj = Statevector(np.ascontiguousarray(sv).ravel())
-            rho = np.asarray(partial_trace(sv_obj, [q for q in range(n) if q not in (a, b)]).data)
-            Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
-            YY = np.kron(Y, Y)
-            rho_tilde = YY @ rho.conj() @ YY
-            ev = np.linalg.eigvals(rho @ rho_tilde)
-            ev = np.sqrt(np.maximum(0.0, np.sort(np.real(ev))[::-1]))
-            c = max(0.0, ev[0] - ev[1] - ev[2] - ev[3])
+            from qubasic_core import statetools as st
+            if a == b or not (0 <= a < n and 0 <= b < n):
+                raise ValueError(f"need two different qubits in 0-{n - 1}")
+            c = st.concurrence(st.subsystem_rdm(sv, [a, b], n))
             self.io.writeln(f"  Concurrence C(q{a}, q{b}) = {c:.6f}")
             self.variables['_CONCURRENCE'] = float(c)
         except Exception as e:
@@ -391,18 +385,15 @@ class BenchmarkingMixin:
         n = self._active_nqubits
         A = [int(x) for x in rest.replace(',', ' ').split()] if rest.strip() else [0]
         try:
-            psi = np.ascontiguousarray(sv).ravel()
-            rho = np.outer(psi, psi.conj()).reshape([2] * n + [2] * n)
-            # Transpose the row/column indices of subsystem A.
-            perm = list(range(2 * n))
+            from qubasic_core import statetools as st
             for q in A:
-                ax = n - 1 - q
-                perm[ax], perm[ax + n] = perm[ax + n], perm[ax]
-            rho_ta = np.transpose(rho, perm).reshape(2 ** n, 2 ** n)
-            tr_norm = float(np.sum(np.abs(np.linalg.eigvalsh(0.5 * (rho_ta + rho_ta.conj().T)))))
-            neg = (tr_norm - 1.0) / 2.0
+                if q < 0 or q >= n:
+                    raise ValueError(f"qubit {q} out of range (0-{n - 1})")
+            # A pure state's negativity follows from its Schmidt coefficients
+            # across A | rest, so the 4^n partial transpose is never built.
+            neg, logneg = st.negativity_pure(st.schmidt_probs(sv, A, n))
             self.io.writeln(f"  Negativity (A={A}) = {neg:.6f}")
-            self.io.writeln(f"  Logarithmic negativity = {np.log2(tr_norm):.6f}")
+            self.io.writeln(f"  Logarithmic negativity = {logneg:.6f}")
             self.variables['_NEGATIVITY'] = float(neg)
         except Exception as e:
             self.io.writeln(f"?NEGATIVITY ERROR: {e}")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qubasic"
-version = "0.18.0"
+version = "0.19.0"
 description = "Quantum BASIC Interactive Terminal"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -71,7 +71,7 @@ python_version = "3.10"
 ignore_missing_imports = true
 warn_unused_configs = true
 warn_redundant_casts = true
-# QBasicTerminal composes 20 mixins; each mixin accesses attributes the host
+# QBasicTerminal composes 32 mixins; each mixin accesses attributes the host
 # class provides, which mypy cannot resolve in isolation. The codebase is
 # intentionally gradually typed, so the strict per-method settings and the
 # cross-mixin attribute check are disabled while keeping mypy useful for real

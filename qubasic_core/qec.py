@@ -58,7 +58,15 @@ class QECMixin:
 
     def _qec_code(self, name: str, distance: int = 3) -> dict:
         """Return a code descriptor: data qubit count, stabilizers, logical X/Z,
-        distance, and the error alphabet the decoder corrects."""
+        distance, and the error alphabet the decoder corrects. Descriptors are
+        cached per (name, distance), so decoder tables built on them persist."""
+        cache = self.__dict__.setdefault('_qec_cache', {})
+        key = (name.upper(), distance)
+        if key not in cache:
+            cache[key] = self._qec_code_build(name, distance)
+        return cache[key]
+
+    def _qec_code_build(self, name: str, distance: int = 3) -> dict:
         name = name.upper()
         if name in ('REP', 'REPETITION', 'BITFLIP'):
             d = distance if distance % 2 == 1 else distance + 1
@@ -139,126 +147,270 @@ class QECMixin:
         return {'n': n, 'stab': stab_strs, 'lx': ''.join(lx), 'lz': ''.join(lz),
                 'd': d, 'alphabet': 'IXYZ', 'name': f'rotated surface d={d}'}
 
+    # ── Binary (symplectic) form of a string code ─────────────────────
+    #
+    # A Pauli on n qubits is a pair of bit vectors (x, z): X=(1,0), Z=(0,1),
+    # Y=(1,1). Two Paulis anticommute when x1.z2 + z1.x2 is odd, so the
+    # syndrome of an error e against stabilizer rows (Sx, Sz) is
+    # e_x Sz^T + e_z Sx^T (mod 2).
+
+    def _qec_binary(self, code: dict) -> dict:
+        """Cached symplectic matrices and logical vectors of a string code."""
+        if '_bin' in code:
+            return code['_bin']
+
+        def vec(s: str):
+            x = np.array([ch in 'XY' for ch in s], dtype=np.uint8)
+            z = np.array([ch in 'ZY' for ch in s], dtype=np.uint8)
+            return x, z
+
+        xs, zs = zip(*(vec(s) for s in code['stab']))
+        lx = vec(code['lx'])
+        lz = vec(code['lz'])
+        from qubasic_core.qec2 import _gf2_rank
+        sx, sz = np.array(xs), np.array(zs)
+        b = {'Sx': sx, 'Sz': sz, 'LX': lx, 'LZ': lz,
+             'rank': _gf2_rank(np.concatenate([sx, sz], axis=1))}
+        code['_bin'] = b
+        return b
+
+    # Lookup tables are built while the reachable syndrome space is at most
+    # this large; past it the decoder falls back to matching.
+    LOOKUP_MAX_SYNDROMES = 1 << 16
+
+    def _lookup_feasible(self, code: dict) -> bool:
+        b = self._qec_binary(code)
+        return code['n'] <= 64 and (1 << b['rank']) <= self.LOOKUP_MAX_SYNDROMES
+
+    def _qec_lookup_table(self, code: dict) -> dict:
+        """Minimum-weight lookup decoder: syndrome (as an int, stabilizer i =
+        bit i) -> (x_mask, z_mask) recovery, found by enumerating errors in
+        order of increasing weight until every reachable syndrome is covered.
+        Cached on the code."""
+        if '_lookup' in code:
+            return code['_lookup']
+        if not self._lookup_feasible(code):
+            raise ValueError(f"{code['name']}: lookup table would need "
+                             f"2^{self._qec_binary(code)['rank']} syndromes")
+        b = self._qec_binary(code)
+        n, m = code['n'], len(code['stab'])
+        # Syndrome contribution of X and Z on each qubit, as bitmasks.
+        cx = [sum(int(b['Sz'][i, q]) << i for i in range(m)) for q in range(n)]
+        cz = [sum(int(b['Sx'][i, q]) << i for i in range(m)) for q in range(n)]
+        paulis = [('X', 1, 0), ('Y', 1, 1), ('Z', 0, 1)]
+        paulis = [p for p in paulis if p[0] in code['alphabet']]
+        target = 1 << b['rank']
+        table: dict = {0: (0, 0)}
+        for w in range(1, n + 1):
+            if len(table) >= target:
+                break
+            for support in itertools.combinations(range(n), w):
+                for assign in itertools.product(paulis, repeat=w):
+                    synd = xm = zm = 0
+                    for q, (_, px, pz) in zip(support, assign):
+                        if px:
+                            synd ^= cx[q]
+                            xm |= 1 << q
+                        if pz:
+                            synd ^= cz[q]
+                            zm |= 1 << q
+                    if synd not in table:
+                        table[synd] = (xm, zm)
+                if len(table) >= target:
+                    break
+        code['_lookup'] = table
+        return table
+
     def _qec_decoder(self, code: dict) -> dict:
-        """Build the minimum-weight lookup decoder: syndrome -> recovery Pauli.
+        """The minimum-weight lookup decoder as syndrome tuple -> recovery
+        Pauli string (one entry per reachable syndrome)."""
+        n, m = code['n'], len(code['stab'])
+        out = {}
+        for synd, (xm, zm) in self._qec_lookup_table(code).items():
+            key = tuple((synd >> i) & 1 for i in range(m))
+            out[key] = ''.join('Y' if (xm >> q) & 1 and (zm >> q) & 1 else
+                               'X' if (xm >> q) & 1 else
+                               'Z' if (zm >> q) & 1 else 'I' for q in range(n))
+        return out
 
-        Enumerates every error over the code's alphabet, keeping the lowest-weight
-        representative per syndrome. Optimal for these small codes."""
-        n = code['n']
-        stab = code['stab']
-        alphabet = code['alphabet']
-        table: dict = {}
-        for combo in itertools.product(alphabet, repeat=n):
-            err = ''.join(combo)
-            synd = tuple(_anticommute(err, s) for s in stab)
-            w = _weight(err)
-            if synd not in table or w < table[synd][1]:
-                table[synd] = (err, w)
-        return {synd: err for synd, (err, _w) in table.items()}
+    # ── Matching decoder (exact minimum-weight perfect matching) ──────
 
-    def _random_pauli_error(self, code: dict, p: float, rng) -> str:
-        """Sample an i.i.d. error per qubit: X for a bit-flip code, depolarizing else."""
-        n = code['n']
-        out = []
-        if code['alphabet'] == 'IX':
-            for _ in range(n):
-                out.append('X' if rng.random() < p else 'I')
-        else:
-            for _ in range(n):
-                r = rng.random()
-                if r < p:
-                    out.append('XYZ'[rng.integers(3)])
-                else:
-                    out.append('I')
-        return ''.join(out)
-
-    def _logical_error_rate(self, code: dict, p: float, trials: int, rng, uf: bool = False) -> float:
-        decoder = None if uf else self._qec_decoder(code)
-        stab, lx, lz = code['stab'], code['lx'], code['lz']
-        fails = 0
-        for _ in range(trials):
-            err = self._random_pauli_error(code, p, rng)
-            synd = tuple(_anticommute(err, s) for s in stab)
-            recovery = self._qec_matching_decode(code, synd) if uf \
-                else decoder.get(synd, 'I' * code['n'])
-            residual = _pmul(err, recovery)
-            if _anticommute(residual, lx) or _anticommute(residual, lz):
-                fails += 1
-        return fails / trials
-
-    def _qec_matching_decode(self, code: dict, syndrome) -> str:
-        """Union-find / matching decoder: minimum-weight matching of syndrome
-        defects on the matching graph, correcting the connecting qubits.
-
-        Scalable alternative to the exponential lookup table (it never enumerates
-        all errors). Defects are matched to each other or to the boundary by exact
-        minimum-weight matching over shortest paths, and the path qubits flipped.
-        """
-        import functools
+    def _match_graph(self, code: dict) -> list:
+        """Per error type, the detector graph of a matchable CSS code: the
+        detectors, and shortest-path lengths and qubit paths between every
+        pair of detectors and from each detector to the boundary. Cached."""
+        if '_match' in code:
+            return code['_match']
         from collections import deque
-        n = code['n']
-        stabs = code['stab']
-        xr = ['I'] * n
-        zr = ['I'] * n
-        for etype, dtype, rec in (('X', 'Z', xr), ('Z', 'X', zr)):
+        n, stabs = code['n'], code['stab']
+        graphs = []
+        for etype, dtype in (('X', 'Z'), ('Z', 'X')):
             det = [i for i, s in enumerate(stabs) if set(s) - {'I'} == {dtype}]
-            defects = tuple(i for i in det if syndrome[i])
-            if not defects:
+            if not det:
                 continue
-            adj = {i: [] for i in det}
-            adj['B'] = []
+            pos = {d: k for k, d in enumerate(det)}
+            B = len(det)
+            adj: list[list] = [[] for _ in range(B + 1)]
             for q in range(n):
-                touch = [i for i in det if stabs[i][q] == dtype]
+                touch = [pos[i] for i in det if stabs[i][q] == dtype]
+                if len(touch) > 2:
+                    raise ValueError("matching needs each qubit in at most two checks of a type")
                 if len(touch) == 2:
-                    adj[touch[0]].append((touch[1], q)); adj[touch[1]].append((touch[0], q))
+                    adj[touch[0]].append((touch[1], q))
+                    adj[touch[1]].append((touch[0], q))
                 elif len(touch) == 1:
-                    adj[touch[0]].append(('B', q)); adj['B'].append((touch[0], q))
-
-            def bfs(src):
-                prev = {src: (None, None)}
+                    adj[touch[0]].append((B, q))
+                    adj[B].append((touch[0], q))
+            dist = np.full((B + 1, B + 1), -1, dtype=np.int64)
+            paths: dict = {}
+            for src in range(B):
+                # BFS parents: node -> (parent node, qubit on the edge to it)
+                prev: dict[int, tuple[int, int]] = {src: (src, -1)}
                 dq = deque([src])
                 while dq:
                     u = dq.popleft()
-                    for v, q in adj.get(u, []):
+                    for v, q in adj[u]:
                         if v not in prev:
-                            prev[v] = (u, q); dq.append(v)
-                return prev
+                            prev[v] = (u, q)
+                            if v != B:
+                                dq.append(v)      # the boundary is a sink, not a relay
+                for tgt in prev:
+                    qs: list[int] = []
+                    node = tgt
+                    while node != src:
+                        node, q = prev[node]
+                        qs.append(q)
+                    dist[src, tgt] = len(qs)
+                    paths[(src, tgt)] = qs
+            graphs.append({'etype': etype, 'det': det, 'dist': dist, 'paths': paths, 'B': B})
+        code['_match'] = graphs
+        return graphs
 
-            prevs = {s: bfs(s) for s in defects}
+    def _match_recovery(self, code: dict, synd_bits) -> tuple[np.ndarray, np.ndarray]:
+        """(rx, rz) recovery from exact minimum-weight perfect matching of the
+        syndrome defects (blossom algorithm via rustworkx); each defect pairs
+        with another or with the boundary through its own boundary copy."""
+        import rustworkx as rx_
+        n = code['n']
+        rx_v = np.zeros(n, dtype=np.uint8)
+        rz_v = np.zeros(n, dtype=np.uint8)
+        for g in self._match_graph(code):
+            defects = [k for k, i in enumerate(g['det']) if synd_bits[i]]
+            if not defects:
+                continue
+            k = len(defects)
+            dist, B = g['dist'], g['B']
+            wmax = int(dist.max()) + 1
+            graph = rx_.PyGraph()
+            graph.add_nodes_from(range(2 * k))
+            for a in range(k):
+                for c in range(a + 1, k):
+                    d = dist[defects[a], defects[c]]
+                    if d >= 0:
+                        graph.add_edge(a, c, wmax - int(d))
+                    graph.add_edge(k + a, k + c, wmax)        # boundary copies pair freely
+                db = dist[defects[a], B]
+                if db >= 0:
+                    graph.add_edge(a, k + a, wmax - int(db))
+            matching = rx_.max_weight_matching(graph, max_cardinality=True,
+                                               weight_fn=lambda w: w)
+            target = rx_v if g['etype'] == 'X' else rz_v
+            for u, v in matching:
+                u, v = min(u, v), max(u, v)
+                if u >= k:
+                    continue                                   # boundary-boundary
+                src = defects[u]
+                dst = B if v >= k else defects[v]
+                for q in g['paths'].get((src, dst), ()):
+                    target[q] ^= 1
+        return rx_v, rz_v
 
-            def path_qubits(src, tgt):
-                prev = prevs[src]
-                qs, node = [], tgt
-                while node != src and prev.get(node, (None, None))[0] is not None:
-                    par, q = prev[node]
-                    qs.append(q); node = par
-                return qs
+    def _qec_matching_decode(self, code: dict, syndrome) -> str:
+        """Matching decoder on one syndrome; returns the recovery Pauli string."""
+        rxv, rzv = self._match_recovery(code, list(syndrome))
+        return ''.join('Y' if a and b else 'X' if a else 'Z' if b else 'I'
+                       for a, b in zip(rxv, rzv))
 
-            def dist(src, tgt):
-                return len(path_qubits(src, tgt)) if tgt in prevs[src] else 10 ** 9
+    def _matchable(self, code: dict) -> bool:
+        try:
+            self._match_graph(code)
+            return all(set(s) - {'I'} in ({'X'}, {'Z'}) for s in code['stab'])
+        except ValueError:
+            return False
 
-            @functools.lru_cache(maxsize=None)
-            def solve(rem):
-                if not rem:
-                    return (0, ())
-                i, rest = rem[0], rem[1:]
-                best_c, best_m = dist(i, 'B') + solve(rest)[0], ((i, 'B'),) + solve(rest)[1]
-                for k, j in enumerate(rest):
-                    sub = solve(rest[:k] + rest[k + 1:])
-                    c = dist(i, j) + sub[0]
-                    if c < best_c:
-                        best_c, best_m = c, ((i, j),) + sub[1]
-                return (best_c, best_m)
+    # ── Monte Carlo logical error rate ─────────────────────────────────
 
-            _, matches = solve(defects)
-            for a, b in matches:
-                for q in path_qubits(a, b):
-                    rec[q] = etype
-        out = []
-        for q in range(n):
-            x, z = xr[q] == 'X', zr[q] == 'Z'
-            out.append('Y' if (x and z) else 'X' if x else 'Z' if z else 'I')
-        return ''.join(out)
+    def _choose_decoder(self, code: dict, requested: str | None = None) -> str:
+        """'lookup', 'match' or 'pymatching' for a string code: the requested
+        one when it applies, else lookup while feasible, else matching."""
+        if requested in ('lookup',) and self._lookup_feasible(code):
+            return 'lookup'
+        if requested == 'pymatching':
+            try:
+                import pymatching  # noqa: F401
+                return 'pymatching'
+            except ImportError:
+                requested = 'match'
+        if requested == 'match':
+            if not self._matchable(code):
+                raise ValueError(f"{code['name']} is not matchable (each qubit must be in "
+                                 f"at most two checks of a type); use LOOKUP or BP")
+            return 'match'
+        if requested == 'lookup':
+            raise ValueError(f"{code['name']}: lookup table would need "
+                             f"2^{self._qec_binary(code)['rank']} syndromes; use MATCH")
+        if self._lookup_feasible(code):
+            return 'lookup'
+        if self._matchable(code):
+            return 'match'
+        raise ValueError(f"{code['name']}: no decoder fits (lookup too large, not matchable)")
+
+    _DECODER_LABEL = {'lookup': 'lookup decoder', 'match': 'blossom matching decoder',
+                      'pymatching': 'pymatching MWPM decoder'}
+
+    def _logical_error_rate(self, code: dict, p: float, trials: int, rng,
+                            uf: bool = False, decoder: str | None = None) -> float:
+        """Code-capacity Monte Carlo: i.i.d. errors (X for a bit-flip code,
+        depolarizing otherwise), decode, count residual logical errors.
+        Vectorized over trials; each distinct syndrome is decoded once."""
+        decoder = self._choose_decoder(code, 'match' if uf else decoder)
+        if decoder == 'pymatching':
+            return self._qec_mwpm_rate(code, p, trials, rng)
+        b = self._qec_binary(code)
+        n = code['n']
+        if code['alphabet'] == 'IX':
+            ex = (rng.random((trials, n)) < p).astype(np.uint8)
+            ez = np.zeros_like(ex)
+        else:
+            hit = rng.random((trials, n)) < p
+            which = rng.integers(0, 3, (trials, n))          # 0 X, 1 Y, 2 Z
+            ex = (hit & (which != 2)).astype(np.uint8)
+            ez = (hit & (which != 0)).astype(np.uint8)
+        synd = ((ex.astype(np.int64) @ b['Sz'].T.astype(np.int64)
+                 + ez.astype(np.int64) @ b['Sx'].T.astype(np.int64)) & 1).astype(np.uint8)
+        keys, inverse = np.unique(np.packbits(synd, axis=1, bitorder='little'),
+                                  axis=0, return_inverse=True)
+        inverse = np.asarray(inverse).reshape(-1)
+        m = synd.shape[1]
+        rec_x = np.zeros((len(keys), n), dtype=np.uint8)
+        rec_z = np.zeros((len(keys), n), dtype=np.uint8)
+        table = self._qec_lookup_table(code) if decoder == 'lookup' else None
+        for k, packed in enumerate(keys):
+            bits = np.unpackbits(packed, bitorder='little')[:m]
+            if table is not None:
+                s = int(sum(int(v) << i for i, v in enumerate(bits)))
+                xm, zm = table.get(s, (0, 0))
+                rec_x[k] = [(xm >> q) & 1 for q in range(n)]
+                rec_z[k] = [(zm >> q) & 1 for q in range(n)]
+            else:
+                rec_x[k], rec_z[k] = self._match_recovery(code, bits)
+        res_x = ex ^ rec_x[inverse]
+        res_z = ez ^ rec_z[inverse]
+        lxx, lxz = b['LX']
+        lzx, lzz = b['LZ']
+        fail = (((res_x.astype(np.int64) @ lxz + res_z.astype(np.int64) @ lxx) & 1)
+                | ((res_x.astype(np.int64) @ lzz + res_z.astype(np.int64) @ lzx) & 1))
+        return float(np.mean(fail))
 
     def cmd_distill(self, rest: str) -> None:
         """DISTILL <p> [trials] — 15-to-1 magic-state (T-state) distillation.
@@ -388,24 +540,58 @@ class QECMixin:
                   and _anticommute(code['lx'], code['lz']))
         self.io.writeln(f"  Valid code (logicals normalize the stabilizer group): {ok}")
 
-    def cmd_logical_error_rate(self, rest: str) -> None:
-        """LOGICAL_ERROR_RATE <code> [distance] <p> [trials] [UF|MWPM|CIRCUIT] — logical error rate.
+    # Decoder flags accepted by LOGICAL_ERROR_RATE and THRESHOLD.
+    _DECODER_FLAGS = {'LOOKUP': 'lookup', 'MATCH': 'match', 'MATCHING': 'match',
+                      'UF': 'match', 'UNION-FIND': 'match', 'MWPM': 'pymatching',
+                      'BP': 'bp'}
 
-        Code-capacity Monte Carlo by default (i.i.d. physical errors, decode,
-        count residual logical errors) with the optimal lookup decoder; UF for
-        union-find, MWPM for batched pymatching. CIRCUIT switches to full
-        circuit-level noise: stim syndrome-extraction circuits over d rounds
-        decoded from the detector error model (the trailing count is then
-        shots, default 100000). BB codes decode with the internal BP+OSD."""
+    def _split_decoder_flags(self, parts: list[str]) -> tuple[list[str], str | None, set]:
+        """(remaining tokens, requested decoder, other flags) from a command."""
+        decoder = None
+        other = set()
+        rest = []
+        for t in parts:
+            u = t.upper()
+            if u in self._DECODER_FLAGS:
+                decoder = self._DECODER_FLAGS[u]
+            elif u in ('CIRCUIT',):
+                other.add(u)
+            else:
+                rest.append(t)
+        return rest, decoder, other
+
+    def _code_rate(self, code: dict, p: float, trials: int, rng,
+                   decoder: str | None) -> tuple[float, str]:
+        """(logical error rate, decoder label) for a string code."""
+        if decoder == 'bp':
+            from qubasic_core.qec2 import _css_from_strings
+            return self._qec_bb_rate(_css_from_strings(code), p, trials, rng), 'BP+OSD decoder'
+        chosen = self._choose_decoder(code, decoder)
+        rate = self._logical_error_rate(code, p, trials, rng, decoder=chosen)
+        return rate, self._DECODER_LABEL[chosen]
+
+    def cmd_logical_error_rate(self, rest: str) -> None:
+        """LOGICAL_ERROR_RATE <code> [distance] <p> [trials] [LOOKUP|MATCH|MWPM|BP|CIRCUIT] — logical error rate.
+
+        Code-capacity Monte Carlo (i.i.d. physical errors, decode, count
+        residual logical errors), vectorized over trials. The decoder defaults
+        to the minimum-weight lookup table while the code's syndrome space
+        allows it and to exact minimum-weight matching (blossom) beyond;
+        MATCH (alias UF) forces matching, MWPM uses pymatching when installed,
+        BP the internal BP+OSD. CIRCUIT switches to circuit-level noise: stim
+        syndrome-extraction circuits over d rounds decoded from the detector
+        error model (the trailing count is then shots, default 100000). BB
+        codes decode with BP+OSD."""
         parts = rest.split()
         if len(parts) < 2:
-            self.io.writeln("?USAGE: LOGICAL_ERROR_RATE <code> [distance] <p> [trials] [UF|MWPM|CIRCUIT]")
+            self.io.writeln("?USAGE: LOGICAL_ERROR_RATE <code> [distance] <p> [trials] "
+                            "[LOOKUP|MATCH|MWPM|BP|CIRCUIT]")
             return
         try:
             name = parts[0]
             idx = 1
             distance = 3
-            _FLAGS = ('UF', 'UNION-FIND', 'MATCHING', 'MWPM', 'CIRCUIT', 'BP')
+            _FLAGS = tuple(self._DECODER_FLAGS) + ('CIRCUIT',)
             if name.upper() == 'BB':
                 # BB takes l and m instead of a distance.
                 l = m = 6
@@ -429,12 +615,14 @@ class QECMixin:
                 self.io.writeln(f"  Logical error rate = {ler:.6f}")
                 self.variables['_LER'] = ler
                 return
+            parts, decoder, other = self._split_decoder_flags(parts)
             if len(parts) > 2 and parts[1].isdigit() and float(parts[1]) >= 1:
                 distance = int(parts[1]); idx = 2
-            flags = {t.upper() for t in parts if t.upper() in _FLAGS}
-            tail = [t for t in parts[idx:] if t.upper() not in _FLAGS]
+            tail = parts[idx:]
             p = float(self._eval_with_vars(tail[0], {}))
-            if 'CIRCUIT' in flags:
+            if not 0.0 <= p <= 1.0:
+                raise ValueError(f"p={p} out of range (expected 0..1)")
+            if 'CIRCUIT' in other:
                 shots = int(tail[1]) if len(tail) > 1 else 100000
                 rounds = int(tail[2]) if len(tail) > 2 else None
                 self._qec_circuit_level(name, distance, p, shots, rounds)
@@ -442,45 +630,58 @@ class QECMixin:
             trials = int(tail[1]) if len(tail) > 1 else 20000
             code = self._qec_code(name, distance)
             rng = np.random.default_rng(self._seed)
-            if 'MWPM' in flags:
-                ler = self._qec_mwpm_rate(code, p, trials, rng)
-                dec = 'pymatching MWPM decoder'
-            else:
-                uf = bool(flags & {'UF', 'UNION-FIND', 'MATCHING'})
-                ler = self._logical_error_rate(code, p, trials, rng, uf=uf)
-                dec = 'union-find decoder' if uf else 'lookup decoder'
-            self.io.writeln(f"\n  {code['name']}: physical p={p}, {trials} trials ({dec})")
+            t0 = __import__('time').time()
+            ler, dec = self._code_rate(code, p, trials, rng, decoder)
+            dt = __import__('time').time() - t0
+            self.io.writeln(f"\n  {code['name']}: physical p={p}, {trials} trials ({dec}, {dt:.1f}s)")
             self.io.writeln(f"  Logical error rate = {ler:.6f}")
             self.variables['_LER'] = ler
         except Exception as e:
             self.io.writeln(f"?LOGICAL_ERROR_RATE ERROR: {e}")
 
     def cmd_threshold(self, rest: str) -> None:
-        """THRESHOLD <code> <p1> <p2> <steps> [d1 d2 ...] — sweep physical error rate.
+        """THRESHOLD <code> <p1> <p2> <steps> [d1 d2 ...] [TRIALS n] [LOOKUP|MATCH|MWPM|BP] — sweep p.
 
         Reports the logical error rate across [p1, p2] for several code distances
-        (default 3, 5, 7 for the repetition code), so the threshold crossing where
-        larger codes start helping is visible."""
+        (default 3, 5, 7), so the threshold crossing where larger codes start
+        helping is visible. Each distance uses the decoder LOGICAL_ERROR_RATE
+        would pick for it unless a decoder flag is given."""
         parts = rest.split()
         if len(parts) < 4:
-            self.io.writeln("?USAGE: THRESHOLD <code> <p1> <p2> <steps> [distances]")
+            self.io.writeln("?USAGE: THRESHOLD <code> <p1> <p2> <steps> [distances] "
+                            "[TRIALS n] [LOOKUP|MATCH|MWPM|BP]")
             return
         try:
+            parts, decoder, _ = self._split_decoder_flags(parts)
+            trials = 8000
+            if any(t.upper() == 'TRIALS' for t in parts):
+                k = [t.upper() for t in parts].index('TRIALS')
+                trials = int(parts[k + 1])
+                parts = parts[:k] + parts[k + 2:]
             name = parts[0]
             p1 = float(self._eval_with_vars(parts[1], {}))
             p2 = float(self._eval_with_vars(parts[2], {}))
             steps = int(parts[3])
             distances = [int(x) for x in parts[4:]] if len(parts) > 4 else [3, 5, 7]
             ps = [p1 + (p2 - p1) * i / max(1, steps - 1) for i in range(steps)]
-            codes = [self._qec_code(name, d) for d in distances]
+            codes: list[dict] = []
+            for d in distances:
+                c = self._qec_code(name, d)
+                if all(c is not other for other in codes):
+                    codes.append(c)
             rng = np.random.default_rng(self._seed)
-            trials = 8000
+            labels = []
+            for c in codes:
+                labels.append('BP+OSD' if decoder == 'bp'
+                              else self._choose_decoder(c, decoder))
             self.io.writeln(f"\n  Threshold sweep ({name.upper()}), {trials} trials/point:")
             self.io.writeln("    p      " + ''.join(f"  d={c['d']:<8}" for c in codes))
+            self.io.writeln("  decoder  " + ''.join(f"  {lab[:8]:<10}" for lab in labels))
             for p in ps:
                 row = f"  {p:5.3f}  "
                 for c in codes:
-                    row += f"  {self._logical_error_rate(c, p, trials, rng):<8.4f}"
+                    rate, _ = self._code_rate(c, p, trials, rng, decoder)
+                    row += f"  {rate:<8.4f}"
                 self.io.writeln(row)
         except Exception as e:
             self.io.writeln(f"?THRESHOLD ERROR: {e}")

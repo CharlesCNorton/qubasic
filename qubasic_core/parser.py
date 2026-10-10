@@ -484,11 +484,38 @@ _KEYWORD_PARSERS = {
 }
 
 
+# A statement starting with one of these owns the rest of its line: an IF's
+# clauses run to the end of the line, a comment or DEF body keeps its colons.
+_LINE_OWNERS = re.compile(r"\s*(IF|ELSEIF|REM|DEF)\b|\s*'", re.IGNORECASE)
+
+
+def _colon_pieces(stmt: str) -> list[str]:
+    """Split at top-level colons: outside double-quoted strings, and not after
+    a statement that owns the rest of its line."""
+    pieces: list[str] = []
+    buf: list[str] = []
+    in_string = False
+    for i, ch in enumerate(stmt):
+        if ch == '"':
+            in_string = not in_string
+        elif ch == ':' and not in_string:
+            current = ''.join(buf)
+            if _LINE_OWNERS.match(current):
+                buf.append(stmt[i:])
+                break
+            pieces.append(current)
+            buf = []
+            continue
+        buf.append(ch)
+    pieces.append(''.join(buf))
+    return pieces
+
+
 def _split_colon_stmts(stmt: str) -> list[str]:
     """Split colon-separated statements, inheriting @register prefixes."""
     parts = []
     last_reg = None
-    for sub in stmt.split(':'):
+    for sub in _colon_pieces(stmt):
         sub = sub.strip()
         if not sub:
             continue
@@ -545,6 +572,8 @@ def parse_stmt(raw: str) -> Stmt:
         return EndSelectStmt(raw=raw)
     if upper == 'STOP':
         return StopStmt(raw=raw)
+    if upper == 'PRINT':
+        return PrintStmt(raw=raw, expr='')       # a blank line
 
     # ── END SUB / END FUNCTION ────────────────────────────────────
     m = RE_END_SUB.match(text)
@@ -553,6 +582,14 @@ def parse_stmt(raw: str) -> Stmt:
     m = RE_END_FUNCTION.match(text)
     if m:
         return EndFunctionStmt(raw=raw)
+
+    # ── Compound (colon-separated) ────────────────────────────────
+    # Split before keyword dispatch, so PRINT 1: PRINT 2 or FOR ... : NEXT
+    # is a compound rather than one statement swallowing the rest.
+    if ':' in text and not text.startswith('@'):
+        parts = _split_colon_stmts(text)
+        if len(parts) > 1:
+            return CompoundStmt(raw=raw, parts=tuple(parts))
 
     # ── First-word dispatch ───────────────────────────────────────
     first_word = text.split(None, 1)[0].upper()

@@ -83,70 +83,160 @@ class Algorithms2Mixin:
     # ── Amplitude estimation ────────────────────────────────────────────
 
     def cmd_ampest(self, rest: str) -> None:
-        """AMPEST <bits> <good_qubit> — estimate the amplitude of the marked state.
+        """AMPEST [m] <good> [SHOTS n] — amplitude estimation of the program's state.
 
-        Prepares uniform superposition on all qubits, treats |good_qubit = 1> as
-        the good subspace, and runs canonical (QPE-based) amplitude estimation,
-        reporting the estimated probability a = sin^2(pi y / 2^bits)."""
+        The program (measure-free and unitary) is the state preparation A; with
+        no program, A is a Hadamard on every qubit. <good> marks the good
+        outcomes: a qubit index (good when it reads 1) or a basis state |bits>
+        in the display's bit order. Maximum-likelihood amplitude estimation
+        runs Q^k A|0> for k = 0, 1, 2, 4, ..., 2^(m-1) Grover iterations
+        (Q = A S0 A^dag S_good, default m = 5), counts the good outcomes, and
+        maximizes the joint likelihood over theta with a = sin^2(theta). The
+        reported spread is the Fisher-information standard deviation."""
         parts = rest.split()
-        if len(parts) < 2:
-            self.io.writeln("?USAGE: AMPEST <bits> <good_qubit>")
+        shots = self.shots
+        if any(p.upper() == 'SHOTS' for p in parts):
+            k = [p.upper() for p in parts].index('SHOTS')
+            shots = int(parts[k + 1])
+            parts = parts[:k] + parts[k + 2:]
+        if not parts:
+            self.io.writeln("?USAGE: AMPEST [m] <qubit | |bits>> [SHOTS n]")
             return
-        from qiskit import QuantumCircuit, transpile
-        from qiskit_aer import AerSimulator
+        if len(parts) == 1:
+            m, good_spec = 5, parts[0]
+        else:
+            m, good_spec = int(parts[0]), parts[1]
         try:
-            bits = int(parts[0])
-            good = int(parts[1])
-            nq = self.num_qubits
-            # State qubits 0..nq-1 prepared in uniform superposition; the Grover
-            # operator Q = A S_0 A^dag S_chi with A = H^{nq}, chi = (good == 1).
-            count = list(range(nq, nq + bits))
-            total = nq + bits
-            qc = QuantumCircuit(total, bits)
-            for q in range(nq):
-                qc.h(q)
-            for cq in count:
-                qc.h(cq)
-
-            def oracle(circ):       # phase flip when good qubit is 1
-                circ.z(good)
-
-            def diffusion(circ):    # A S_0 A^dag = H^n (2|0><0|-I) H^n on state qubits
-                for q in range(nq):
-                    circ.h(q)
-                for q in range(nq):
-                    circ.x(q)
-                self._emit_mcz(circ, list(range(nq)))
-                for q in range(nq):
-                    circ.x(q)
-                for q in range(nq):
-                    circ.h(q)
-
-            for j, cq in enumerate(count):
-                for _ in range(2 ** j):
-                    # Controlled Grover operator Q (oracle then diffusion),
-                    # controlled on the counting qubit.
-                    qc.cz(cq, good)          # controlled oracle (Z on good)
-                    # controlled diffusion: conjugate the controlled-MCZ by H,X
-                    for q in range(nq):
-                        qc.h(q); qc.x(q)
-                    qc.h(nq - 1)
-                    qc.mcx([cq] + list(range(nq - 1)), nq - 1)
-                    qc.h(nq - 1)
-                    for q in range(nq):
-                        qc.x(q); qc.h(q)
-            self._emit_qft(qc, count, inverse=True, swaps=True)
-            qc.measure(count, range(bits))
-            backend = AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
-            counts = backend.run(transpile(qc, backend), shots=max(2000, self.shots)).result().get_counts()
-            y = int(max(counts, key=counts.get), 2)
-            a = math.sin(math.pi * y / 2 ** bits) ** 2
-            # Amplitude estimation is symmetric in y and 2^bits - y.
-            a = min(a, math.sin(math.pi * (2 ** bits - y) / 2 ** bits) ** 2) if a > 0.5 else a
-            self.io.writeln(f"  Amplitude estimate a = {a:.4f}  (y={y}/{2 ** bits})")
-            self.variables['_AMPEST'] = a
+            a_hat, sigma, exact, ks = self._mlae(good_spec, m, shots)
+            ks_txt = ','.join(str(k) for k in ks)
+            exact_txt = f"; exact {exact:.4f}" if exact is not None else ""
+            self.io.writeln(f"  Amplitude estimate a = {a_hat:.4f} ± {sigma:.4f}  "
+                            f"(MLAE, Grover powers {ks_txt}, {shots} shots each{exact_txt})")
+            self.variables['_AMPEST'] = a_hat
+            self.variables['_AMPEST_SIGMA'] = sigma
         except Exception as e:
             self.io.writeln(f"?AMPEST ERROR: {e}")
+
+    def _mlae(self, good_spec: str, m: int, shots: int):
+        """Maximum-likelihood amplitude estimation (Suzuki et al., 2020).
+
+        Returns (a_hat, sigma_a, exact_a or None, grover_powers)."""
+        from qiskit import QuantumCircuit, transpile
+        from qiskit.circuit import Gate
+        if m < 0:
+            raise ValueError("m must be >= 0")
+        n = self.num_qubits
+        if self.program:
+            prep, _ = self.build_circuit()
+            for inst in prep.data:
+                op = inst.operation
+                if op.name == 'barrier':
+                    continue
+                if not isinstance(op, Gate):
+                    raise ValueError(f"the state preparation must be unitary; '{op.name}' "
+                                     f"is not (AMPEST takes a measure-free, reset-free program)")
+        else:
+            prep = QuantumCircuit(n)
+            for q in range(n):
+                prep.h(q)
+        prep = prep.copy()
+        prep.remove_final_measurements(inplace=True)
+        spec = good_spec.strip()
+        target_bits = None
+        good_qubit = None
+        if spec.startswith('|'):
+            bits = spec.strip('|>⟩')
+            if len(bits) != n or set(bits) - {'0', '1'}:
+                raise ValueError(f"good state must be {n} bits, e.g. |{'1' * n}>")
+            target_bits = bits[::-1] if self._endian_big else bits     # internal q_{n-1}..q0
+        else:
+            good_qubit = int(self._eval_with_vars(spec, {}))
+            if not 0 <= good_qubit < n:
+                raise ValueError(f"qubit {good_qubit} out of range (0-{n - 1})")
+        qubits = list(range(n))
+
+        def phase_flip(circ, bits_hi_to_lo: str) -> None:
+            zeros = [q for q in qubits if bits_hi_to_lo[n - 1 - q] == '0']
+            for q in zeros:
+                circ.x(q)
+            self._emit_mcz(circ, qubits)
+            for q in zeros:
+                circ.x(q)
+
+        def s_good(circ) -> None:
+            if good_qubit is not None:
+                circ.z(good_qubit)
+            elif target_bits is not None:
+                phase_flip(circ, target_bits)
+
+        a_inv = prep.inverse()
+        grover = QuantumCircuit(n)
+        s_good(grover)
+        grover.compose(a_inv, inplace=True)
+        phase_flip(grover, '0' * n)
+        grover.compose(prep, inplace=True)
+
+        ks = [0] + [2 ** j for j in range(m)]
+        circuits = []
+        for k in ks:
+            qc = QuantumCircuit(n, 1 if good_qubit is not None else n)
+            qc.compose(prep, inplace=True)
+            for _ in range(k):
+                qc.compose(grover, inplace=True)
+            if good_qubit is not None:
+                qc.measure(good_qubit, 0)
+            else:
+                qc.measure(qubits, list(range(n)))
+            circuits.append(qc)
+        method, precision = self._select_method(circuits[-1])
+        backend = self._make_backend(method if method != 'stabilizer' else 'automatic',
+                                     include_noise=True, precision=precision)
+        kw: dict = {'shots': shots}
+        if self._seed is not None:
+            kw['seed_simulator'] = self._seed
+        result = backend.run(transpile(circuits, backend, optimization_level=self._transpile_opt_level),
+                             **kw).result()
+        hits = []
+        for i in range(len(ks)):
+            counts = result.get_counts(i)
+            if good_qubit is not None:
+                hits.append(counts.get('1', 0))
+            else:
+                hits.append(counts.get(target_bits, 0))
+        hits_a = np.array(hits, dtype=float)
+        odd = np.array([2 * k + 1 for k in ks], dtype=float)
+
+        def loglik(theta):
+            s = np.clip(np.sin(odd * theta) ** 2, 1e-12, 1 - 1e-12)
+            return float(np.sum(hits_a * np.log(s) + (shots - hits_a) * np.log(1 - s)))
+
+        grid = np.linspace(0.0, np.pi / 2, 20001)
+        vals = np.array([loglik(t) for t in grid])
+        best = int(np.argmax(vals))
+        lo, hi = grid[max(best - 1, 0)], grid[min(best + 1, len(grid) - 1)]
+        gr = (np.sqrt(5) - 1) / 2                      # golden-section refinement
+        c, d = hi - gr * (hi - lo), lo + gr * (hi - lo)
+        for _ in range(60):
+            if loglik(c) > loglik(d):
+                hi = d
+            else:
+                lo = c
+            c, d = hi - gr * (hi - lo), lo + gr * (hi - lo)
+        theta = (lo + hi) / 2
+        a_hat = float(np.sin(theta) ** 2)
+        fisher = 4.0 * shots * float(np.sum(odd ** 2))
+        sigma = float(abs(np.sin(2 * theta)) / np.sqrt(fisher))
+        exact = None
+        from qubasic_core import capacity as cap
+        if cap.fits(cap.aer_peak_bytes(n, 'statevector', 'double', 'end')) and n <= 26:
+            from qiskit.quantum_info import Statevector
+            probs = np.abs(Statevector(prep).data) ** 2
+            if good_qubit is not None:
+                idx = np.arange(probs.size)
+                exact = float(probs[((idx >> good_qubit) & 1) == 1].sum())
+            elif target_bits is not None:
+                exact = float(probs[int(target_bits, 2)])
+        return a_hat, sigma, exact, ks
 
     # ── Amplitude amplification (one Grover step) ───────────────────────
 
@@ -399,85 +489,86 @@ class Algorithms2Mixin:
     # ── HHL linear solver (2x2) ─────────────────────────────────────────
 
     def cmd_hhl(self, rest: str) -> None:
-        """HHL a b c d v0 v1 — solve the 2x2 Hermitian system [[a,b],[c,d]] x = v.
+        """HHL a b c d v0 v1 [clock] — solve the 2x2 Hermitian system [[a,b],[c,d]] x = v.
 
-        Runs the HHL algorithm (phase estimation, eigenvalue inversion, uncompute)
-        and reports the normalized solution direction, compared to the classical
-        A^{-1} v."""
+        Runs the HHL algorithm: phase estimation of e^{iAt} on a signed clock
+        register of `clock` qubits (default 7; negative eigenvalues read as
+        two's complement), a uniformly controlled RY that rotates the ancilla
+        by 2 arcsin(C / lambda), and uncomputation. As HHL assumes, the
+        eigenvalue range is given classically: t maps the largest |lambda| to
+        the clock's top value and C is 0.9 of the smallest |lambda|. Reports
+        the post-selected solution direction, its fidelity to the classical
+        A^-1 v, and the probability that post-selection succeeds."""
         parts = rest.split()
         if len(parts) < 6:
-            self.io.writeln("?USAGE: HHL a b c d v0 v1   (A=[[a,b],[c,d]], v=[v0,v1])")
+            self.io.writeln("?USAGE: HHL a b c d v0 v1 [clock]   (A=[[a,b],[c,d]], v=[v0,v1])")
             return
         try:
             vals = [float(self._eval_with_vars(p, {})) for p in parts[:6]]
+            nclock = int(parts[6]) if len(parts) > 6 else 7
+            if not 3 <= nclock <= 10:
+                raise ValueError("clock must be 3-10 qubits")
             A = np.array([[vals[0], vals[1]], [vals[2], vals[3]]], dtype=complex)
             b = np.array([vals[4], vals[5]], dtype=complex)
             if not np.allclose(A, A.conj().T):
-                self.io.writeln("?HHL: A must be Hermitian")
-                return
-            from qiskit import QuantumCircuit, transpile
-            from qiskit.circuit.library import UnitaryGate
-            from qiskit.quantum_info import Statevector
-            nclock = 4
-            sys, clock, anc = 0, list(range(1, 1 + nclock)), 1 + nclock
-            total = 2 + nclock
-            bnorm = b / np.linalg.norm(b)
-            qc = QuantumCircuit(total)
-            qc.initialize(bnorm, [sys])
-            # QPE with e^{i A t}; choose t so eigenvalues map into [0, 2^nclock).
-            evals = np.linalg.eigvalsh(A)
-            t = 2 * np.pi / (2 ** nclock) * (2 ** nclock - 1) / max(abs(evals).max(), 1e-9)
-            from scipy.linalg import expm  # noqa
-        except Exception:
-            # scipy may be absent; build expm from eigh.
-            pass
-        try:
+                raise ValueError("A must be Hermitian")
+            if np.linalg.norm(b) < 1e-12:
+                raise ValueError("v must be nonzero")
             w, V = np.linalg.eigh(A)
-            U = V @ np.diag(np.exp(1j * w * t)) @ V.conj().T
-            for c in clock:
-                qc.h(c)
-            for j, c in enumerate(clock):
-                Uk = np.linalg.matrix_power(U, 2 ** j)
-                qc.append(UnitaryGate(Uk).control(1), [c, sys])
-            self._emit_qft(qc, clock, inverse=True, swaps=True)
-            # Eigenvalue inversion: controlled RY on ancilla, angle ~ 1/lambda.
-            C = 1.0
-            for k in range(1, 2 ** nclock):
-                lam = 2 * np.pi * k / (2 ** nclock) / t
-                theta = 2 * np.arcsin(max(-1, min(1, C / lam)))
-                bits = format(k, f'0{nclock}b')
-                ctrl_state = bits[::-1]
-                for j, bit in enumerate(ctrl_state):
-                    if bit == '0':
-                        qc.x(clock[j])
-                qc.append(UnitaryGate(np.array([[np.cos(theta / 2), -np.sin(theta / 2)],
-                                                 [np.sin(theta / 2), np.cos(theta / 2)]])).control(nclock),
-                          clock + [anc])
-                for j, bit in enumerate(ctrl_state):
-                    if bit == '0':
-                        qc.x(clock[j])
-            self._emit_qft(qc, clock, inverse=False, swaps=True)
-            for j, c in enumerate(clock):
-                Uk = np.linalg.matrix_power(U.conj().T, 2 ** j)
-                qc.append(UnitaryGate(Uk).control(1), [c, sys])
-            for c in clock:
-                qc.h(c)
-            sv = Statevector(qc).data.reshape([2] * total)
-            # Post-select ancilla = 1, clock = 0; read the system qubit.
-            # Index ordering: qubit 0 (sys) is the least significant.
-            amp0 = sv.reshape(-1)[(1 << (total - 1)) | 0]   # anc=1, others 0, sys=0
-            amp1 = sv.reshape(-1)[(1 << (total - 1)) | 1]   # sys=1
-            x_q = np.array([amp0, amp1])
-            if np.linalg.norm(x_q) < 1e-9:
-                self.io.writeln("  HHL: post-selection amplitude vanished (increase clock bits)")
-                return
-            x_q = x_q / np.linalg.norm(x_q)
+            if np.min(np.abs(w)) < 1e-9:
+                raise ValueError("A is singular")
+            x_q, success = self._hhl_solve(A, b, w, V, nclock)
             x_cl = np.linalg.solve(A, b)
             x_cl = x_cl / np.linalg.norm(x_cl)
             overlap = abs(np.vdot(x_cl, x_q)) ** 2
             self.io.writeln(f"  HHL solution (normalized): [{x_q[0].real:+.3f}, {x_q[1].real:+.3f}]")
             self.io.writeln(f"  Classical A^-1 v:          [{x_cl[0].real:+.3f}, {x_cl[1].real:+.3f}]")
-            self.io.writeln(f"  Direction fidelity = {overlap:.4f}")
+            self.io.writeln(f"  Direction fidelity = {overlap:.4f}   "
+                            f"(post-selection succeeds with p = {success:.4f}, {nclock} clock qubits)")
             self.variables['_HHL_FIDELITY'] = float(overlap)
+            self.variables['_HHL_SUCCESS'] = float(success)
         except Exception as e:
             self.io.writeln(f"?HHL ERROR: {e}")
+
+    def _hhl_solve(self, A, b, w, V, nclock: int) -> tuple[np.ndarray, float]:
+        """Build and simulate the HHL circuit; returns (normalized x, success p)."""
+        from qiskit import QuantumCircuit
+        from qiskit.circuit.library import UnitaryGate, UCRYGate
+        from qiskit.quantum_info import Statevector
+        sys_q, clock, anc = 0, list(range(1, 1 + nclock)), 1 + nclock
+        total = 2 + nclock
+        half = 1 << (nclock - 1)
+        # e^{iAt} with the largest |lambda| at clock value half - 1, so every
+        # eigenvalue lands in the signed range (-half, half).
+        t = 2 * np.pi * (half - 1) / ((1 << nclock) * float(np.max(np.abs(w))))
+        U = V @ np.diag(np.exp(1j * w * t)) @ V.conj().T
+        qc = QuantumCircuit(total)
+        qc.initialize(b / np.linalg.norm(b), [sys_q])
+        for c in clock:
+            qc.h(c)
+        for j, c in enumerate(clock):
+            qc.append(UnitaryGate(np.linalg.matrix_power(U, 2 ** j)).control(1), [c, sys_q])
+        self._emit_qft(qc, clock, inverse=True, swaps=True)
+        # C/lambda must stay <= 1 for every clock value phase estimation lands
+        # on; 0.9 of the smallest |eigenvalue| keeps the spread clear of the
+        # arcsin clip while post-selection still succeeds about half the time.
+        C = 0.9 * float(np.min(np.abs(w)))
+        angles = [0.0]
+        for k in range(1, 1 << nclock):
+            ks = k if k < half else k - (1 << nclock)
+            lam = 2 * np.pi * ks / ((1 << nclock) * t)
+            angles.append(float(2 * np.arcsin(np.clip(C / lam, -1.0, 1.0))))
+        qc.append(UCRYGate(angles), [anc] + clock)
+        self._emit_qft(qc, clock, inverse=False, swaps=True)
+        for j, c in enumerate(clock):
+            qc.append(UnitaryGate(np.linalg.matrix_power(U.conj().T, 2 ** j)).control(1),
+                      [c, sys_q])
+        for c in clock:
+            qc.h(c)
+        sv = Statevector(qc).data
+        # Post-select ancilla = 1 and clock = 0; qubit 0 (sys) is the low bit.
+        x = np.array([sv[1 << (total - 1)], sv[(1 << (total - 1)) | 1]])
+        success = float(np.vdot(x, x).real)
+        if success < 1e-12:
+            raise ValueError("post-selection amplitude vanished (add clock qubits)")
+        return x / np.sqrt(success), success

@@ -35,7 +35,7 @@ class BosonicMixin:
     def _init_bosonic(self) -> None:
         self._bmodes = 0
         self._bcut = 0
-        self._bsv = None
+        self._bsv: np.ndarray = np.zeros(0, dtype=complex)   # set by BOSONIC
 
     def _annihilation(self):
         N = self._bcut

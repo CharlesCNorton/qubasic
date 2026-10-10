@@ -32,6 +32,7 @@ CFG_NAMES = {
     0xD009: 'mps_truncation',       # float threshold
     0xD00A: 'sv_parallel_threshold', # int
     0xD00B: 'es_approx_error',      # float (extended stabilizer)
+    0xD00C: 'precision',            # 0 = double, 1 = single
 }
 
 STS_NAMES = {
@@ -75,18 +76,23 @@ class MemoryMixin:
         for addr, name in STS_NAMES.items():
             if name in kw:
                 self._status[addr] = float(kw[name])
-        if self.last_sv is not None:
-            sv = np.ascontiguousarray(self.last_sv).ravel()
-            self._status[0xD013] = float(np.sum(np.abs(sv) ** 2))
-            # $D014: entanglement entropy of qubit 0 vs the rest (bits), the
-            # partition ENTROPY 0 reports. Little-endian statevector: qubit 0
-            # is the fastest-varying index, so reshape(-1, 2) isolates it.
-            if sv.size >= 4:
-                lam = np.linalg.svd(sv.reshape(-1, 2), compute_uv=False) ** 2
-                lam = lam[lam > 1e-12]
-                self._status[0xD014] = float(-np.sum(lam * np.log2(lam)))
-            else:
-                self._status[0xD014] = 0.0
+
+    def _state_status(self, addr: int) -> float:
+        """$D013 (total probability) and $D014 (entanglement entropy of qubit
+        0 against the rest, in bits, the partition ENTROPY 0 reports), read
+        from the current state on demand."""
+        sv = self._active_sv
+        if sv is None:
+            return 1.0 if addr == 0xD013 else 0.0
+        flat = np.asarray(sv).reshape(-1)
+        if addr == 0xD013:
+            return float(np.vdot(flat, flat).real)
+        n = int(flat.size).bit_length() - 1
+        if n < 2:
+            return 0.0
+        from qubasic_core.statetools import qubit_rdm, entropy_bits
+        lam = np.linalg.eigvalsh(qubit_rdm(flat, 0, n))
+        return entropy_bits(lam)
 
     # ── PEEK ───────────────────────────────────────────────────────────
 
@@ -103,6 +109,8 @@ class MemoryMixin:
             return float(ntype) if field == 0 else nparam
         if a in CFG_NAMES:
             return self._peek_config(a)
+        if a in (0xD013, 0xD014):
+            return self._state_status(a)
         if a in STS_NAMES:
             return self._status.get(a, 0.0)
         return 0.0
@@ -110,20 +118,20 @@ class MemoryMixin:
     def _peek_qubit(self, addr: int) -> float:
         off = addr - 0x0100
         qubit, field = off // QUBIT_BLOCK, off % QUBIT_BLOCK
-        if self.last_sv is None or qubit >= self.num_qubits:
+        if qubit >= self.num_qubits:
             return 0.0
-        sv_flat = np.ascontiguousarray(self.last_sv).ravel()
+        sv = self.last_sv
+        if sv is None:
+            return 0.0
+        sv_flat = np.asarray(sv).reshape(-1)
         if sv_flat.size != 2 ** self.num_qubits:
             return 0.0  # stale statevector from a different qubit count
-        sv = sv_flat.reshape([2] * self.num_qubits)
-        ax = self.num_qubits - 1 - qubit
-        t = np.moveaxis(sv, ax, 0)
-        t0, t1 = t[0].flatten(), t[1].flatten()
-        rho_00 = float(np.sum(np.abs(t0) ** 2))
-        rho_11 = float(np.sum(np.abs(t1) ** 2))
-        # conj(t0)*t1 sums to rho_10 = <1|rho|0>. Bloch X = 2 Re(rho_10) and
-        # Bloch Y = -2 Im(rho_01) = +2 Im(rho_10).
-        rho_10 = complex(np.sum(np.conj(t0) * t1))
+        from qubasic_core.statetools import qubit_rdm
+        r = qubit_rdm(sv_flat, qubit, self.num_qubits)
+        rho_00 = float(r[0, 0].real)
+        rho_11 = float(r[1, 1].real)
+        # Bloch X = 2 Re(rho_10) and Bloch Y = +2 Im(rho_10).
+        rho_10 = complex(r[1, 0])
         # Recover amplitudes with alpha as the real phase reference; beta then
         # carries the relative phase (real and imaginary parts both exposed).
         alpha = np.sqrt(max(0.0, rho_00))
@@ -154,6 +162,7 @@ class MemoryMixin:
         if n == 'mps_truncation': return float(getattr(self, '_mps_truncation', 1e-16))
         if n == 'sv_parallel_threshold': return float(getattr(self, '_sv_parallel_threshold', 14))
         if n == 'es_approx_error': return float(getattr(self, '_es_approx_error', 0.05))
+        if n == 'precision':      return 1.0 if self.sim_precision == 'single' else 0.0
         return 0.0
 
     # ── POKE ───────────────────────────────────────────────────────────
@@ -169,10 +178,16 @@ class MemoryMixin:
             self._zero_page[a] = v
             return
         if a == 0xD000:
-            new_n = max(1, min(32, int(v)))
+            from qubasic_core.engine import METHOD_MAX_QUBITS
+            ceiling = METHOD_MAX_QUBITS.get(self.sim_method, 32)
+            new_n = max(1, min(ceiling, int(v)))
             if new_n != self.num_qubits:
                 self._invalidate_run_state()
+                self.registers.clear()
             self.num_qubits = new_n
+        elif a == 0xD00C:
+            self.sim_precision = 'single' if int(v) else 'double'
+            self._circuit_cache_key = None
         elif a == 0xD001:
             self.shots = max(1, int(v))
         elif a == 0xD002:
@@ -421,13 +436,13 @@ class MemoryMixin:
                 self.io.writeln(f"               q{q}: P(1)={p1:.3f} Bz={bz:.3f}")
             if self.num_qubits > 4:
                 self.io.writeln(f"               ... ({self.num_qubits - 4} more)")
-        self.io.writeln(f"  $D000-$D007  QPU Config")
+        self.io.writeln(f"  $D000-$D00C  QPU Config")
         for addr, name in sorted(CFG_NAMES.items()):
             val = self._peek_config(addr)
             self.io.writeln(f"               ${addr:04X} {name:16s} = {val}")
         self.io.writeln(f"  $D010-$D014  QPU Status (read-only)")
         for addr, name in sorted(STS_NAMES.items()):
-            val = self._status.get(addr, 0.0)
+            val = self._peek(addr)
             self.io.writeln(f"               ${addr:04X} {name:20s} = {val}")
         self.io.writeln(f"  $E000-$E0B0  SYS Routines     ({len(SYS_ROUTINES)} built-in)")
         self.io.writeln(f"  $F000-$FFFF  User SYS         ({len(self._user_sys)} installed)")

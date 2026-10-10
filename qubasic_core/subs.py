@@ -32,12 +32,9 @@ class SubroutineMixin:
         self._shared_stack: list[set[str]] = []
 
     def _scan_subs(self, sorted_lines: list[int]) -> None:
-        """Scan program for SUB/FUNCTION blocks and build jump table."""
+        """Scan program for SUB/FUNCTION blocks."""
         self._sub_defs.clear()
         self._func_defs.clear()
-        self._jump_table: dict[int, int] = {}  # ip -> matching-end ip
-        # Build jump table for WHILE/WEND, DO/LOOP pairs
-        self._build_jump_table(sorted_lines)
         for i, ln in enumerate(sorted_lines):
             stmt = self.program[ln].strip()
             m = RE_SUB.match(stmt)
@@ -53,27 +50,6 @@ class SubroutineMixin:
                 params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
                 end_ip = self._find_end_block(sorted_lines, i, 'FUNCTION')
                 self._func_defs[name] = {'params': params, 'start_ip': i + 1, 'end_ip': end_ip}
-
-    def _build_jump_table(self, sorted_lines: list[int]) -> None:
-        """Pre-compute WHILE->WEND and DO->LOOP ip mappings."""
-        while_stack: list[int] = []
-        do_stack: list[int] = []
-        for ip, ln in enumerate(sorted_lines):
-            s = self.program[ln].strip().upper()
-            if s.startswith('WHILE '):
-                while_stack.append(ip)
-            elif s == 'WEND':
-                if while_stack:
-                    w_ip = while_stack.pop()
-                    self._jump_table[w_ip] = ip
-                    self._jump_table[ip] = w_ip
-            elif s.startswith('DO'):
-                do_stack.append(ip)
-            elif s.startswith('LOOP'):
-                if do_stack:
-                    d_ip = do_stack.pop()
-                    self._jump_table[d_ip] = ip
-                    self._jump_table[ip] = d_ip
 
     def _find_end_block(self, sorted_lines: list[int], start_ip: int, kind: str) -> int:
         scan = start_ip + 1
@@ -161,7 +137,7 @@ class SubroutineMixin:
         if name in self._static_vars:
             for k, v in self._static_vars[name].items():
                 self.variables[k] = v
-        self._call_stack.append({'return_ip': ip + 1, 'sub_name': name})
+        self._call_stack.append({'return_ip': self._return_point(ip), 'sub_name': name})
         return True, sub['start_ip']
 
     def _invoke_function(self, name: str, args: list[float],
@@ -192,6 +168,16 @@ class SubroutineMixin:
                 loop_stack=[],
                 max_iterations=self._max_iterations,
             )
+            from qubasic_core.parser import parse_stmt
+            from qubasic_core.control_flow import ResumePoint
+            from qubasic_core.statements import CompoundStmt
+
+            # Full control-flow dispatch for every statement in the body.
+            def _fn_recurse(s, ls, sl, i, rv):
+                handled, result = self._exec_control_flow(s, ls, sl, i, rv, _fn_recurse)
+                return result if handled else None
+
+            resume = None
             while ctx.ip <= func['end_ip']:
                 ctx.iteration_count += 1
                 if ctx.iteration_count > ctx.max_iterations:
@@ -199,24 +185,33 @@ class SubroutineMixin:
                 stmt = self.program[sorted_lines[ctx.ip]].strip()
                 if RE_END_FUNCTION.match(stmt):
                     break
-                # Pre-parse once, pass to both the main call and the recurse callback
-                from qubasic_core.parser import parse_stmt
                 stmt_parsed = parse_stmt(stmt)
-                # Use full control-flow dispatch for all statement types
-                def _fn_recurse(s, ls, sl, i, rv):
-                    handled, result = self._exec_control_flow(s, ls, sl, i, rv, _fn_recurse)
-                    if handled:
-                        return result
-                    return None
-                handled, result = self._exec_control_flow(
-                    stmt, ctx.loop_stack, sorted_lines, ctx.ip, ctx.run_vars, _fn_recurse,
-                    parsed=stmt_parsed)
-                if handled:
-                    if isinstance(result, int):
-                        ctx.ip = result
-                        continue
-                    elif result is ExecResult.END:
-                        break
+                ip = ctx.ip
+
+                def _part(s, _ip=ip):
+                    return _fn_recurse(s, ctx.loop_stack, sorted_lines, _ip, ctx.run_vars)
+
+                result = None
+                if resume is not None:
+                    result = self._resume_compound(resume, stmt_parsed, ctx.loop_stack, ip, _part)
+                    resume = None
+                if result is not None:
+                    pass
+                elif isinstance(stmt_parsed, CompoundStmt):
+                    result = self._run_compound(list(stmt_parsed.parts), _part, ctx.loop_stack,
+                                                ip, ('line', ip))
+                else:
+                    handled, result = self._exec_control_flow(
+                        stmt, ctx.loop_stack, sorted_lines, ip, ctx.run_vars, _fn_recurse,
+                        parsed=stmt_parsed)
+                    if not handled:
+                        result = None
+                if isinstance(result, int):
+                    ctx.ip = int(result)
+                    resume = result if isinstance(result, ResumePoint) else None
+                    continue
+                if result is ExecResult.END:
+                    break
                 ctx.ip += 1
             # LET writes lowercase; check both, preferring the non-zero value
             candidates = [

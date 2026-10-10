@@ -17,7 +17,44 @@ import json
 import os
 import secrets
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Largest request body accepted (one REPL line plus JSON framing).
+MAX_BODY = 64 * 1024
+
+
+class BufferIO:
+    """IOPort collecting one request's output. There is no keyboard behind a
+    web request, so INPUT reads end-of-input (INPUT then assigns 0)."""
+
+    def __init__(self) -> None:
+        self.buf = io.StringIO()
+
+    def write(self, text: str) -> None:
+        self.buf.write(text)
+
+    def writeln(self, text: str) -> None:
+        self.buf.write(text + '\n')
+
+    def read_line(self, prompt: str) -> str:
+        self.buf.write(prompt)
+        raise EOFError
+
+
+def run_line(term, line: str, port) -> str:
+    """Process one line on `term` with its output captured through `port`
+    (and stdout, for the few paths that print directly)."""
+    old_io, old_stdout = term.io, sys.stdout
+    term.io = port
+    sys.stdout = port.buf
+    try:
+        term.process(line, track_undo=False)
+    except Exception as e:
+        port.writeln(f"?ERROR: {e}")
+    finally:
+        term.io, sys.stdout = old_io, old_stdout
+    return port.buf.getvalue()
 
 
 _PAGE = """<!doctype html>
@@ -68,20 +105,23 @@ inp.addEventListener('keydown', async (e) => {
 </script></body></html>"""
 
 
-def serve(port: int = 8811) -> None:
-    from qubasic_core import __version__
+def make_server(port: int = 8811, host: str | None = None):
+    """(server, token): a ready HTTP server with its own terminal. Port 0
+    picks a free port (server.server_address has it)."""
     from qubasic_core.terminal import QBasicTerminal
 
     term = QBasicTerminal()
     term.agent_mode = True                     # confine file writes to the cwd
     token = secrets.token_urlsafe(12)
-    host = os.environ.get('QUBASIC_WEB_HOST', '127.0.0.1')
+    host = host or os.environ.get('QUBASIC_WEB_HOST', '127.0.0.1')
+    # One terminal serves every request; requests run one at a time.
+    lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def _authed(self) -> bool:
             from urllib.parse import urlparse, parse_qs
             q = parse_qs(urlparse(self.path).query)
-            return q.get('t', [''])[0] == token
+            return secrets.compare_digest(q.get('t', [''])[0], token)
 
         def _send(self, code: int, body: bytes, ctype: str) -> None:
             self.send_response(code)
@@ -100,29 +140,34 @@ def serve(port: int = 8811) -> None:
             if not self._authed():
                 self._send(403, b'{}', 'application/json')
                 return
-            length = int(self.headers.get('Content-Length', 0) or 0)
+            try:
+                length = int(self.headers.get('Content-Length', 0) or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_BODY:
+                self._send(413, b'{}', 'application/json')
+                return
             try:
                 payload = json.loads(self.rfile.read(length) or b'{}')
                 line = str(payload.get('line', ''))[:4096]
             except Exception:
                 self._send(400, b'{}', 'application/json')
                 return
-            buf = io.StringIO()
-            old = sys.stdout
-            sys.stdout = buf
-            try:
-                term.process(line, track_undo=False)
-            except Exception as e:
-                print(f"?ERROR: {e}")
-            finally:
-                sys.stdout = old
-            body = json.dumps({'output': buf.getvalue()}).encode('utf-8')
+            with lock:
+                output = run_line(term, line, BufferIO())
+            body = json.dumps({'output': output}).encode('utf-8')
             self._send(200, body, 'application/json')
 
         def log_message(self, *args):                       # quiet access log
             pass
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    return ThreadingHTTPServer((host, port), Handler), token
+
+
+def serve(port: int = 8811) -> None:
+    from qubasic_core import __version__
+    httpd, token = make_server(port)
+    host = httpd.server_address[0]
     print(f"QUBASIC {__version__} web REPL: http://{host}:{port}/?t={token}")
     print("(Ctrl+C to stop; set QUBASIC_WEB_HOST=0.0.0.0 to expose on the LAN)")
     try:

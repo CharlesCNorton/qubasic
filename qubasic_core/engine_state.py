@@ -38,6 +38,9 @@ class Engine:
         self.shots: int = DEFAULT_SHOTS
         self.sim_method: str = 'automatic'
         self.sim_device: str = 'CPU'
+        # Amplitude precision for Aer and the numpy engines: 'double'
+        # (complex128) or 'single' (complex64, half the memory).
+        self.sim_precision: str = 'double'
         self._noise_model: Any = None
         self._noise_depol_p: float = 0.0
         # Noise channel propagated to the numpy LOCC engine (depolarizing,
@@ -73,7 +76,11 @@ class Engine:
         self._gosub_stack: list[int] = []
         self.step_mode: bool = False
         self.last_counts: dict[str, int] | None = None
-        self.last_sv: Any = None
+        # The last run's statevector. A run that does not keep the state in
+        # memory leaves a zero-argument source that computes it on first read
+        # (see the last_sv property).
+        self._last_sv: Any = None
+        self._state_source: Any = None
         self.last_circuit: Any = None
         self._circuit_cache_key: Any = None
         self._circuit_cache: Any = None
@@ -97,6 +104,25 @@ class Engine:
 
         # Timing
         self._start_time: float = time.time()
+
+    @property
+    def last_sv(self) -> Any:
+        """The last run's statevector, computed on first read when the run
+        deferred it (a deferred source runs at most once)."""
+        if self._last_sv is None and self._state_source is not None:
+            source, self._state_source = self._state_source, None
+            self._last_sv = source()
+        return self._last_sv
+
+    @last_sv.setter
+    def last_sv(self, value: Any) -> None:
+        self._last_sv = value
+        self._state_source = None
+
+    def _defer_state(self, source: Any) -> None:
+        """Record a zero-argument callable that produces the state on demand."""
+        self._last_sv = None
+        self._state_source = source
 
     def _get_parsed(self, line_num: int) -> Any:
         """Get parsed Stmt for a line, lazily parsing if needed.
@@ -128,7 +154,7 @@ class Engine:
         self._circuit_cache_key = None
         self._circuit_cache = None
         self._pending_set_state = None
-        self._pending_set_density = None
+        self._pending_set_density: Any = None
         self._poke_state_prep = {}
 
     def _invalidate_run_state(self) -> None:

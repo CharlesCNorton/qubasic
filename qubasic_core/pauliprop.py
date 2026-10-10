@@ -93,10 +93,17 @@ class PauliPropMixin:
             qc, _ = self.build_circuit()
             # Backpropagate through gates in reverse: O <- G^dag O G.
             max_terms = 0
+            from qiskit.circuit import Gate
+            for inst in qc.data:
+                op = inst.operation
+                if op.name != 'barrier' and not isinstance(op, Gate):
+                    self.io.writeln(f"?PAULIPROP: '{op.name}' is not unitary; Heisenberg "
+                                    f"propagation needs a measure-free, reset-free program")
+                    return
             for inst in reversed(qc.data):
                 op = inst.operation
                 nm = op.name.lower()
-                if nm in ('measure', 'barrier', 'save_statevector', 'reset', 'snapshot'):
+                if nm == 'barrier':
                     continue
                 try:
                     G = np.asarray(op.to_matrix(), dtype=complex)
