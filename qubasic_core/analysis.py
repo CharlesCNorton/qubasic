@@ -365,7 +365,7 @@ class AnalysisMixin:
             return
         import itertools
         shots = int(rest.strip()) if rest.strip() else 0
-        psi = np.ascontiguousarray(sv).ravel()
+        psi: np.ndarray = np.ascontiguousarray(sv).ravel()
         psi = psi / (np.linalg.norm(psi) or 1.0)
         paulis = {
             'I': np.eye(2, dtype=complex),

@@ -227,7 +227,7 @@ class LiveState:
         from qiskit import QuantumCircuit
         self.n = n
         self.dtype = np.complex64 if precision == 'single' else np.complex128
-        self._sv = np.zeros(1 << n, dtype=self.dtype)
+        self._sv: np.ndarray = np.zeros(1 << n, dtype=self.dtype)
         self._sv[0] = 1.0
         self.qc = QuantumCircuit(n)
         self.noise = noise

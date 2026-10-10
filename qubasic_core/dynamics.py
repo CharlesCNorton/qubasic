@@ -319,7 +319,7 @@ class DynamicsMixin:
                 jumps.append((np.sqrt(rate) * _JUMP_OPS[opname], q))
             # Initial density matrix from the current statevector, else |0...0>.
             if self.last_sv is not None and np.asarray(self.last_sv).size == dim:
-                psi = np.ascontiguousarray(self.last_sv).ravel().astype(complex)
+                psi: np.ndarray = np.ascontiguousarray(self.last_sv).ravel().astype(complex)
                 psi = psi / (np.linalg.norm(psi) or 1.0)
                 rho = np.outer(psi, psi.conj())
             else:
