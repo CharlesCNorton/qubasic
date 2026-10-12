@@ -1,7 +1,9 @@
 """QUBASIC built-in demo circuits with self-verification."""
 
+from qubasic_core.host import HostState
 
-class DemoMixin:
+
+class DemoMixin(HostState):
     """Built-in quantum computing demos.
 
     Requires: TerminalProtocol — uses self.program, self.num_qubits,
@@ -9,6 +11,7 @@ class DemoMixin:
     """
 
     def cmd_demo(self, name: str) -> None:
+        """DEMO <name> | DEMO LIST — load, list and run a built-in demo circuit, checking its result."""
         demos = {
             'BELL':        self._demo_bell,
             'GHZ':         self._demo_ghz,
@@ -32,7 +35,7 @@ class DemoMixin:
             return
         if name not in demos:
             self.io.writeln(f"?UNKNOWN DEMO: {name}")
-            self.io.writeln(f"  Try: DEMO LIST")
+            self.io.writeln("  Try: DEMO LIST")
             return
         demos[name]()
 
@@ -44,7 +47,7 @@ class DemoMixin:
         Returns True if verification passes.
         """
         if not self.last_counts:
-            self.io.writeln(f"  VERIFY: no results")
+            self.io.writeln("  VERIFY: no results")
             return False
         total = sum(self.last_counts.values())
         hit = sum(self.last_counts.get(s, 0) for s in expected_states)
@@ -358,7 +361,6 @@ class DemoMixin:
         # Z-basis: should be 50/50 (|+> has equal P(0) and P(1))
         # X-basis: should be ~100% |0> (|+> is eigenstate of X with eigenvalue +1)
         if self.last_counts:
-            total = sum(self.last_counts.values())
             b0_counts = {'0': 0, '1': 0}
             for state, count in self.last_counts.items():
                 parts = state.split('|')

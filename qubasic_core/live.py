@@ -29,6 +29,7 @@ from qubasic_core.gates import (
     GATE_ALIASES, _GATE_BUILDERS, _np_gate_matrix, _apply_gate_inplace,
     _measure_inplace, _sample_counts,
 )
+from qubasic_core.host import HostState
 
 
 class MidCircuitRead(ValueError):
@@ -442,7 +443,7 @@ def _identifiers(text: str) -> set[str]:
     return out
 
 
-class LiveMixin:
+class LiveMixin(HostState):
     """Live (shot-by-shot) execution for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.program, self.variables,
@@ -520,15 +521,14 @@ class LiveMixin:
             model = self._build_qubit_noise()
         return LiveNoise(model) if model is not None else None
 
-    def _live_prefix(self, sorted_lines: list[int]) -> int:
-        """Number of leading lines that run the same in every shot: plain
-        gates, assignments and PRINTs with no jumps, input, randomness or
-        measurement. They run once and each shot starts after them."""
+    def _live_prefix(self, sorted_lines: Any = None) -> int:
+        """Number of leading statements that run the same in every shot:
+        plain gates, assignments and PRINTs with no jumps, input, randomness
+        or measurement. They run once and each shot starts after them."""
         from qubasic_core.statements import GateStmt, LetStmt, PrintStmt, RemStmt, BarrierStmt
+        prog = self._compiled()
         k = 0
-        for ln in sorted_lines:
-            p = self._get_parsed(ln)
-            text = self.program[ln]
+        for p, text in zip(prog.stmts, prog.texts):
             if not isinstance(p, (GateStmt, LetStmt, PrintStmt, RemStmt, BarrierStmt)):
                 break
             if re.search(r'\b(RND|TIMER|INKEY|PEEK|INPUT|FN)\b', text, re.IGNORECASE):

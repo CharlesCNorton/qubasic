@@ -1,9 +1,10 @@
 """QUBASIC LOCC display mixin — state inspection and Bloch sphere for LOCC registers."""
 
 import re
+from qubasic_core.host import HostState
 
 
-class LOCCDisplayMixin:
+class LOCCDisplayMixin(HostState):
     """LOCC display methods for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.locc, self._print_statevector(),

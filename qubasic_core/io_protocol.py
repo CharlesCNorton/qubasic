@@ -14,6 +14,20 @@ class IOPort(Protocol):
     def read_line(self, prompt: str) -> str: ...
 
 
+class NullIO:
+    """Discards output and reads end-of-input: the IO of an inner run whose
+    output is not shown (COMPARE, PLOT, ANIMATE, MINIMIZE, STATS)."""
+
+    def write(self, text: str) -> None:
+        pass
+
+    def writeln(self, text: str) -> None:
+        pass
+
+    def read_line(self, prompt: str) -> str:
+        return ''
+
+
 class StdIOPort:
     """Default I/O: stdout/stdin."""
 

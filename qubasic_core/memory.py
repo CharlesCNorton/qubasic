@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import time
-from typing import Any
 
 import numpy as np
+from qubasic_core.host import HostState
 
 # ═══════════════════════════════════════════════════════════════════════
 # Memory Map
@@ -54,7 +54,7 @@ SYS_ROUTINES = {
 }
 
 
-class MemoryMixin:
+class MemoryMixin(HostState):
     """Memory-mapped PEEK/POKE, SYS, USR, WAIT, DUMP, MAP, MONITOR, CATALOG.
 
     Requires: TerminalProtocol — uses self.num_qubits, self.shots,
@@ -362,7 +362,8 @@ class MemoryMixin:
                         continue
                     self.process(stmt)
         if self.last_counts:
-            top = max(self.last_counts, key=self.last_counts.get)
+            counts = self.last_counts
+            top = max(counts, key=lambda k: counts[k])
             return float(int(top, 2))
         return 0.0
 
@@ -425,7 +426,7 @@ class MemoryMixin:
     def cmd_map(self) -> None:
         """MAP — print the full memory map with current values."""
         self.io.writeln("\n  Memory Map:")
-        self.io.writeln(f"  $0000-$003F  Zero Page        (64 slots)")
+        self.io.writeln("  $0000-$003F  Zero Page        (64 slots)")
         nz = sum(1 for v in self._zero_page if v != 0)
         self.io.writeln(f"               {nz} non-zero values")
         self.io.writeln(f"  $0100-$01FF  Qubit State      ({self.num_qubits} qubits, 8 addr/qubit)")
@@ -436,11 +437,11 @@ class MemoryMixin:
                 self.io.writeln(f"               q{q}: P(1)={p1:.3f} Bz={bz:.3f}")
             if self.num_qubits > 4:
                 self.io.writeln(f"               ... ({self.num_qubits - 4} more)")
-        self.io.writeln(f"  $D000-$D00C  QPU Config")
+        self.io.writeln("  $D000-$D00C  QPU Config")
         for addr, name in sorted(CFG_NAMES.items()):
             val = self._peek_config(addr)
             self.io.writeln(f"               ${addr:04X} {name:16s} = {val}")
-        self.io.writeln(f"  $D010-$D014  QPU Status (read-only)")
+        self.io.writeln("  $D010-$D014  QPU Status (read-only)")
         for addr, name in sorted(STS_NAMES.items()):
             val = self._peek(addr)
             self.io.writeln(f"               ${addr:04X} {name:20s} = {val}")

@@ -9,17 +9,17 @@ import numpy as np
 from qiskit import QuantumCircuit, transpile
 
 from qubasic_core.engine import (
-    GATE_TABLE, GATE_ALIASES,
+    GATE_ALIASES,
     ExecResult,
     RE_REG_INDEX, RE_AT_REG_LINE,
     RE_CTRL, RE_INV,
     RE_SYNDROME,
 )
-from qubasic_core.expression import ExpressionMixin
 from qubasic_core.errors import QBasicBuildError, QBasicRangeError
+from qubasic_core.host import HostState
 
 if TYPE_CHECKING:
-    from qubasic_core.exec_context import ExecContext
+    pass
 
 
 def _feedforward_test(condition: str, names) -> tuple[str, int] | None:
@@ -38,7 +38,7 @@ def _feedforward_test(condition: str, names) -> tuple[str, int] | None:
     return None
 
 
-class ExecutorMixin:
+class ExecutorMixin(HostState):
     """Circuit building and per-line execution for QBasicTerminal.
 
     Provides the core execution pipeline: circuit compilation from stored
@@ -48,22 +48,6 @@ class ExecutorMixin:
     All methods access shared terminal state (variables, arrays, subroutines,
     registers, etc.) through ``self``.
     """
-
-    # Names reserved from variable substitution -- derived from source tables
-    # so they stay in sync automatically.
-    _RESERVED_KEYWORDS = frozenset({
-        'REM', 'MEASURE', 'BARRIER', 'END', 'RETURN',
-        'FOR', 'NEXT', 'WHILE', 'WEND', 'IF', 'THEN', 'ELSE',
-        'GOTO', 'GOSUB', 'LET', 'PRINT', 'INPUT', 'DIM',
-        'AND', 'OR', 'NOT', 'TO', 'STEP', 'SEND', 'SHARE',
-        'MEAS', 'RESET', 'UNITARY', 'CTRL', 'INV',
-    })
-    _RESERVED_NAMES = (
-        set(GATE_TABLE.keys()) | set(GATE_ALIASES.keys()) |
-        set(ExpressionMixin._SAFE_CONSTS.keys()) |
-        set(ExpressionMixin._SAFE_FUNCS.keys()) |
-        _RESERVED_KEYWORDS
-    )
 
     # Gate dispatch: name -> (method_name, arg_pattern)
     # arg_pattern: 'q' = qubits only, 'pq' = params then qubits, 'ppq' = 3-param then qubit
@@ -147,6 +131,9 @@ class ExecutorMixin:
         # a previous run's state.
         self._error_target = None
         self._in_error_handler = False
+        # Declarations (DIM AS, CONST, DIM SHARED) start over; DEFtype ranges
+        # apply to the whole program.
+        self._reset_declarations(self._compiled())
 
     def build_circuit(self, backend=None, *, start_ip: int = 0,
                       stop_ip: int | None = None) -> tuple['QuantumCircuit', bool]:
@@ -164,8 +151,9 @@ class ExecutorMixin:
             self._prepare_run(qc)
         if backend is None:
             backend = QiskitBackend(qc, self._apply_gate)
+        prog = self._compiled()
         ctx = ExecContext(
-            sorted_lines=sorted(self.program.keys()),
+            sorted_lines=prog,
             ip=start_ip,
             run_vars=Scope(self.variables),
             max_iterations=self._max_iterations,
@@ -174,7 +162,7 @@ class ExecutorMixin:
         )
         # Reachability scan catches MEASURE inside subroutines and IF clauses,
         # not just literal top-level MEASURE lines.
-        has_measure = False if live else self._program_has_measure(ctx.sorted_lines)
+        has_measure = False if live else self._program_has_measure(sorted(self.program))
         # The circuit under construction, so PRINT STATE / QUBIT(q) inside a
         # program can read the state at that line (a live run reads its own).
         self._build_qc = None if live else qc
@@ -193,17 +181,20 @@ class ExecutorMixin:
             self._strict_names = prev
 
     def _build_lines(self, ctx, qc, stop_ip: int | None) -> None:
-        from qubasic_core.statements import MeasureStmt, CompoundStmt
+        from qubasic_core.statements import MeasureStmt
+        from qubasic_core.program import line_index
         handler_lines_run = 0
         self._build_saw_measure = False
-        end = len(ctx.sorted_lines) if stop_ip is None else stop_ip
+        prog = ctx.sorted_lines
+        end = len(prog) if stop_ip is None else stop_ip
         while ctx.ip < end:
             ctx.iteration_count += 1
             if ctx.iteration_count > ctx.max_iterations:
                 raise RuntimeError(f"LOOP LIMIT ({ctx.max_iterations}) — possible infinite loop")
-            line_num = ctx.sorted_lines[ctx.ip]
-            stmt = self.program[line_num].strip()
-            parsed = self._get_parsed(line_num)
+            line_num = prog.lines[ctx.ip]
+            stmt = prog.texts[ctx.ip]
+            parsed = prog.stmts[ctx.ip]
+            first = prog.first[ctx.ip]
 
             # Per-activation budget for ON ERROR handlers (RESUME resets it via
             # _in_error_handler), so a handler that never resumes cannot spin.
@@ -215,13 +206,14 @@ class ExecutorMixin:
             else:
                 handler_lines_run = 0
 
-            # Debug instrumentation — each is a no-op unless explicitly enabled.
-            if self._trace_mode:
-                self._trace_line(line_num)
-            if self._breakpoints and self._check_breakpoint(line_num, ctx.sorted_lines, ctx.ip):
-                break
+            # Debug instrumentation (line-level), each a no-op unless enabled.
+            if first:
+                if self._trace_mode:
+                    self._trace_line(line_num)
+                if self._breakpoints and self._check_breakpoint(line_num, prog, ctx.ip):
+                    break
             if self._on_timer_target is not None:
-                _timer_tgt = self._check_timer_callback(ctx.sorted_lines, ctx.ip)
+                _timer_tgt = self._check_timer_callback(prog, ctx.ip)
                 if _timer_tgt is not None:
                     ctx.ip = _timer_tgt
                     continue
@@ -234,20 +226,13 @@ class ExecutorMixin:
                         for q in parsed.qubits.replace(',', ' ').split()]
                 if self._on_measure_target is not None and not self._on_measure_fired:
                     self._on_measure_fired = True
-                    self._gosub_stack.append(ctx.ip + 1)
-                    for _i, _ln in enumerate(ctx.sorted_lines):
-                        if _ln == self._on_measure_target:
-                            ctx.ip = _i
-                            break
-                    else:
-                        ctx.ip += 1
-                    continue
+                    target = line_index(prog, self._on_measure_target)
+                    if target is not None:
+                        self._gosub_stack.append(ctx.ip + 1)
+                        ctx.ip = target
+                        continue
                 ctx.ip += 1
                 continue
-            if isinstance(parsed, CompoundStmt):
-                for part in parsed.parts:
-                    if part.strip().upper() == 'MEASURE':
-                        self._build_saw_measure = True
 
             self._profile_line_start(line_num)
             gates_before = qc.size()
@@ -256,7 +241,7 @@ class ExecutorMixin:
             except QBasicBuildError as e:
                 if self._live_needed:
                     raise
-                _handler_ip = self._handle_error(e, line_num, ctx.sorted_lines)
+                _handler_ip = self._handle_error(e, line_num, ctx.sorted_lines, ctx.ip)
                 if _handler_ip is None:
                     raise QBasicBuildError(
                         f"LINE {line_num}: {e}"
@@ -268,7 +253,7 @@ class ExecutorMixin:
                 # no ON ERROR handler may take that.
                 if self._live_needed:
                     raise
-                _handler_ip = self._handle_error(e, line_num, ctx.sorted_lines)
+                _handler_ip = self._handle_error(e, line_num, ctx.sorted_lines, ctx.ip)
                 if _handler_ip is None:
                     raise RuntimeError(f"LINE {line_num}: {e}") from None
                 ctx.ip = _handler_ip
@@ -282,32 +267,38 @@ class ExecutorMixin:
 
     @staticmethod
     def _advance(ctx, result) -> None:
-        """Move ctx past a line: to a jump target (and the statement within
-        it, for a ResumePoint) or to the next line."""
-        from qubasic_core.control_flow import ResumePoint
-        if isinstance(result, int):
-            ctx.ip = int(result)
-            ctx.resume = result if isinstance(result, ResumePoint) else None
+        """Move ctx to a jump target, or to the next statement."""
+        if isinstance(result, int) and not isinstance(result, bool):
+            ctx.ip = result
         else:
             ctx.ip += 1
-            ctx.resume = None
+
+    def _compiled(self):
+        """The compiled form of the current program (cached until it changes)."""
+        from qubasic_core.program import compile_program
+        key = tuple(sorted(self.program.items()))
+        cached = getattr(self, '_compiled_cache', None)
+        if cached is None or cached[0] != key:
+            cached = (key, compile_program(self.program))
+            self._compiled_cache = cached
+        return cached[1]
 
     def _exec_line(self, stmt, qc=None, loop_stack=None, sorted_lines=None,
                    ip=0, run_vars=None, parsed=None, *, ctx=None):
-        """Execute one program line.
+        """Execute one statement of a compiled program (see program.py).
 
-        Accepts either individual parameters (legacy) or ctx (ExecContext).
-        When ctx is provided, qc/loop_stack/sorted_lines/ip/run_vars are
-        read from ctx and the individual params are ignored.
+        Accepts either individual parameters or ctx (ExecContext). When ctx is
+        provided, qc/loop_stack/sorted_lines/ip/run_vars are read from ctx and
+        the individual params are ignored.
 
         Evaluation order (deterministic, first match wins):
-          1. Typed fast-path (parsed Stmt): BARRIER, REM, MEASURE, END, @REG, compound
-          2. Control flow: LET, PRINT, GOTO, GOSUB, FOR/NEXT, WHILE/WEND, IF/THEN,
+          1. Typed fast-path (parsed Stmt): BARRIER, REM, MEASURE, END, RETURN, @REG
+          2. Feedforward: an IF on a mid-circuit measurement bit
+          3. Control flow: LET, PRINT, GOTO, GOSUB, FOR/NEXT, WHILE/WEND, IF,
              DATA/READ, ON GOTO/GOSUB, SELECT CASE, DO/LOOP, EXIT, SUB/FUNCTION,
              ON ERROR, ASSERT, STOP, SWAP, DEF FN, OPTION BASE
-          3. Statement handlers: MEAS, RESET, MEASURE_X/Y/Z, SYNDROME, UNITARY,
-             DIM, REDIM, ERASE, GET, INPUT, POKE, SYS, file I/O, PRINT USING
-          4. Colon-separated compound statements
+          4. Keyword statements: MEAS, RESET, MEASURE_X/Y/Z, SYNDROME, UNITARY,
+             DIM, REDIM, ERASE, GET, INPUT, POKE, SYS, file I/O, PRINT USING, ...
           5. Gate application (subroutine expansion + gate dispatch)
 
         Returns: int (jump target ip), ExecResult.ADVANCE, or ExecResult.END.
@@ -320,33 +311,13 @@ class ExecutorMixin:
             run_vars = ctx.run_vars
         from qubasic_core.statements import (
             BarrierStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt,
-            CompoundStmt, AtRegStmt, GotoStmt, GosubStmt,
-            ForStmt, NextStmt, WhileStmt, WendStmt, IfThenStmt,
-            LetStmt, LetArrayStmt, PrintStmt,
-            GateStmt, RawStmt,
+            AtRegStmt, IfJumpStmt, GateStmt,
         )
 
         # 1. Typed fast-path: terminals that don't need control-flow dispatch
         if parsed is None:
             from qubasic_core.parser import parse_stmt
             parsed = parse_stmt(stmt)
-
-        def _part(sub):
-            return self._exec_line(sub, qc=qc, loop_stack=loop_stack,
-                                   sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
-
-        # Continuing inside this line's compound (or one of its IF clauses).
-        if ctx is not None and ctx.resume is not None:
-            rp, ctx.resume = ctx.resume, None
-            if int(rp) == ip:
-                resumed = self._resume_compound(rp, parsed, loop_stack, ip, _part)
-                if resumed is not None:
-                    return resumed
-        if isinstance(parsed, CompoundStmt):
-            # A line run by an executor loop (ctx) is a whole line; otherwise
-            # the compound is an IF clause.
-            frame = ('line', ip) if ctx is not None else ('clause', ip, stmt)
-            return self._run_compound(list(parsed.parts), _part, loop_stack, ip, frame)
         if isinstance(parsed, BarrierStmt):
             if hasattr(qc, 'barrier'):
                 qc.barrier()
@@ -356,25 +327,23 @@ class ExecutorMixin:
         if isinstance(parsed, EndStmt):
             return ExecResult.END
         if isinstance(parsed, ReturnStmt):
-            if not self._gosub_stack:
-                raise RuntimeError("RETURN WITHOUT GOSUB")
-            return self._gosub_stack.pop()
+            return self._cf_return(sorted_lines, parsed)[1]
         if isinstance(parsed, AtRegStmt) and not self.locc_mode:
             raise ValueError("@register syntax requires LOCC mode (try: LOCC <n1> <n2>)")
 
-        # 1b. Dynamic circuit: IF on a mid-circuit measurement bit (set by MEAS)
-        #     compiles to a Qiskit if_test, so the conditional gate is applied at
-        #     simulation time based on the real measured value (feedforward).
-        if (isinstance(parsed, IfThenStmt) and qc is not None
+        # 2. Dynamic circuit: an IF on a mid-circuit measurement bit (set by
+        #    MEAS) compiles to a Qiskit if_test, so the conditional gates run at
+        #    simulation time on the real measured value (feedforward).
+        if (isinstance(parsed, IfJumpStmt) and parsed.then_end >= 0 and qc is not None
                 and hasattr(qc, 'if_test') and getattr(self, '_classical_bits', None)):
             tgt = self._classical_if_target(parsed.condition)
             if tgt is not None:
-                self._exec_dynamic_if(qc, tgt, parsed, loop_stack, sorted_lines, ip, run_vars)
-                return ExecResult.ADVANCE
+                self._feedforward_if(qc, tgt, parsed, loop_stack, sorted_lines, run_vars)
+                return parsed.end
 
-        # 2. Delegate to unified control-flow dispatch (handles GOTO, GOSUB,
-        #    FOR/NEXT, WHILE/WEND, IF/THEN, LET, PRINT, DATA/READ, ON GOTO,
-        #    SELECT CASE, DO/LOOP, EXIT, SUB/FUNCTION, ON ERROR, etc.)
+        # 3. Control-flow dispatch (GOTO, GOSUB, FOR/NEXT, WHILE/WEND, IF, LET,
+        #    PRINT, DATA/READ, ON GOTO, SELECT CASE, DO/LOOP, EXIT, SUB/FUNCTION,
+        #    ON ERROR, ...)
         handled, result = self._exec_control_flow(
             stmt, loop_stack, sorted_lines, ip, run_vars,
             lambda s, ls, sl, i, rv: self._exec_line(
@@ -383,24 +352,17 @@ class ExecutorMixin:
         if handled:
             return result
 
-        # 3. Remaining statement handlers (not in control-flow dispatch)
         from qubasic_core.statements import RestoreStmt
         if isinstance(parsed, RestoreStmt):
-            self._data_ptr = 0   # reset the DATA read pointer (was a no-op)
+            self._restore_to(parsed.target)
             return ExecResult.ADVANCE
 
-        # Multi-line IF block markers — no-ops during execution
-        upper = stmt.strip().upper()
-        if upper in ('END IF', 'ELSE'):
-            return ExecResult.ADVANCE
-
-        # 3. Statement handlers
+        # 4. Keyword statements
         _backend = ctx.backend if ctx else None
         if self._try_stmt_handlers(stmt, qc, run_vars, backend=_backend):
             return ExecResult.ADVANCE
 
         # 5. Gate application
-        _backend = ctx.backend if ctx else None
 
         # Fast path: GateStmt already parsed by the parser
         if isinstance(parsed, GateStmt):
@@ -460,28 +422,26 @@ class ExecutorMixin:
         name, val = hit
         return cb[name], val
 
-    def _exec_dynamic_if(self, qc, tgt, parsed, loop_stack, sorted_lines, ip, run_vars) -> None:
-        """Emit a Qiskit if_test (with optional else) for an IF on a measured bit.
-
-        The then/else clauses are executed inside the if_test context so their
-        gates attach to the conditional block and run at simulation time based on
-        the real measurement outcome.
-        """
+    def _feedforward_if(self, qc, tgt, parsed, loop_stack, prog, run_vars) -> None:
+        """Emit a Qiskit if_test (with else) for an IF on a measured bit: the
+        compiled THEN and ELSE statements run inside the conditional blocks,
+        so their gates apply at simulation time on the real outcome."""
         creg, val = tgt
 
-        def _run(clause):
-            if clause:
-                self._exec_line(clause, qc=qc, loop_stack=loop_stack,
-                                sorted_lines=sorted_lines, ip=ip, run_vars=run_vars)
+        def _run(start, end):
+            for i in range(start, end):
+                self._exec_line(prog.texts[i], qc=qc, loop_stack=loop_stack,
+                                sorted_lines=prog, ip=i, run_vars=run_vars,
+                                parsed=prog.stmts[i])
 
-        if parsed.else_clause:
+        if parsed.else_end > parsed.else_start:
             with qc.if_test((creg, val)) as else_block:
-                _run(parsed.then_clause)
+                _run(parsed.then_start, parsed.then_end)
             with else_block:
-                _run(parsed.else_clause)
+                _run(parsed.else_start, parsed.else_end)
         else:
             with qc.if_test((creg, val)):
-                _run(parsed.then_clause)
+                _run(parsed.then_start, parsed.then_end)
 
     def _parse_syndrome(self, stmt: str, run_vars: dict) -> tuple[str, list[int], str] | None:
         """Parse SYNDROME statement. Returns (pauli_str, qubits, var) or None."""
@@ -513,61 +473,6 @@ class ExecutorMixin:
         """Split colon-separated statements, inheriting @register prefixes."""
         from qubasic_core.parser import _split_colon_stmts
         return _split_colon_stmts(stmt)
-
-    def _substitute_vars(self, stmt: str, run_vars: dict) -> str:
-        """Replace variable names with their values in a statement.
-
-        Tokenizes the statement and replaces eligible identifiers in-place,
-        avoiding substitution inside quoted strings, register notation, and
-        protected names (gates, keywords, constants, subroutines, custom gates).
-        """
-        merged = {**self.variables, **run_vars}
-        if not merged:
-            return stmt
-        # Build the set of names that should never be substituted
-        protected = (
-            self._RESERVED_NAMES |
-            {name.lower() for name in self.registers} |
-            {name.upper() for name in self.registers} |
-            set(self.subroutines.keys()) |
-            set(self._custom_gates.keys())
-        )
-
-        def _sub_segment(seg: str) -> str:
-            # Tokenize: split on word boundaries, preserving delimiters
-            tokens = re.split(r'(\b\w+\b)', seg)
-            for i, tok in enumerate(tokens):
-                if not tok or not tok[0].isalpha():
-                    continue
-                if tok in protected or tok.upper() in protected or tok.lower() in protected:
-                    continue
-                if tok in merged:
-                    # Don't expand record bases (dicts) — leave p in p.x intact
-                    # so the expression evaluator can resolve the field.
-                    if isinstance(merged[tok], dict):
-                        continue
-                    tokens[i] = str(merged[tok])
-            return ''.join(tokens)
-
-        # Substitute only outside quoted string literals: a variable named in a
-        # PRINT label (PRINT "S ="; S) must survive verbatim inside the quotes.
-        out: list[str] = []
-        i, n = 0, len(stmt)
-        while i < n:
-            ch = stmt[i]
-            if ch in ('"', "'"):
-                j = i + 1
-                while j < n and stmt[j] != ch:
-                    j += 1
-                out.append(stmt[i:j + 1])           # quoted span, verbatim
-                i = j + 1
-            else:
-                j = i
-                while j < n and stmt[j] not in ('"', "'"):
-                    j += 1
-                out.append(_sub_segment(stmt[i:j]))  # unquoted span
-                i = j
-        return ''.join(out)
 
     def _expand_statement(self, stmt, _call_stack: set[str] | None = None):
         """Expand subroutines. Returns list of gate strings.
@@ -887,12 +792,23 @@ class ExecutorMixin:
         if line.strip().startswith('@'):
             self.io.writeln("?@register syntax requires LOCC mode (try: LOCC <n1> <n2>)")
             return
-        # Build and execute through the same gate pipeline as cmd_run
+        # Compile the line as a one-line program and run it through the same
+        # statement pipeline as RUN.
         from qubasic_core.exec_context import ExecContext
+        from qubasic_core.program import compile_program
         qc = QuantumCircuit(self.num_qubits)
-        imm_ctx = ExecContext(sorted_lines=[0], ip=0,
+        prog = compile_program({0: line})
+        imm_ctx = ExecContext(sorted_lines=prog, ip=0,
                               run_vars=dict(self.variables), qc=qc)
-        self._exec_line(line, ctx=imm_ctx)
+        while imm_ctx.ip < len(prog):
+            imm_ctx.iteration_count += 1
+            if imm_ctx.iteration_count > self._max_iterations:
+                raise RuntimeError(f"LOOP LIMIT ({self._max_iterations}) — possible infinite loop")
+            result = self._exec_line(prog.texts[imm_ctx.ip], parsed=prog.stmts[imm_ctx.ip],
+                                     ctx=imm_ctx)
+            if result is ExecResult.END:
+                break
+            self._advance(imm_ctx, result)
         # A classical statement typed at the prompt (PRINT, MEASURE, an IF whose
         # clause printed, ...) adds no circuit operations and has already emitted
         # its own output via _exec_line. Simulating an empty circuit just to print

@@ -286,7 +286,7 @@ class TestResearchQEC(unittest.TestCase):
 
     def test_lqubits_logical_run(self):
         t, out = run_script([
-            'LQUBITS 2 CODE SURFACE 5 PHYS 1e-3',
+            'LQUBITS 2 CODE SURFACE 5 PHYS 1e-3 MODEL',
             'SHOTS 512',
             '10 H 0',
             '20 CX 0,1',

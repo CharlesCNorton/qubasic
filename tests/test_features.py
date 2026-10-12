@@ -999,7 +999,7 @@ class TestProgramManagement(unittest.TestCase):
             self.assertIn('OPENED', out)
             self.t._exec_input_file('INPUT #2, line$', {})
             self.assertEqual(self.t.variables.get('line$'), 'HELLO')
-            self.assertEqual(self.t._eof(2), 1.0)
+            self.assertEqual(self.t._eof(2), -1)
             capture(self.t.cmd_close, '#2')
         finally:
             if os.path.exists(fname):
@@ -1086,11 +1086,11 @@ class TestProgramManagement(unittest.TestCase):
             self.assertIn('OPENED', out)
             # Test EOF
             eof_val = t._eof(1)
-            self.assertEqual(eof_val, 0.0)  # not at EOF yet
+            self.assertEqual(eof_val, 0)  # not at EOF yet
             # Read to end
             t._file_handles[1].read()
             eof_val = t._eof(1)
-            self.assertEqual(eof_val, 1.0)  # at EOF
+            self.assertEqual(eof_val, -1)  # at EOF
             _, out2 = capture(t.cmd_close, '#1')
             self.assertIn('CLOSED', out2)
         finally:
@@ -2129,14 +2129,14 @@ class TestGapCoverage(unittest.TestCase):
             f.write('hello\nworld\n')
         try:
             self.t.cmd_open(f'"{fname}" FOR INPUT AS #1')
-            self.assertEqual(self.t._eof(1), 0.0)
+            self.assertEqual(self.t._eof(1), 0)
             # Read to end
             fh = self.t._file_handles[1]
             fh.read()
-            self.assertEqual(self.t._eof(1), 1.0)
+            self.assertEqual(self.t._eof(1), -1)
             self.t.cmd_close('#1')
-            # Handle not open -> 1.0
-            self.assertEqual(self.t._eof(1), 1.0)
+            # Handle not open -> true
+            self.assertEqual(self.t._eof(1), -1)
         finally:
             os.unlink(fname)
 

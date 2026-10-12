@@ -1,4 +1,8 @@
-"""QUBASIC — Quantum BASIC Interactive Terminal (package)."""
+"""QUBASIC — Quantum BASIC Interactive Terminal (package).
+
+    from qubasic_core import run, Session    # qubasic_core.api
+    run('10 H 0 : CX 0, 1 : MEASURE', qubits=2)['counts']
+"""
 
 # Lightweight imports that don't pull in Qiskit/numpy
 from qubasic_core.statements import Stmt, GateStmt, RawStmt
@@ -26,6 +30,7 @@ __all__ = [
     'ExecContext', 'Scope',
     'QuantumBackend', 'QiskitBackend', 'LOCCRegBackend',
     'GATE_TABLE', 'GATE_ALIASES',
+    'run', 'Session',
 ]
 
 __version__ = '0.19.0'
@@ -70,6 +75,8 @@ def __getattr__(name):
         'LOCCRegBackend': 'qubasic_core.backend',
         'Scope': 'qubasic_core.scope',
         'parse_stmt': 'qubasic_core.parser',
+        'run': 'qubasic_core.api',
+        'Session': 'qubasic_core.api',
     }
     if name in _lazy_imports:
         import importlib

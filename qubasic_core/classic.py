@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import random
 import re
+import time
 from typing import Any
 
 from qubasic_core.engine import (
@@ -12,10 +14,37 @@ from qubasic_core.engine import (
     RE_DO, RE_LOOP_STMT, RE_EXIT,
     RE_SWAP, RE_DEF_FN, RE_OPTION_BASE,
 )
-from qubasic_core.statements import SelectCaseStmt, CaseStmt, EndSelectStmt
+from qubasic_core.basic_format import number_text
+from qubasic_core.variables import is_string_kind
+from qubasic_core.host import HostState
 
 
-class ClassicMixin:
+def _data_items(text: str) -> list[tuple[str, bool]]:
+    """(item, quoted) for each comma-separated DATA item; a double-quoted
+    item may hold commas."""
+    items: list[tuple[str, bool]] = []
+    buf: list[str] = []
+    quoted = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '"' and not ''.join(buf).strip():
+            j = text.find('"', i + 1)
+            end = len(text) if j < 0 else j
+            buf, quoted = [text[i + 1:end]], True
+            i = end + 1
+            continue
+        if ch == ',':
+            items.append((''.join(buf) if quoted else ''.join(buf).strip(), quoted))
+            buf, quoted = [], False
+        elif not quoted:
+            buf.append(ch)
+        i += 1
+    items.append((''.join(buf) if quoted else ''.join(buf).strip(), quoted))
+    return items
+
+
+class ClassicMixin(HostState):
     """Classic BASIC features for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.program, self.variables,
@@ -31,7 +60,33 @@ class ClassicMixin:
         # OPTION ENDIAN BIG shows bitstrings with qubit 0 leftmost.
         self._endian_big: bool = False
         self._user_fns: dict[str, dict[str, Any]] = {}
-        self._select_stack: list[Any] = []
+        # RND draws from this generator; RANDOMIZE and SEED reseed it.
+        self._rng = random.Random()
+        self._rnd_last: float = 0.0
+        self._data_line_starts: list[tuple[int, int]] = []
+
+    # ── RND / RANDOMIZE ────────────────────────────────────────────────
+
+    def _rnd(self, x: Any = 1) -> float:
+        """RND / RND(x): the next number of the sequence; RND(0) repeats the
+        last one, and a negative x reseeds with x first (QBASIC)."""
+        v = float(x)
+        if v < 0:
+            self._rng.seed(v)
+        elif v == 0:
+            return self._rnd_last
+        self._rnd_last = self._rng.random()
+        return self._rnd_last
+
+    def _stmt_randomize(self, stmt: str, run_vars: dict[str, Any]) -> bool:
+        """RANDOMIZE [seed] — reseed RND (from the clock when no seed is given)."""
+        m = re.match(r'RANDOMIZE\b\s*(.*)$', stmt, re.IGNORECASE)
+        if not m:
+            return False
+        arg = m.group(1).strip()
+        seed = self._safe_eval(arg, extra_ns=run_vars) if arg else time.time()
+        self._rng.seed(float(seed))
+        return True
 
     # Quantum state names recognized in DATA statements
     _QUANTUM_STATES = {
@@ -42,44 +97,32 @@ class ClassicMixin:
     }
 
     def _collect_data(self) -> None:
-        """Scan program for DATA statements and build the data pool.
-
-        Recognizes quantum state names like |+>, |0>, |GHZ3> as special
-        string tokens that can trigger state preparation when READ assigns
-        them to a variable.
-
-        Caches the result keyed on DATA-containing lines so repeated RUN
-        calls skip the rescan when the program hasn't changed.
-        """
-        # Build cache key from all DATA-containing lines
-        data_lines = []
-        for ln in sorted(self.program.keys()):
-            text = self.program[ln].strip()
-            if RE_DATA.match(text):
-                data_lines.append((ln, text))
-        cache_key = tuple(data_lines)
-        if cache_key == self._data_cache_key:
-            # Program DATA lines unchanged — just reset the read pointer
-            self._data_ptr = 0
+        """Build the DATA pool from the program's DATA statements, in line
+        order. Quoted items are strings (commas inside kept), numbers are
+        numbers, quantum state names (|+>, |GHZ3>, ...) become QSTATE tokens,
+        and other unquoted items are strings. The pool is cached until the
+        DATA statements change; each RUN starts READ from the first item."""
+        from qubasic_core.statements import DataStmt
+        from qubasic_core.stmt_handlers import _parse_input_number
+        prog = self._compiled()
+        data = tuple((prog.lines[ip], st.values) for ip, st in enumerate(prog.stmts)
+                     if isinstance(st, DataStmt))
+        self._data_ptr = 0
+        if data == self._data_cache_key:
             return
         self._data_pool = []
-        self._data_ptr = 0
-        for _ln, text in data_lines:
-            m = RE_DATA.match(text)
-            if m:
-                for item in m.group(1).split(','):
-                    item = item.strip()
-                    if (item.startswith('"') and item.endswith('"')) or \
-                       (item.startswith("'") and item.endswith("'")):
-                        self._data_pool.append(item[1:-1])
-                    elif item in self._QUANTUM_STATES:
-                        self._data_pool.append(f"QSTATE:{self._QUANTUM_STATES[item]}")
-                    else:
-                        try:
-                            self._data_pool.append(float(item) if '.' in item else int(item))
-                        except ValueError:
-                            self._data_pool.append(item)
-        self._data_cache_key = cache_key
+        self._data_line_starts = []
+        for line, values in data:
+            self._data_line_starts.append((line, len(self._data_pool)))
+            for item, quoted in _data_items(values):
+                if quoted:
+                    self._data_pool.append(item)
+                elif item in self._QUANTUM_STATES:
+                    self._data_pool.append(f"QSTATE:{self._QUANTUM_STATES[item]}")
+                else:
+                    num = _parse_input_number(item) if item else 0
+                    self._data_pool.append(num if num is not None else item)
+        self._data_cache_key = data
 
     # ── DATA / READ / RESTORE ──────────────────────────────────────────
 
@@ -99,12 +142,29 @@ class ClassicMixin:
             var_names = [v.strip() for v in m.group(1).split(',')]
         for vname in var_names:
             if self._data_ptr >= len(self._data_pool):
-                raise RuntimeError("READ: OUT OF DATA")
+                raise RuntimeError("OUT OF DATA")
             val = self._data_pool[self._data_ptr]
             self._data_ptr += 1
-            run_vars[vname] = val
-            self.variables[vname] = val
+            lv = self._lvalue(vname, run_vars)
+            stringy = is_string_kind(self._lvalue_kind(lv))
+            if stringy and not isinstance(val, str):
+                val = number_text(val)
+            elif not stringy and isinstance(val, str) and not val.startswith('QSTATE:'):
+                raise RuntimeError(f"TYPE MISMATCH: READ {vname} found \"{val}\"")
+            if isinstance(val, str) and not stringy:
+                self.variables[lv.name] = val          # a quantum DATA token
+                run_vars[lv.name] = val
+            else:
+                self._write_lvalue(lv, val, run_vars)
         return True, ExecResult.ADVANCE
+
+    def _restore_to(self, line: int | None) -> None:
+        """RESTORE [line]: READ continues from the first DATA at or after line."""
+        if line is None:
+            self._data_ptr = 0
+            return
+        self._data_ptr = next((start for ln, start in self._data_line_starts if ln >= line),
+                              len(self._data_pool))
 
     def cmd_restore(self, rest: str = '') -> None:
         """RESTORE — reset DATA pointer to beginning."""
@@ -124,11 +184,7 @@ class ClassicMixin:
             idx = int(self._eval_with_vars(m.group(1).strip(), run_vars))
             targets = [int(t.strip()) for t in m.group(2).split(',') if t.strip()]
         if 1 <= idx <= len(targets):
-            target = targets[idx - 1]
-            for i, ln in enumerate(sorted_lines):
-                if ln == target:
-                    return True, i
-            raise RuntimeError(f"ON GOTO: LINE {target} NOT FOUND")
+            return True, self._jump_to_line(sorted_lines, targets[idx - 1], 'ON GOTO')
         return True, ExecResult.ADVANCE  # out of range: fall through
 
     def _cf_on_gosub(self, stmt: str, run_vars: dict[str, Any],
@@ -143,12 +199,9 @@ class ClassicMixin:
             idx = int(self._eval_with_vars(m.group(1).strip(), run_vars))
             targets = [int(t.strip()) for t in m.group(2).split(',') if t.strip()]
         if 1 <= idx <= len(targets):
-            target = targets[idx - 1]
-            self._gosub_stack.append(self._return_point(ip))
-            for i, ln in enumerate(sorted_lines):
-                if ln == target:
-                    return True, i
-            raise RuntimeError(f"ON GOSUB: LINE {target} NOT FOUND")
+            target = self._jump_to_line(sorted_lines, targets[idx - 1], 'ON GOSUB')
+            self._gosub_stack.append(ip + 1)
+            return True, target
         return True, ExecResult.ADVANCE
 
     # ── SELECT CASE ───────────────────────────────────────────────────
@@ -162,24 +215,17 @@ class ClassicMixin:
             if not m:
                 return None
             expr = m.group(1).strip()
-        ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else dict(run_vars)
-        test_val = self._safe_eval(expr, extra_ns=ns)
-        self._select_stack.append(test_val)
-        # The first CASE at this nesting level that matches runs its block
-        # (the statements after it, on its line and the lines below).
-        depth = 1
-        for j, kk, p, frame, n_parts in self._stmts_after(sorted_lines, ip):
-            if isinstance(p, SelectCaseStmt):
-                depth += 1
-            elif isinstance(p, EndSelectStmt):
-                depth -= 1
-                if depth == 0:
-                    self._select_stack.pop()
-                    return True, self._after_stmt(j, kk, frame, n_parts)
-            elif depth == 1 and isinstance(p, CaseStmt) and \
-                    self._case_matches(p.value, test_val, run_vars):
-                return True, self._after_stmt(j, kk, frame, n_parts)
-        raise RuntimeError("SELECT CASE without END SELECT")
+        test_val = self._safe_eval(expr, extra_ns=run_vars)
+        # The first CASE that matches runs its block (the statements after it);
+        # none matching continues after END SELECT.
+        selects = self._as_program(sorted_lines).selects
+        if ip not in selects:
+            raise RuntimeError("SELECT CASE without END SELECT")
+        cases, end_ip = selects[ip]
+        for case_ip, spec in cases:
+            if self._case_matches(spec, test_val, run_vars):
+                return True, case_ip + 1
+        return True, end_ip + 1
 
     _CASE_OPS = {'=': lambda a, b: a == b, '<>': lambda a, b: a != b,
                  '<': lambda a, b: a < b, '<=': lambda a, b: a <= b,
@@ -191,10 +237,9 @@ class ClassicMixin:
         String cases compare exactly."""
         if spec.strip().upper() == 'ELSE':
             return True
-        ns = run_vars.as_dict() if hasattr(run_vars, 'as_dict') else dict(run_vars)
 
         def value(expr: str) -> Any:
-            v = self._safe_eval(expr.strip(), extra_ns=ns)
+            v = self._safe_eval(expr.strip(), extra_ns=run_vars)
             return v if isinstance(v, str) else float(v)
 
         target = test_val if isinstance(test_val, str) else float(test_val)
@@ -212,7 +257,7 @@ class ClassicMixin:
                     continue
                 if target == value(item):
                     return True
-            except TypeError:
+            except (TypeError, ValueError):
                 continue    # a string case against a number (or vice versa)
         return False
 
@@ -222,23 +267,11 @@ class ClassicMixin:
             if not m:
                 return None
         # Reaching another CASE ends the matched block: continue after END SELECT.
-        depth = 1
-        for j, kk, p, frame, n_parts in self._stmts_after(sorted_lines, ip):
-            if isinstance(p, SelectCaseStmt):
-                depth += 1
-            elif isinstance(p, EndSelectStmt):
-                depth -= 1
-                if depth == 0:
-                    if self._select_stack:
-                        self._select_stack.pop()
-                    return True, self._after_stmt(j, kk, frame, n_parts)
-        return True, ExecResult.ADVANCE
+        skip = self._as_program(sorted_lines).skip
+        return True, skip.get(ip, ExecResult.ADVANCE)
 
     def _cf_end_select(self, stmt: str, *, parsed=None) -> tuple[bool, ExecOutcome] | None:
         if parsed is not None or stmt.strip().upper() == 'END SELECT':
-            if not self._select_stack:
-                raise RuntimeError("END SELECT without matching SELECT CASE")
-            self._select_stack.pop()
             return True, ExecResult.ADVANCE
         return None
 
@@ -263,12 +296,9 @@ class ClassicMixin:
             if kind.upper() == 'UNTIL':
                 result = not result
             if not result:
-                target = self._find_block_end(sorted_lines, ip, 'do')
-                if target is None:
-                    raise RuntimeError(f"DO at line {sorted_lines[ip]} has no matching LOOP")
-                return True, target
-        loop_stack.append(self._mark_loop(
-            {'type': 'do', 'return_ip': ip, 'kind': kind, 'cond': cond}, ip))
+                return True, self._target(sorted_lines, 'skip', ip,
+                                          f"DO at line {sorted_lines[ip]}")
+        loop_stack.append({'type': 'do', 'return_ip': ip, 'kind': kind, 'cond': cond})
         return True, ExecResult.ADVANCE
 
     def _cf_loop(self, stmt: str, run_vars: dict[str, Any],
@@ -336,6 +366,7 @@ class ClassicMixin:
             if not m:
                 return None
             kind = m.group(1).upper()
+        target = self._as_program(sorted_lines).exits.get(ip)
         if kind in ('FOR', 'WHILE', 'DO'):
             # Leave the innermost loop of that kind (and any loops inside it)
             # for the statement after its NEXT / WEND / LOOP.
@@ -345,12 +376,12 @@ class ClassicMixin:
                     (want == 'for' and loop_stack[idx].get('var') is not None)
                     or loop_stack[idx].get('type') == want):
                 idx -= 1
-            target = self._find_block_end(sorted_lines, ip, want)
             if idx >= 0 and target is not None:
                 del loop_stack[idx:]
                 return True, target
         elif kind in ('SUB', 'FUNCTION'):
-            return True, ExecResult.END
+            # On to the END SUB / END FUNCTION, which returns.
+            return True, target if target is not None else ExecResult.END
         raise RuntimeError(f"EXIT {kind}: no matching block")
 
     # ── SWAP ──────────────────────────────────────────────────────────
@@ -362,13 +393,16 @@ class ClassicMixin:
             m = RE_SWAP.match(stmt)
             if not m:
                 return None
-            a, b = m.group(1), m.group(2)
-        va = run_vars.get(a, self.variables.get(a, 0))
-        vb = run_vars.get(b, self.variables.get(b, 0))
-        run_vars[a] = vb
-        run_vars[b] = va
-        self.variables[a] = vb
-        self.variables[b] = va
+            parts = self._split_arg_list(m.group(1))
+            if len(parts) != 2:
+                return None
+            a, b = parts
+        la, lb = self._lvalue(a, run_vars), self._lvalue(b, run_vars)
+        va, vb = self._read_lvalue(la, run_vars), self._read_lvalue(lb, run_vars)
+        if isinstance(va, str) != isinstance(vb, str):
+            raise RuntimeError(f"TYPE MISMATCH: SWAP {a}, {b}")
+        self._write_lvalue(la, vb, run_vars)
+        self._write_lvalue(lb, va, run_vars)
         return True, ExecResult.ADVANCE
 
     # ── DEF FN ────────────────────────────────────────────────────────
@@ -391,7 +425,8 @@ class ClassicMixin:
     # ── OPTION BASE ───────────────────────────────────────────────────
 
     def _cf_option_base(self, stmt: str, *, parsed=None) -> tuple[bool, ExecOutcome] | None:
-        # Parsed and stored; array indexing always starts at 0 in this implementation.
+        """OPTION BASE 0|1 — the lower bound of arrays declared with an upper
+        bound only (variables.py)."""
         if parsed is not None:
             self._option_base = parsed.base
         else:

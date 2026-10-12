@@ -4,20 +4,11 @@ from __future__ import annotations
 
 import difflib
 import math
-import os
 import random
 import sys
 import time
-from typing import Any
 
-import numpy as np
-
-
-class _NullIO:
-    """IOPort that swallows output, used to silence inner runs (COMPARE/PLOT/ANIMATE)."""
-    def write(self, text: str) -> None: pass
-    def writeln(self, text: str) -> None: pass
-    def read_line(self, prompt: str) -> str: return ''
+from qubasic_core.host import HostState
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -101,7 +92,7 @@ _ALL_COMMANDS = [
     'QEC', 'LOGICAL_ERROR_RATE', 'THRESHOLD', 'DISTILL', 'LATTICE',
     'XEB', 'QVOLUME', 'RBINT', 'MIRROR', 'GST', 'CONCURRENCE', 'NEGATIVITY',
     'IQPE', 'AMPEST', 'AMPLIFY', 'QWALK', 'GRAPHSTATE', 'FEATUREMAP', 'QKERNEL',
-    'SHOR', 'HHL', 'PAULIPROP',
+    'SHOR', 'HHL', 'PAULIPROP', 'QAOA', 'VQE', 'GROVER', 'SIMON',
     'QUDIT', 'QX', 'QZ', 'QF', 'QSUM', 'QSTATE', 'QMEASURE',
     'BOSONIC', 'DISPLACE', 'SQUEEZE', 'CAT', 'BS', 'BSTATE',
     'RESOURCES', 'DEVICE', 'OPTIMIZE',
@@ -208,7 +199,7 @@ def braille_bloch(x: float, y: float, z: float, radius: int = 10) -> list[str]:
 # QoL Mixin
 # ═══════════════════════════════════════════════════════════════════════
 
-class QoLMixin:
+class QoLMixin(HostState):
     """Quality-of-life commands for QBasicTerminal.
 
     Provides: COMPARE, HEATMAP, ANIMATE, QUIZ, DIFF, PLOT, THEME,
@@ -312,12 +303,8 @@ class QoLMixin:
         results = {}
         for m in [m1, m2]:
             self.sim_method = m
-            old_io = self.io
-            self.io = _NullIO()
-            try:
+            with self._silenced():
                 self.cmd_run()
-            finally:
-                self.io = old_io
             results[m] = dict(self.last_counts) if self.last_counts else {}
         self.sim_method = old_method
         # Display comparison
@@ -398,19 +385,15 @@ class QoLMixin:
         try:
             for i, val in enumerate(values):
                 self.variables[var] = val
-                old_io = self.io
-                self.io = _NullIO()
-                try:
+                with self._silenced():
                     self.cmd_run()
-                finally:
-                    self.io = old_io
                 if self.last_counts:
                     ranked = sorted(self.last_counts.items(), key=lambda x: -x[1])
                     total = sum(self.last_counts.values())
                     top = ranked[0]
                     bar = '\u2588' * int(30 * top[1] / total)
                     frame = f"\r  {var}={val:>8.3f}  |{self._bits(top[0])}\u27E9 {top[1]/total:>5.1%} {bar:<30}"
-                    old_io.write(frame)
+                    self.io.write(frame)
                 time.sleep(delay)
         finally:
             self._restore_var(var, had_prior, prior)
@@ -445,7 +428,6 @@ class QoLMixin:
         correct_label = None
         for label_idx, orig_idx in enumerate(indices):
             letter = chr(65 + label_idx)
-            marker = ""
             if orig_idx == correct:
                 correct_label = letter
             self.io.writeln(f"    {letter}) {options[orig_idx]}")
@@ -519,15 +501,12 @@ class QoLMixin:
         try:
             for val in values:
                 self.variables[var] = val
-                old_io = self.io
-                self.io = _NullIO()
-                try:
+                with self._silenced():
                     self.cmd_run()
-                finally:
-                    self.io = old_io
                 if self.last_counts:
                     total = sum(self.last_counts.values())
-                    top_state = max(self.last_counts, key=self.last_counts.get)
+                    counts = self.last_counts
+                    top_state = max(counts, key=lambda k: counts[k])
                     xs.append(val)
                     ys.append(self.last_counts[top_state] / total)
         finally:

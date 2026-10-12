@@ -86,11 +86,17 @@ _SPEC_STATEMENTS = [
 
 
 def run_script(path: str, terminal: 'QBasicTerminal') -> None:
-    """Run a .qb script file. Supports multi-line DEF blocks.
+    """Run a .qb script file (multi-line DEF blocks included), or a QBASIC
+    source file (.bas), which is numbered and RUN.
 
     After loading all lines, auto-runs the program if it contains
     numbered lines with a MEASURE statement.
     """
+    if path.lower().endswith('.bas'):
+        # QBASIC source runs from the top, as RUN does in QBASIC.
+        terminal._load_bas(path)
+        terminal.cmd_run()
+        return
     with open(path, 'r', encoding='utf-8-sig') as f:
         lines = [l.rstrip('\n\r') for l in f.readlines()]
     ProgramMgmtMixin._load_lines_with_defs(

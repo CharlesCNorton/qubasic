@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -17,9 +18,39 @@ from qubasic_core.engine import (
     RE_ON_ERROR, RE_RESUME, RE_ERROR_STMT, RE_ASSERT,
     RE_ON_MEASURE, RE_ON_TIMER,
 )
+from qubasic_core.host import HostState
+
+# QBASIC's error numbers, matched against the start of an error message.
+_ERROR_CODES = (
+    ('NEXT WITHOUT FOR', 1), ('SYNTAX ERROR', 2), ('RETURN WITHOUT GOSUB', 3),
+    ('OUT OF DATA', 4), ('ILLEGAL FUNCTION CALL', 5), ('OVERFLOW', 6),
+    ('OUT OF MEMORY', 7), ('SUBSCRIPT OUT OF RANGE', 9), ('DUPLICATE DEFINITION', 10),
+    ('DIVISION BY ZERO', 11), ('TYPE MISMATCH', 13), ("CAN'T CONTINUE", 17),
+    ('FUNCTION NOT DEFINED', 18), ('NOT A FUNCTION', 18), ('RESUME WITHOUT ERROR', 20),
+    ('FOR WITHOUT NEXT', 26), ('WHILE WITHOUT WEND', 29), ('WEND WITHOUT WHILE', 30),
+    ('DUPLICATE LABEL', 33), ('SUBPROGRAM NOT DEFINED', 35),
+    ('ARGUMENT-COUNT MISMATCH', 37), ('BAD FILE NAME OR NUMBER', 52),
+    ('FILE NOT FOUND', 53), ('BAD FILE MODE', 54), ('INPUT PAST END OF FILE', 62),
+    ('LABEL', 8), ('MATH DOMAIN ERROR', 5),
+)
 
 
-class DebugMixin:
+def error_code(err: Exception) -> int:
+    """The ERR value for an error: the number ERROR n raised, else QBASIC's
+    number for the message (1 when none applies)."""
+    msg = str(err).upper()
+    m = re.match(r'(?:LINE \d+:\s*)?ERROR (\d+)(?!\w)', msg)
+    if m:
+        return int(m.group(1))
+    msg = re.sub(r'^LINE \d+:\s*', '', msg)
+    msg = re.sub(r'^[A-Z$]+: ', '', msg) if not any(msg.startswith(k) for k, _ in _ERROR_CODES) else msg
+    for key, code in _ERROR_CODES:
+        if msg.startswith(key):
+            return code
+    return 1
+
+
+class DebugMixin(HostState):
     """Error handling, debugging, and event callbacks for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.program, self.variables,
@@ -30,6 +61,7 @@ class DebugMixin:
         self._error_target: int | None = None
         self._err_code: int = 0
         self._err_line: int = 0
+        self._err_ip: int | None = None
         self._in_error_handler: bool = False
         self._trace_mode: bool = False
         self._stopped_ip: int | None = None
@@ -71,23 +103,20 @@ class DebugMixin:
                 return None
             self._in_error_handler = False
             arg = m.group(1)
-        if arg is None or arg.strip() == '':
-            # RESUME — retry the line that caused the error
-            for i, ln in enumerate(sorted_lines):
-                if ln == self._err_line:
-                    return True, i
-            return True, ExecResult.ADVANCE
+        from qubasic_core.program import line_index
+        err_ip = self._err_ip if self._err_ip is not None else line_index(sorted_lines, self._err_line)
+        if arg is None or arg.strip() in ('', '0'):
+            # RESUME (or RESUME 0) — retry the statement that caused the error
+            return True, err_ip if err_ip is not None else ExecResult.ADVANCE
         if arg.strip().upper() == 'NEXT':
-            for i, ln in enumerate(sorted_lines):
-                if ln == self._err_line:
-                    return True, i + 1
-            return True, ExecResult.ADVANCE
+            # RESUME NEXT — continue with the statement after it
+            return True, err_ip + 1 if err_ip is not None else ExecResult.ADVANCE
         # RESUME <line>
         target = int(arg.strip())
-        for i, ln in enumerate(sorted_lines):
-            if ln == target:
-                return True, i
-        raise RuntimeError(f"RESUME: LINE {target} NOT FOUND")
+        ip = line_index(sorted_lines, target)
+        if ip is None:
+            raise RuntimeError(f"RESUME: LINE {target} NOT FOUND")
+        return True, ip
 
     def _cf_error(self, stmt: str, *, parsed=None) -> tuple[bool, ExecOutcome] | None:
         if parsed is not None:
@@ -100,24 +129,18 @@ class DebugMixin:
         raise RuntimeError(f"ERROR {code}")
 
     def _handle_error(self, err: Exception, line_num: int,
-                      sorted_lines: list[int]) -> int | None:
-        """Handle a runtime error. Returns ip to jump to, or None to propagate."""
+                      sorted_lines: Any, ip: int | None = None) -> int | None:
+        """Handle a runtime error at statement ip (line line_num). Returns the
+        statement to jump to, or None to propagate."""
         if self._error_target is not None and not self._in_error_handler:
-            self._err_code = 1
+            self._err_code = error_code(err)
             self._err_line = line_num
+            self._err_ip = ip
             self._in_error_handler = True
-            # Extract error code from "ERROR N" messages
-            msg = str(err)
-            if msg.startswith('ERROR '):
-                try:
-                    self._err_code = int(msg.split()[1])
-                except (IndexError, ValueError):
-                    pass
             self.variables['ERR'] = self._err_code
             self.variables['ERL'] = self._err_line
-            for i, ln in enumerate(sorted_lines):
-                if ln == self._error_target:
-                    return i
+            from qubasic_core.program import line_index
+            return line_index(sorted_lines, self._error_target)
         return None
 
     # ── ASSERT ─────────────────────────────────────────────────────────
@@ -353,8 +376,9 @@ class DebugMixin:
             now = time.time()
             if now - self._on_timer_last >= self._on_timer_interval:
                 self._on_timer_last = now
-                self._gosub_stack.append(ip)
-                for i, ln in enumerate(sorted_lines):
-                    if ln == self._on_timer_target:
-                        return i
+                from qubasic_core.program import line_index
+                target = line_index(sorted_lines, self._on_timer_target)
+                if target is not None:
+                    self._gosub_stack.append(ip)
+                    return target
         return None

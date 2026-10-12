@@ -27,7 +27,7 @@ class EndStmt(Stmt):
 
 @dataclass(frozen=True, slots=True)
 class ReturnStmt(Stmt):
-    pass
+    target: int | str | None = None    # RETURN <line|label> resumes there
 
 @dataclass(frozen=True, slots=True)
 class BarrierStmt(Stmt):
@@ -39,7 +39,7 @@ class WendStmt(Stmt):
 
 @dataclass(frozen=True, slots=True)
 class RestoreStmt(Stmt):
-    pass
+    target: int | str | None = None    # RESTORE <line|label>: DATA from that line
 
 @dataclass(frozen=True, slots=True)
 class EndSelectStmt(Stmt):
@@ -70,11 +70,11 @@ class StopStmt(Stmt):
 
 @dataclass(frozen=True, slots=True)
 class GotoStmt(Stmt):
-    target: int
+    target: int | str          # a line number, or a label until compiled
 
 @dataclass(frozen=True, slots=True)
 class GosubStmt(Stmt):
-    target: int
+    target: int | str
 
 @dataclass(frozen=True, slots=True)
 class ForStmt(Stmt):
@@ -114,12 +114,12 @@ class ExitStmt(Stmt):
 @dataclass(frozen=True, slots=True)
 class OnGotoStmt(Stmt):
     expr: str
-    targets: tuple[int, ...]
+    targets: tuple[int | str, ...]
 
 @dataclass(frozen=True, slots=True)
 class OnGosubStmt(Stmt):
     expr: str
-    targets: tuple[int, ...]
+    targets: tuple[int | str, ...]
 
 @dataclass(frozen=True, slots=True)
 class SelectCaseStmt(Stmt):
@@ -138,15 +138,17 @@ class CallStmt(Stmt):
 class SubStmt(Stmt):
     name: str
     params: str
+    static: bool = False       # SUB name(...) STATIC: every local keeps its value
 
 @dataclass(frozen=True, slots=True)
 class FunctionStmt(Stmt):
     name: str
     params: str
+    static: bool = False
 
 @dataclass(frozen=True, slots=True)
 class OnErrorStmt(Stmt):
-    target: int
+    target: int | str
 
 @dataclass(frozen=True, slots=True)
 class ResumeStmt(Stmt):
@@ -221,10 +223,19 @@ class LetArrayStmt(Stmt):
     name: str
     index_expr: str
     value_expr: str
+    field: str | None = None     # a(i).x = ...: the field path of a record element
 
 @dataclass(frozen=True, slots=True)
 class LetStrStmt(Stmt):
     name: str
+    expr: str
+
+@dataclass(frozen=True, slots=True)
+class MidAssignStmt(Stmt):
+    """MID$(var$, start[, length]) = expr: overwrite part of a string."""
+    var: str
+    start: str
+    length: str | None
     expr: str
 
 
@@ -380,6 +391,30 @@ class AtRegStmt(Stmt):
 @dataclass(frozen=True, slots=True)
 class CompoundStmt(Stmt):
     parts: tuple[str, ...]
+
+
+# ── Compiled control transfers (produced by qubasic_core.program) ──────
+
+@dataclass(frozen=True, slots=True)
+class IfJumpStmt(Stmt):
+    """An IF condition: execution continues at the next statement when it
+    holds and at `on_false` when it does not. For a single-line IF the THEN
+    statements are [then_start, then_end), the ELSE statements
+    [else_start, else_end), and `end` follows the whole IF; a block IF has
+    then_end = -1."""
+    condition: str
+    on_false: int
+    then_start: int = -1
+    then_end: int = -1
+    else_start: int = -1
+    else_end: int = -1
+    end: int = -1
+
+
+@dataclass(frozen=True, slots=True)
+class JumpStmt(Stmt):
+    """An unconditional transfer inside compiled block structure."""
+    target: int
 
 
 # ── Gate application ───────────────────────────────────────────────────

@@ -16,9 +16,10 @@ controlled-sum entangler. Independent of the qubit (Aer) engine.
 from __future__ import annotations
 
 import numpy as np
+from qubasic_core.host import HostState
 
 
-class QuditMixin:
+class QuditMixin(HostState):
     """A d-level (qudit) statevector engine for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.shots, self._seed, self.io.

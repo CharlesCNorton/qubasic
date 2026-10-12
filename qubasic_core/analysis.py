@@ -9,12 +9,12 @@ from qiskit_aer import AerSimulator
 import numpy as np
 
 from qubasic_core.engine import (
-    _estimate_gb, _get_ram_gb,
-    OVERHEAD_FACTOR, RAM_BUDGET_FRACTION,
+    RAM_BUDGET_FRACTION,
 )
+from qubasic_core.host import HostState
 
 
-class AnalysisMixin:
+class AnalysisMixin(HostState):
     """Analysis and introspection commands for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.last_sv, self.last_counts,
@@ -105,14 +105,14 @@ class AnalysisMixin:
             self.io.writeln(f"  Partition A: qubits {partition_a}")
             self.io.writeln(f"  Partition B: qubits {[q for q in range(n) if q not in partition_a]}")
             if ent < 0.01:
-                self.io.writeln(f"  -> Qubits are separable (product state)")
+                self.io.writeln("  -> Qubits are separable (product state)")
             elif abs(ent - len(partition_a)) < 0.01:
-                self.io.writeln(f"  -> Maximally entangled")
+                self.io.writeln("  -> Maximally entangled")
         except Exception as e:
             self.io.writeln(f"?ENTROPY ERROR: {e}")
 
     def cmd_density(self, rest: str = '') -> None:
-        """Show density matrix (DENSITY [reg]); summarizes for large systems."""
+        """DENSITY [reg] — the density matrix of the current state (a summary for large registers)."""
         # A mixed state set via SET_DENSITY has no statevector; solve its
         # density matrix on demand (cached) from the captured circuit.
         dm = getattr(self, '_last_density', None)
@@ -153,8 +153,8 @@ class AnalysisMixin:
             norm2 = float(np.vdot(sv, sv).real)
             self.io.writeln(f"  Density matrix: {dim}x{dim} (too large to display)")
             self.io.writeln(f"  Pure state |psi><psi|: purity {norm2 ** 2:.6f}")
-            self.io.writeln(f"  Von Neumann entropy: 0.000000 bits")
-            self.io.writeln(f"  (use ENTROPY <qubits> for reduced-state entanglement)")
+            self.io.writeln("  Von Neumann entropy: 0.000000 bits")
+            self.io.writeln("  (use ENTROPY <qubits> for reduced-state entanglement)")
             return
         rho = np.outer(sv, sv.conj())
         self.io.writeln(f"\n  Density matrix ({dim}x{dim}):\n")
@@ -195,7 +195,7 @@ class AnalysisMixin:
             backend = AerSimulator(method=method)
             t0 = time.time()
             try:
-                result = backend.run(transpile(qc, backend), shots=100).result()
+                backend.run(transpile(qc, backend), shots=100).result()
                 dt = time.time() - t0
                 mem_str = f"  {psutil.virtual_memory().used / 1e9:>7.1f}" if has_psutil else ""
                 self.io.writeln(f"  {n:>8}  {method:>20}  {dt:>7.2f}s{mem_str}")
@@ -326,7 +326,7 @@ class AnalysisMixin:
             named = {'|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>',
                      '|GHZ3>', '|GHZ4>', '|W>', '|W3>'}
             if target.upper() in named:
-                from qubasic_core.terminal import _resolve_named_state
+                from qubasic_core.stmt_handlers import _resolve_named_state
                 tvec = _resolve_named_state(target.upper(), n)
             else:
                 tvec = np.array(self._parse_matrix(target), dtype=np.complex128).ravel()
@@ -342,9 +342,9 @@ class AnalysisMixin:
             fid = float(np.abs(np.vdot(tvec, psi)) ** 2)
             self.io.writeln(f"  Fidelity F = |<target|psi>|^2 = {fid:.6f}")
             if fid > 0.999:
-                self.io.writeln(f"  -> states match")
+                self.io.writeln("  -> states match")
             elif fid < 0.001:
-                self.io.writeln(f"  -> orthogonal")
+                self.io.writeln("  -> orthogonal")
         except Exception as e:
             self.io.writeln(f"?FIDELITY ERROR: {e}")
 

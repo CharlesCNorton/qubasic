@@ -27,19 +27,13 @@ from __future__ import annotations
 import re
 
 import numpy as np
+from qubasic_core.host import HostState
 
 
 _RE_RANGE = re.compile(r'^(\d+)\s*-\s*(\d+)$')
 
 
-class _NullIO:
-    """Swallow output during inner optimization runs."""
-    def write(self, text: str) -> None: pass
-    def writeln(self, text: str) -> None: pass
-    def read_line(self, prompt: str) -> str: return ''
-
-
-class AlgorithmsMixin:
+class AlgorithmsMixin(HostState):
     """Algorithm primitives (QFT, QPE, diffusion, adders, multi-controlled
     gates) and a MINIMIZE/GRADIENT optimization driver for QBasicTerminal.
 
@@ -272,12 +266,8 @@ class AlgorithmsMixin:
         """
         for name, val in zip(params, vec):
             self.variables[name] = float(val)
-        old_io = self.io
-        self.io = _NullIO()
-        try:
+        with self._silenced():
             self.cmd_run()
-        finally:
-            self.io = old_io
         try:
             val = self._safe_eval(cost_expr)
         except Exception as e:
@@ -304,15 +294,11 @@ class AlgorithmsMixin:
         from qiskit.circuit import Parameter
         saved = {p: self.variables.get(p) for p in params}
         pobjs = {p: Parameter(p) for p in params}
-        old_io = self.io
         try:
             for p in params:
                 self.variables[p] = pobjs[p]
-            self.io = _NullIO()
-            try:
+            with self._silenced():
                 qc, has_measure = self.build_circuit()
-            finally:
-                self.io = old_io
             if getattr(self, '_classical_bits', None):
                 return None
             if sampling != bool(has_measure):
@@ -335,7 +321,6 @@ class AlgorithmsMixin:
         except Exception:
             return None
         finally:
-            self.io = old_io
             for p, v in saved.items():
                 if v is None:
                     self.variables.pop(p, None)
@@ -486,13 +471,12 @@ class AlgorithmsMixin:
         return list(x), fx
 
     def cmd_minimize(self, rest: str) -> None:
-        """MINIMIZE v1[, v2 ...] -> cost [ITERS n] [STEP s].
+        """MINIMIZE v1[, v2 ...] -> cost [ITERS n] [STEP s] [METHOD NM|SPSA|GRAD] — minimize a program-computed cost.
 
-        Runs a classical (Nelder-Mead) optimizer over the listed variables,
-        re-RUNning the program each step and reading the program-computed
-        `cost` variable. This is the VQE/QAOA driver: build a parametrized
-        ansatz, SAVE_EXPECT the Hamiltonian into `cost`, then MINIMIZE.
-        """
+        Runs a classical optimizer (Nelder-Mead by default) over the listed
+        variables, re-running the program each step and evaluating `cost`
+        afterwards. This is the VQE/QAOA driver: build a parametrized
+        ansatz, SAVE_EXPECT the Hamiltonian into `cost`, then MINIMIZE."""
         if not self.program:
             self.io.writeln("?NOTHING TO MINIMIZE — enter a program first")
             return

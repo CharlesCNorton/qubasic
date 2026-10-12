@@ -9,6 +9,7 @@ from qubasic_core.engine import (
     HISTOGRAM_BAR_WIDTH, AMPLITUDE_THRESHOLD,
     _RICH, _RichTable,
 )
+from qubasic_core.host import HostState
 
 
 def _get_console():
@@ -19,7 +20,7 @@ def _get_console():
     return None
 
 
-class DisplayMixin:
+class DisplayMixin(HostState):
     """Display and visualization methods for the QUBASIC terminal.
 
     Requires: TerminalProtocol — uses self.num_qubits, self.arrays.

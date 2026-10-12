@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 
 import numpy as np
+from qubasic_core.host import HostState
 
 # Single-qubit operators usable as Lindblad jump operators.
 _JUMP_OPS = {
@@ -52,7 +53,7 @@ def _embed_sparse(op1: np.ndarray, qubit: int, n: int):
                    sp.identity(2 ** qubit, format='csr'), format='csr')
 
 
-class DynamicsMixin:
+class DynamicsMixin(HostState):
     """Hamiltonian declaration, Trotter evolution, and Lindblad open dynamics.
 
     Requires: TerminalProtocol — uses self.num_qubits, self.variables,
@@ -363,7 +364,7 @@ class DynamicsMixin:
                          else f"{rho[i, j].real:+.2f}{rho[i, j].imag:+.2f}j")
                         for j in range(dim))
                     self.io.writeln(f"    {row}")
-            self.io.writeln(f"  Populations: " + ', '.join(
+            self.io.writeln("  Populations: " + ', '.join(
                 f"|{self._bits(format(i, f'0{n}b'))}>={pops[i]:.4f}"
                 for i in range(dim) if pops[i] > 1e-4))
             purity = float(np.vdot(rho, rho).real)      # Tr(rho^2) for Hermitian rho
@@ -421,7 +422,7 @@ class DynamicsMixin:
             for LdL in LdLs:
                 Heff = Heff - 0.5j * LdL
             if self.last_sv is not None and np.asarray(self.last_sv).size == dim:
-                psi0 = np.ascontiguousarray(self.last_sv).ravel().astype(complex)
+                psi0: np.ndarray = np.ascontiguousarray(self.last_sv).ravel().astype(complex)
                 psi0 = psi0 / (np.linalg.norm(psi0) or 1.0)
             else:
                 psi0 = np.zeros(dim, dtype=complex)

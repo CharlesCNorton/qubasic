@@ -17,6 +17,7 @@ approximate.
 from __future__ import annotations
 
 import numpy as np
+from qubasic_core.host import HostState
 
 
 def _expm_anti(G: np.ndarray) -> np.ndarray:
@@ -26,7 +27,7 @@ def _expm_anti(G: np.ndarray) -> np.ndarray:
     return (V * np.exp(-1j * w)) @ V.conj().T
 
 
-class BosonicMixin:
+class BosonicMixin(HostState):
     """Continuous-variable Fock-space engine for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self._eval_with_vars(), self.io.

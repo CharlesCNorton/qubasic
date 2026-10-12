@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from qiskit import transpile
 from qiskit_aer import AerSimulator
+from qubasic_core.host import HostState
 
 try:
     import plotille as _plotille
@@ -11,7 +12,7 @@ except ImportError:
     _plotille = None
 
 
-class SweepMixin:
+class SweepMixin(HostState):
     """Parameter sweep command for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.variables, self.shots,

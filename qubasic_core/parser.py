@@ -22,7 +22,7 @@ from qubasic_core.patterns import (
     RE_LPRINT, RE_SCREEN, RE_COLOR, RE_LOCATE,
     RE_ON_MEASURE, RE_ON_TIMER, RE_IMPORT, RE_CHAIN, RE_MERGE,
     RE_LET_STR, RE_DIM_MULTI, RE_MEASURE_BASIS, RE_SYNDROME,
-    RE_IMPLICIT_ASSIGN,
+    RE_IMPLICIT_ASSIGN, RE_MID_ASSIGN, RE_RETURN_TO, RE_RESTORE_TO, RE_LET_FIELD,
 )
 from qubasic_core.statements import (
     Stmt, RawStmt, GateStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt,
@@ -44,7 +44,7 @@ from qubasic_core.statements import (
     ScreenStmt, ColorStmt, LocateStmt, ImportStmt, ChainStmt, MergeStmt,
     MeasStmt, ResetStmt, MeasureBasisStmt, SyndromeStmt,
     SendStmt, ShareStmt, AtRegStmt,
-    CompoundStmt,
+    CompoundStmt, MidAssignStmt,
 )
 
 
@@ -52,16 +52,51 @@ from qubasic_core.statements import (
 # Keyword dispatch handlers
 # ═══════════════════════════════════════════════════════════════════════
 
+def _target(tok: str) -> int | str:
+    """A jump target: a line number, or a label name."""
+    tok = tok.strip()
+    return int(tok) if tok.isdigit() else tok
+
+
+def _top_split(text: str, seps: str = ',') -> list[str]:
+    """Split at top-level separators (outside quotes and brackets)."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    quote = None
+    for ch in text:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch == '"':
+            quote = ch
+            buf.append(ch)
+        elif ch in '([':
+            depth += 1
+            buf.append(ch)
+        elif ch in ')]':
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch in seps and depth == 0:
+            parts.append(''.join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append(''.join(buf))
+    return parts
+
+
 def _handle_goto(text, raw):
     m = RE_GOTO.match(text)
     if m:
-        return GotoStmt(raw=raw, target=int(m.group(1)))
+        return GotoStmt(raw=raw, target=_target(m.group(1)))
     return None
 
 def _handle_gosub(text, raw):
     m = RE_GOSUB.match(text)
     if m:
-        return GosubStmt(raw=raw, target=int(m.group(1)))
+        return GosubStmt(raw=raw, target=_target(m.group(1)))
     return None
 
 def _handle_for(text, raw):
@@ -126,14 +161,14 @@ def _handle_on(text, raw):
         return OnTimerStmt(raw=raw, interval=m.group(1), target=int(m.group(2)))
     m = RE_ON_ERROR.match(text)
     if m:
-        return OnErrorStmt(raw=raw, target=int(m.group(1)))
+        return OnErrorStmt(raw=raw, target=_target(m.group(1)))
     m = RE_ON_GOTO.match(text)
     if m:
-        targets = tuple(int(t.strip()) for t in m.group(2).split(',') if t.strip())
+        targets = tuple(_target(t) for t in m.group(2).split(',') if t.strip())
         return OnGotoStmt(raw=raw, expr=m.group(1).strip(), targets=targets)
     m = RE_ON_GOSUB.match(text)
     if m:
-        targets = tuple(int(t.strip()) for t in m.group(2).split(',') if t.strip())
+        targets = tuple(_target(t) for t in m.group(2).split(',') if t.strip())
         return OnGosubStmt(raw=raw, expr=m.group(1).strip(), targets=targets)
     return None
 
@@ -153,14 +188,14 @@ def _handle_sub(text, raw):
     m = RE_SUB.match(text)
     if m:
         return SubStmt(raw=raw, name=m.group(1).upper(),
-                       params=m.group(2) or '')
+                       params=m.group(2) or '', static=bool(m.group(3)))
     return None
 
 def _handle_function(text, raw):
     m = RE_FUNCTION.match(text)
     if m:
         return FunctionStmt(raw=raw, name=m.group(1).upper(),
-                            params=m.group(2) or '')
+                            params=m.group(2) or '', static=bool(m.group(3)))
     return None
 
 def _handle_call(text, raw):
@@ -206,10 +241,17 @@ def _handle_assert(text, raw):
         return AssertStmt(raw=raw, condition=m.group(1).strip())
     return None
 
+_RE_SWAP_OPERAND = re.compile(r'[A-Za-z_]\w*[$%!#&]?(?:\s*\(.*\))?$')
+
+
 def _handle_swap(text, raw):
+    # SWAP a, b exchanges two variables (or array elements); with qubit
+    # operands (SWAP 0, 1 / SWAP q, q+1 / SWAP r[0], r[1]) it is the gate.
     m = RE_SWAP.match(text)
     if m:
-        return SwapStmt(raw=raw, a=m.group(1), b=m.group(2))
+        parts = [p.strip() for p in _top_split(m.group(1))]
+        if len(parts) == 2 and all(_RE_SWAP_OPERAND.match(p) for p in parts):
+            return SwapStmt(raw=raw, a=parts[0], b=parts[1])
     return None
 
 def _handle_def(text, raw):
@@ -242,6 +284,11 @@ def _handle_read(text, raw):
     return None
 
 def _handle_let(text, raw):
+    m = RE_LET_FIELD.match(text)
+    if m:
+        path = re.sub(r'\s+', '', m.group(3)).lstrip('.')
+        return LetArrayStmt(raw=raw, name=m.group(1), index_expr=m.group(2),
+                            value_expr=m.group(4), field=path)
     m = RE_LET_ARRAY.match(text)
     if m:
         return LetArrayStmt(raw=raw, name=m.group(1),
@@ -257,7 +304,8 @@ def _handle_let(text, raw):
 def _handle_print(text, raw):
     m = RE_PRINT_USING.match(text)
     if m:
-        return PrintUsingStmt(raw=raw, fmt=m.group(1), values=m.group(2))
+        head, *tail = _top_split(m.group(1), ';')
+        return PrintUsingStmt(raw=raw, fmt=head.strip(), values=';'.join(tail).strip())
     m = RE_PRINT_FILE.match(text)
     if m:
         return PrintFileStmt(raw=raw, handle=int(m.group(1)), data=m.group(2))
@@ -544,6 +592,12 @@ def parse_stmt(raw: str) -> Stmt:
 
     upper = text.upper()
 
+    # ? is PRINT, as the QBASIC editor reads it.
+    if text.startswith('?'):
+        if not text[1:].strip():
+            return PrintStmt(raw=raw, expr='')
+        return parse_stmt('PRINT ' + text[1:].lstrip())
+
     # ── Terminals ──────────────────────────────────────────────────
     if upper.startswith('REM') or upper.startswith("'"):
         return RemStmt(raw=raw)
@@ -554,20 +608,26 @@ def parse_stmt(raw: str) -> Stmt:
     m_sub = re.match(r'MEASURE\s+([\d,\s]+)$', text, re.IGNORECASE)
     if m_sub:
         return MeasureStmt(raw=raw, qubits=m_sub.group(1).strip())
-    if upper == 'END':
+    if upper in ('END', 'SYSTEM'):
         return EndStmt(raw=raw)
-    if upper == 'END IF':
+    if upper in ('END IF', 'ENDIF'):
         return EndIfStmt(raw=raw)
     if upper == 'ELSE':
         return ElseStmt(raw=raw)
     if upper == 'RETURN':
         return ReturnStmt(raw=raw)
+    m_ret = RE_RETURN_TO.match(text)
+    if m_ret:
+        return ReturnStmt(raw=raw, target=_target(m_ret.group(1)))
     if upper == 'BARRIER':
         return BarrierStmt(raw=raw)
     if upper == 'WEND':
         return WendStmt(raw=raw)
     if upper == 'RESTORE':
         return RestoreStmt(raw=raw)
+    m_res = RE_RESTORE_TO.match(text)
+    if m_res:
+        return RestoreStmt(raw=raw, target=_target(m_res.group(1)))
     if upper == 'END SELECT':
         return EndSelectStmt(raw=raw)
     if upper == 'STOP':
@@ -619,6 +679,15 @@ def parse_stmt(raw: str) -> Stmt:
         parts = _split_colon_stmts(text)
         if len(parts) > 1:
             return CompoundStmt(raw=raw, parts=tuple(parts))
+
+    # ── MID$(s$, start[, length]) = expr ───────────────────────────
+    m = RE_MID_ASSIGN.match(text)
+    if m:
+        mid_args = [a.strip() for a in _top_split(m.group(1))]
+        if 2 <= len(mid_args) <= 3:
+            return MidAssignStmt(raw=raw, var=mid_args[0], start=mid_args[1],
+                                 length=mid_args[2] if len(mid_args) == 3 else None,
+                                 expr=m.group(2).strip())
 
     # ── Implicit LET (assignment without the LET keyword) ──────────
     # A line whose lvalue is followed by a single '=' is an assignment, even

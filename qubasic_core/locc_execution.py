@@ -3,19 +3,21 @@
 import re
 import sys
 import time
+from typing import Any
 
 import numpy as np
 
 from qubasic_core.engine import (
     ExecResult,
-    GATE_TABLE, GATE_ALIASES,
+    GATE_ALIASES,
     _np_gate_matrix, _sample_one_np,
     LOCC_SEND_SHOT_CAP, LOCC_SEND_QUBIT_THRESHOLD,
     RE_CTRL, RE_INV,
 )
+from qubasic_core.host import HostState
 
 
-class LOCCExecutionMixin:
+class LOCCExecutionMixin(HostState):
     """LOCC execution methods for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.locc, self.program, self.shots,
@@ -33,17 +35,21 @@ class LOCCExecutionMixin:
         if not sorted_lines:
             self.io.writeln("NOTHING TO RUN")
             return
+        prog = self._compiled()
+        self._scan_subs(prog)
+        self._reset_declarations(prog)
+        self._gosub_stack.clear()
         has_measure = self._program_has_measure(sorted_lines)
         has_send = any(re.search(r'\bSEND\b', self.program[l], re.IGNORECASE)
                        for l in sorted_lines)
         if has_send:
-            self._locc_run_with_send(sorted_lines, has_measure)
+            self._locc_run_with_send(prog, has_measure)
         else:
-            self._locc_run_vectorized(sorted_lines, has_measure)
+            self._locc_run_vectorized(prog, has_measure)
         # Sync last_sv from LOCC engine so EXPECT/DENSITY/BLOCH work
         self.last_sv = self._active_sv
 
-    def _locc_run_with_send(self, sorted_lines: list[int], has_measure: bool) -> None:
+    def _locc_run_with_send(self, sorted_lines: Any, has_measure: bool) -> None:
         """LOCC execution with SEND — prefix/suffix split optimization.
 
         Executes the deterministic prefix (before first SEND) once,
@@ -54,31 +60,26 @@ class LOCCExecutionMixin:
         from qubasic_core.scope import Scope
         from qubasic_core.statements import (
             SendStmt, GotoStmt, GosubStmt, OnGotoStmt, OnGosubStmt,
-            ForStmt, WhileStmt, DoStmt, IfThenStmt,
+            ForStmt, WhileStmt, DoStmt, IfJumpStmt, JumpStmt, CallStmt,
         )
+        prog = sorted_lines
 
-        # Any control transfer in the prefix could skip the SEND or re-enter,
-        # so the prefix/suffix split is unsafe and we fall back to full re-exec.
+        # A loop, call or jump before the first SEND could skip it or come
+        # back to it, so the prefix runs once only when every transfer in it
+        # stays before the SEND (an IF that jumps past it is unsafe too).
         _jump_types = (GotoStmt, GosubStmt, OnGotoStmt, OnGosubStmt,
-                       ForStmt, WhileStmt, DoStmt)
-        first_send_ip = None
-        for i, ln in enumerate(sorted_lines):
-            p = self._get_parsed(ln)
-            if isinstance(p, SendStmt):
-                first_send_ip = i
-                break
+                       ForStmt, WhileStmt, DoStmt, CallStmt)
+        first_send_ip = next((i for i, p in enumerate(prog.stmts)
+                              if isinstance(p, SendStmt)), None)
         has_prefix_jumps = False
-        if first_send_ip is not None and first_send_ip > 0:
-            for i in range(first_send_ip):
-                p = self._get_parsed(sorted_lines[i])
-                if isinstance(p, _jump_types):
-                    has_prefix_jumps = True
-                    break
-                if isinstance(p, IfThenStmt):
-                    _clauses = f"{p.then_clause or ''} {p.else_clause or ''}"
-                    if re.search(r'\b(GOTO|GOSUB)\b', _clauses, re.IGNORECASE):
-                        has_prefix_jumps = True
-                        break
+        limit = first_send_ip or 0
+        for i in range(limit):
+            p = prog.stmts[i]
+            if isinstance(p, _jump_types) or (
+                    isinstance(p, IfJumpStmt) and max(p.on_false, p.end) > limit) or (
+                    isinstance(p, JumpStmt) and p.target > limit):
+                has_prefix_jumps = True
+                break
 
         sizes_str = '+'.join(str(s) for s in self.locc.sizes)
         mode = "JOINT" if self.locc.joint else "SPLIT"
@@ -256,7 +257,7 @@ class LOCCExecutionMixin:
                             f"{sizes_str}q, {self.shots} shots in {dt:.2f}s")
             self._locc_display_results(per_reg, cj)
             if not cj:
-                self.io.writeln(f"\n  (SPLIT mode, no SEND — registers are independent)")
+                self.io.writeln("\n  (SPLIT mode, no SEND — registers are independent)")
             self.last_counts = cj if cj else per_reg.get('A', {})
         else:
             dt = time.time() - t0
@@ -264,12 +265,12 @@ class LOCCExecutionMixin:
             regs = ', '.join(self.locc.names)
             self.io.writeln(f"(no MEASURE — use STATE {regs} to inspect)")
 
-    def _locc_execute_program(self, sorted_lines, *, start_ip: int = 0,
+    def _locc_execute_program(self, prog, *, start_ip: int = 0,
                               run_vars=None, stop_before_send: bool = False) -> int:
-        """Execute LOCC program lines.
+        """Execute the compiled program in LOCC mode from statement start_ip.
 
-        Returns the ip where execution stopped (end of program or at first SEND
-        if stop_before_send is True).
+        Returns the statement where execution stopped (end of program, or the
+        first SEND when stop_before_send is set).
         """
         from qubasic_core.scope import Scope
         from qubasic_core.exec_context import ExecContext
@@ -277,28 +278,27 @@ class LOCCExecutionMixin:
         if run_vars is None:
             run_vars = Scope(self.variables)
         ctx = ExecContext(
-            sorted_lines=sorted_lines, ip=start_ip, run_vars=run_vars,
+            sorted_lines=prog, ip=start_ip, run_vars=run_vars,
             max_iterations=self._max_iterations,
         )
-        _parsed = [self._get_parsed(ln) for ln in sorted_lines]
-        _stmts = [self.program[ln].strip() for ln in sorted_lines]
-        n_lines = len(sorted_lines)
+        n = len(prog)
         prev_strict, self._strict_names = self._strict_names, False
         try:
-            while ctx.ip < n_lines:
+            while ctx.ip < n:
                 ctx.iteration_count += 1
                 if ctx.iteration_count > ctx.max_iterations:
                     raise RuntimeError(f"LOOP LIMIT ({ctx.max_iterations}) — possible infinite loop")
-                if isinstance(_parsed[ctx.ip], MeasureStmt):
+                parsed = prog.stmts[ctx.ip]
+                if isinstance(parsed, MeasureStmt):
                     ctx.ip += 1
                     continue
-                if stop_before_send and isinstance(_parsed[ctx.ip], SendStmt):
+                if stop_before_send and isinstance(parsed, SendStmt):
                     return ctx.ip
                 try:
-                    result = self._locc_exec_line(_stmts[ctx.ip], ctx.loop_stack, sorted_lines,
-                                                  ctx.ip, run_vars, parsed=_parsed[ctx.ip], ctx=ctx)
+                    result = self._locc_exec_line(prog.texts[ctx.ip], ctx.loop_stack, prog,
+                                                  ctx.ip, run_vars, parsed=parsed)
                 except Exception as e:
-                    raise RuntimeError(f"LINE {sorted_lines[ctx.ip]}: {e}") from None
+                    raise RuntimeError(f"LINE {prog.lines[ctx.ip]}: {e}") from None
                 if result is ExecResult.END:
                     break
                 self._advance(ctx, result)
@@ -306,27 +306,15 @@ class LOCCExecutionMixin:
             self._strict_names = prev_strict
         return ctx.ip
 
-    def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars, *, parsed=None,
-                        ctx=None):
-        """Execute one line in LOCC mode (ctx: the executor loop's context,
-        for a whole line; absent for a compound's parts and IF clauses)."""
+    def _locc_exec_line(self, stmt, loop_stack, sorted_lines, ip, run_vars, *, parsed=None):
+        """Execute one compiled statement in LOCC mode."""
         from qubasic_core.parser import parse_stmt
         from qubasic_core.statements import (
-            SendStmt, ShareStmt, AtRegStmt, CompoundStmt,
+            SendStmt, ShareStmt, AtRegStmt,
             RemStmt, MeasureStmt, EndStmt, BarrierStmt, ReturnStmt,
         )
         if parsed is None:
             parsed = parse_stmt(stmt)
-
-        def _part(sub):
-            return self._locc_exec_line(sub, loop_stack, sorted_lines, ip, run_vars)
-
-        if ctx is not None and ctx.resume is not None:
-            rp, ctx.resume = ctx.resume, None
-            if int(rp) == ip:
-                resumed = self._resume_compound(rp, parsed, loop_stack, ip, _part)
-                if resumed is not None:
-                    return resumed
 
         # Fast-path for terminals
         if isinstance(parsed, (RemStmt, MeasureStmt, BarrierStmt)):
@@ -334,12 +322,7 @@ class LOCCExecutionMixin:
         if isinstance(parsed, EndStmt):
             return ExecResult.END
         if isinstance(parsed, ReturnStmt):
-            if not self._gosub_stack:
-                raise RuntimeError("RETURN WITHOUT GOSUB")
-            return self._gosub_stack.pop()
-        if isinstance(parsed, CompoundStmt):
-            frame = ('line', ip) if ctx is not None else ('clause', ip, stmt)
-            return self._run_compound(list(parsed.parts), _part, loop_stack, ip, frame)
+            return self._cf_return(sorted_lines, parsed)[1]
 
         # Fast-path for LOCC-specific statements
         if isinstance(parsed, SendStmt):
@@ -368,17 +351,12 @@ class LOCCExecutionMixin:
         if handled:
             return result
 
-        if ':' in stmt:
-            for sub in self._split_colon_stmts(stmt):
-                self._locc_exec_line(sub, loop_stack, sorted_lines, ip, run_vars)
-            return ExecResult.ADVANCE
-
         raise ValueError(f"LOCC mode requires @A/@B prefix, SEND, SHARE, or IF: {stmt}")
 
     def _locc_try_special(self, reg: str, stmt: str, run_vars: dict) -> bool:
         """Handle MEAS/RESET/MEASURE_X/Y/Z/SYNDROME in LOCC mode."""
         from qubasic_core.parser import parse_stmt
-        from qubasic_core.statements import MeasStmt, ResetStmt, MeasureBasisStmt, SyndromeStmt
+        from qubasic_core.statements import MeasStmt, ResetStmt, MeasureBasisStmt
         p = parse_stmt(stmt)
 
         if isinstance(p, MeasStmt):

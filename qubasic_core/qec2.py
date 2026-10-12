@@ -1,11 +1,14 @@
 """QUBASIC research-grade QEC extensions.
 
-Three layers beyond the code-capacity lookup/union-find machinery in qec.py:
+Beyond the code-capacity lookup and matching decoders in qec.py:
 
   Circuit-level noise  LOGICAL_ERROR_RATE SURFACE 21 0.001 CIRCUIT [shots]
                        stim-generated syndrome-extraction circuits (noisy
                        gates, measurements, resets over d rounds), decoded
                        from the detector error model by pymatching MWPM.
+  Phenomenological     LOGICAL_ERROR_RATE SURFACE 5 0.01 PHENOM [shots]
+                       data and measurement errors over d rounds, decoded
+                       by space-time matching (dem.py), no dependency.
   Batched MWPM         LOGICAL_ERROR_RATE SURFACE 11 0.05 MWPM [trials]
                        code-capacity Monte Carlo with pymatching, vectorized
                        over trials (large distances the lookup table cannot).
@@ -23,6 +26,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+from qubasic_core.host import HostState
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -233,7 +237,7 @@ def _osd0(H: np.ndarray, syndrome: np.ndarray, Lq: np.ndarray) -> np.ndarray:
 # Mixin
 # ═══════════════════════════════════════════════════════════════════════
 
-class QEC2Mixin:
+class QEC2Mixin(HostState):
     """Circuit-level QEC, MWPM decoding, and qLDPC codes for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.io, self._seed, self.variables,
@@ -345,6 +349,53 @@ class QEC2Mixin:
                         f"{per_round:.3e} per round")
         self.io.writeln(f"  ({dt:.2f}s: {shots / max(dt, 1e-9):,.0f} shots/s)")
         self.variables['_LER'] = per_shot
+        self.variables['_LER_ROUND'] = per_round
+
+    # ── Phenomenological memory (space-time matching, no stim) ──────────
+
+    def _phenomenological_model(self, code: dict, p: float, rounds: int):
+        """Detector model of a Z-basis memory experiment: before each of the
+        rounds every data qubit takes an X error with probability p and every
+        Z check outcome flips with probability p; a final readout (with X
+        flips at rate p) closes the record. The observable is logical Z."""
+        from qubasic_core.dem import DetectorModel
+        z_checks = [[q for q, ch in enumerate(st) if ch == 'Z'] for st in code['stab']
+                    if set(st) - {'I'} == {'Z'}]
+        if not z_checks:
+            raise ValueError(f"{code['name']} has no Z checks to detect X errors")
+        n = code['n']
+        holds = [[k for k, f in enumerate(z_checks) if q in f] for q in range(n)]
+        if any(len(h) > 2 for h in holds):
+            raise ValueError(f"{code['name']} is not matchable (a qubit in more than two Z checks)")
+        lz = {q for q, ch in enumerate(code['lz']) if ch in 'ZY'}
+        nc = len(z_checks)
+
+        def det(t: int, k: int) -> int:
+            return (t - 1) * nc + k
+
+        model = DetectorModel(nc * (rounds + 1), 1)
+        for t in range(1, rounds + 2):
+            for q in range(n):
+                model.add(p, [det(t, k) for k in holds[q]], 1 if q in lz else 0)
+            if t <= rounds:
+                for k in range(nc):
+                    model.add(p, [det(t, k), det(t + 1, k)], 0)
+        return model
+
+    def _qec_phenomenological(self, name: str, d: int, p: float, shots: int,
+                              rounds: int | None) -> None:
+        code = self._qec_code(name, d)
+        rounds = rounds or code['d']
+        model = self._phenomenological_model(code, p, rounds)
+        rng = np.random.default_rng(self._seed)
+        t0 = time.time()
+        rate, _ = model.logical_failure_rate(shots, rng)
+        dt = time.time() - t0
+        per_round = 1.0 - (1.0 - rate) ** (1.0 / rounds) if rate < 1.0 else 1.0
+        self.io.writeln(f"\n  {code['name']}: phenomenological noise p={p}, {rounds} rounds, "
+                        f"{shots:,} shots ({model.n_det} detectors, space-time matching, {dt:.1f}s)")
+        self.io.writeln(f"  Logical error rate = {rate:.3e} per shot   {per_round:.3e} per round")
+        self.variables['_LER'] = rate
         self.variables['_LER_ROUND'] = per_round
 
     # ── qLDPC (BB) code-capacity with BP+OSD ────────────────────────────

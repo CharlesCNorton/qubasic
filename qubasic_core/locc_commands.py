@@ -8,9 +8,10 @@ from qubasic_core.engine import (
     LOCC_MAX_JOINT_QUBITS, LOCC_MAX_SPLIT_QUBITS, LOCC_MAX_REGISTERS,
     RAM_BUDGET_FRACTION,
 )
+from qubasic_core.host import HostState
 
 
-class LOCCCommandsMixin:
+class LOCCCommandsMixin(HostState):
     """LOCC user-facing commands for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.locc, self.locc_mode, self.program,
@@ -25,12 +26,11 @@ class LOCCCommandsMixin:
         return getattr(self, '_noise_depol_p', 0.0)
 
     def cmd_locc(self, rest: str) -> None:
-        """LOCC [JOINT|SPLIT] <n1> <n2> [...] | OFF | STATUS | SHOTCAP <n>.
+        """LOCC [JOINT|SPLIT] <n1> <n2> [...] | OFF | STATUS | SHOTCAP <n> — multi-register LOCC mode.
 
-        Enter multi-register distributed mode: SPLIT for independent registers
-        (max capacity, coordinate via SEND/IF), JOINT for shared entanglement
-        via SHARE. SHOTCAP bounds shots for SEND-based protocols.
-        """
+        SPLIT gives independent registers (coordinate through SEND and IF),
+        JOINT one joint state in which SHARE creates entanglement. SHOTCAP
+        bounds shots for SEND-based protocols on large registers."""
         args = rest.upper().split()
         if not args:
             if self.locc_mode:
@@ -149,18 +149,19 @@ class LOCCCommandsMixin:
                 if max_par > 0:
                     self.io.writeln(f"  Max parallel instances in 80% budget: ~{max_par}")
         if not joint:
-            self.io.writeln(f"  Registers are INDEPENDENT — no cross-register entanglement")
-            self.io.writeln(f"  Use SEND/IF for classical coordination")
+            self.io.writeln("  Registers are INDEPENDENT — no cross-register entanglement")
+            self.io.writeln("  Use SEND/IF for classical coordination")
         else:
-            self.io.writeln(f"  Joint statevector — use SHARE for pre-shared entanglement")
+            self.io.writeln("  Joint statevector — use SHARE for pre-shared entanglement")
         if peak > 30:
-            self.io.writeln(f"  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
+            self.io.writeln("  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
         if self._noise_model and noise_p == 0:
-            self.io.writeln(f"  WARNING: active noise model is not supported in the LOCC numpy "
-                           f"path and will be ignored. Supported: depolarizing, "
-                           f"amplitude_damping, phase_flip.")
+            self.io.writeln("  WARNING: the active noise model has no LOCC numpy form and is "
+                            "ignored here; LOCC runs one depolarizing, amplitude_damping or "
+                            "phase_flip channel.")
 
     def cmd_send(self, rest: str) -> None:
+        """SEND <reg> <qubit> -> <var> — measure a LOCC register qubit into a classical variable."""
         if not self.locc_mode:
             self.io.writeln("?SEND requires LOCC mode")
             return
@@ -184,6 +185,7 @@ class LOCCCommandsMixin:
         self.io.writeln(f"  {reg}[{qubit}] -> {var} = {outcome}")
 
     def cmd_share(self, rest: str) -> None:
+        """SHARE <reg1> <q1>, <reg2> <q2> — create a Bell pair across two LOCC registers (JOINT mode)."""
         if not self.locc_mode:
             self.io.writeln("?SHARE requires LOCC mode")
             return
@@ -204,7 +206,7 @@ class LOCCCommandsMixin:
             self.io.writeln(f"?{e}")
 
     def cmd_loccinfo(self) -> None:
-        """Show LOCC protocol metrics after a run."""
+        """LOCCINFO — protocol metrics of the last LOCC run."""
         if not self.locc_mode:
             self.io.writeln("?NOT IN LOCC MODE")
             return

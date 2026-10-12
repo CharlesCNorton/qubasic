@@ -6,20 +6,14 @@ import math
 import os
 import sys
 import time
-from typing import Any
 
 import numpy as np
+from qubasic_core.host import HostState
 
 MAX_STATS_RUNS = 10000
 
 
-class _NullIOPort:
-    def write(self, text): pass
-    def writeln(self, text): pass
-    def read_line(self, prompt): return ''
-
-
-class ProfilerMixin:
+class ProfilerMixin(HostState):
     """Profiling and statistics for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.program, self.last_counts,
@@ -68,13 +62,14 @@ class ProfilerMixin:
             self.io.writeln("  No profile data (PROFILE ON, then RUN)")
             return
         self.io.writeln("\n  Profile Results:")
-        self.io.writeln(f"  {'Line':>6}  {'Time(ms)':>10}  {'Calls':>6}  {'Gates':>6}  Source")
+        self.io.writeln(f"  {'Line':>6}  {'Time(ms)':>10}  {'%':>5}  {'Calls':>6}  {'Gates':>6}  Source")
         total_time = sum(d['time_ms'] for d in self._profile_data.values())
         for ln in sorted(self._profile_data.keys()):
             d = self._profile_data[ln]
             src = self.program.get(ln, '')[:40]
             pct = 100 * d['time_ms'] / total_time if total_time > 0 else 0
-            self.io.writeln(f"  {ln:>6}  {d['time_ms']:>9.2f}  {d['calls']:>6}  {d['gates']:>6}  {src}")
+            self.io.writeln(f"  {ln:>6}  {d['time_ms']:>10.2f}  {pct:>5.1f}  {d['calls']:>6}  "
+                            f"{d['gates']:>6}  {src}")
         self.io.writeln(f"\n  Total: {total_time:.2f} ms")
         self.io.writeln('')
 
@@ -115,13 +110,12 @@ class ProfilerMixin:
                     self._seed = base_seed + trial
                     np.random.seed(base_seed + trial)
                     self._circuit_cache_key = None
-                self.io = _NullIOPort()
                 sys.stdout = devnull
                 try:
-                    self.cmd_run()
+                    with self._silenced():
+                        self.cmd_run()
                 finally:
                     sys.stdout = old_stdout
-                    self.io = old_io
                 if self.last_counts:
                     if len(self._stats_runs) >= MAX_STATS_RUNS:
                         self.io.writeln(f"?STATS: run limit ({MAX_STATS_RUNS}) reached, stopping collection")
@@ -151,7 +145,6 @@ class ProfilerMixin:
         # Aggregate: count how often each state appears across runs
         state_totals: dict[str, list[int]] = {}
         for run in self._stats_runs:
-            total = sum(run.values())
             for state, count in run.items():
                 if state not in state_totals:
                     state_totals[state] = []

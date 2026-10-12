@@ -141,7 +141,7 @@ class TestExpressions(unittest.TestCase):
         values = [t._safe_eval(e) for e in
                   ('10 MOD 3', '-7 MOD 3', '2 ^ 10', '5 XOR 3', 'SGN(-4)', 'SQR(16)',
                    'CINT(2.5)', 'ATN(1) * 4')]
-        self.assertEqual(values[:7], [1, -1, 1024, 6, -1, 4.0, 3.0])
+        self.assertEqual(values[:7], [1, -1, 1024, 6, -1, 4.0, 2])
         self.assertAlmostEqual(values[7], math.pi)
 
     def test_bare_print_is_a_blank_line(self):

@@ -1,4 +1,4 @@
-"""QUBASIC variable scope — unified layered scope model."""
+"""QUBASIC variable scope — the run's view of the variable table."""
 
 from __future__ import annotations
 
@@ -6,66 +6,49 @@ from typing import Any
 
 
 class Scope:
-    """Layered variable scope: persistent + runtime.
+    """The variables a running program reads and writes.
 
-    Reads check runtime first, then persistent.
-    Writes mirror to both for backward compatibility with code
-    that reads self.variables directly.
+    A view over the terminal's variable table: reads and writes go straight
+    to it, so a SUB or FUNCTION that swaps the table for its own locals (see
+    subs.py) is seen by every statement that holds this view.
     """
 
     def __init__(self, persistent: dict[str, Any]):
         self._persistent = persistent
-        self._runtime: dict[str, Any] = {}
 
     def get(self, name: str, default: Any = None) -> Any:
-        if name in self._runtime:
-            return self._runtime[name]
         return self._persistent.get(name, default)
 
     def __contains__(self, name: str) -> bool:
-        return name in self._runtime or name in self._persistent
+        return name in self._persistent
 
     def __getitem__(self, name: str) -> Any:
-        if name in self._runtime:
-            return self._runtime[name]
         return self._persistent[name]
 
     def __setitem__(self, name: str, value: Any) -> None:
-        self._runtime[name] = value
+        self._persistent[name] = value
 
     def keys(self):
-        return set(self._persistent.keys()) | set(self._runtime.keys())
+        return self._persistent.keys()
 
     def items(self):
-        merged = {**self._persistent, **self._runtime}
-        return merged.items()
+        return self._persistent.items()
 
     def values(self):
-        merged = {**self._persistent, **self._runtime}
-        return merged.values()
+        return self._persistent.values()
 
     def update(self, other):
-        if isinstance(other, dict):
-            for k, v in other.items():
-                self[k] = v
-        elif isinstance(other, Scope):
-            for k, v in other.items():
-                self[k] = v
+        for k, v in dict(other.items()).items():
+            self._persistent[k] = v
 
     def as_dict(self) -> dict[str, Any]:
-        """Merged view for expression evaluation."""
-        return {**self._persistent, **self._runtime}
+        """A copy of the variables, for expression evaluation."""
+        return dict(self._persistent)
 
     def __delitem__(self, name: str) -> None:
-        self._runtime.pop(name, None)
         self._persistent.pop(name, None)
 
     def pop(self, name: str, *default):
-        # Check runtime first, then persistent, before falling back to default.
-        if name in self._runtime:
-            val = self._runtime.pop(name)
-            self._persistent.pop(name, None)
-            return val
         if name in self._persistent:
             return self._persistent.pop(name)
         if default:

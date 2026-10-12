@@ -28,6 +28,8 @@ dependencies = [
     "qiskit>=1.0",
     "qiskit-aer>=0.13",
     "numpy>=1.24",
+    "scipy>=1.5",
+    "rustworkx>=0.14",
     "psutil>=5.9",
     "rich>=13.0",
 ]
@@ -53,7 +55,7 @@ packages = ["qubasic_core"]
 [tool.setuptools.package-data]
 
 [tool.setuptools.data-files]
-"share/qubasic/examples" = ["examples/*.qb"]
+"share/qubasic/examples" = ["examples/*.qb", "examples/*.bas"]
 
 [tool.pytest.ini_options]
 markers = ["real_sim: test requires real Qiskit Aer simulation (no mock)"]
@@ -71,16 +73,14 @@ python_version = "3.10"
 ignore_missing_imports = true
 warn_unused_configs = true
 warn_redundant_casts = true
-# QBasicTerminal composes 32 mixins; each mixin accesses attributes the host
-# class provides, which mypy cannot resolve in isolation. The codebase is
-# intentionally gradually typed, so the strict per-method settings and the
-# cross-mixin attribute check are disabled while keeping mypy useful for real
-# type mismatches, undefined names, and signature checks.
+# QBasicTerminal composes its mixins over one shared set of attributes and
+# methods; qubasic_core/host.py declares them (HostState, the base of every
+# mixin), so attribute access is checked. The codebase is gradually typed:
+# the strict per-method settings stay off.
 disallow_untyped_defs = false
 check_untyped_defs = false
 warn_return_any = false
 warn_unused_ignores = false
-# attr-defined: cross-mixin attributes the host class provides.
 # has-type: types behind the lazy __getattr__ re-exports cannot be inferred.
 # misc/union-attr: mixin base-class attribute overlap and optional access.
-disable_error_code = ["attr-defined", "has-type", "misc", "union-attr"]
+disable_error_code = ["has-type", "misc", "union-attr"]

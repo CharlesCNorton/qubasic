@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +12,75 @@ import numpy as np
 from qubasic_core.engine import (
     GATE_TABLE, GATE_ALIASES,
     MAX_INCLUDE_DEPTH,
-    RE_OPEN, RE_CLOSE, RE_PRINT_FILE, RE_INPUT_FILE, RE_LPRINT,
+    RE_OPEN, RE_CLOSE, RE_PRINT_FILE, RE_LPRINT,
 )
 from qubasic_core.parser import parse_stmt
+from qubasic_core.host import HostState
+from qubasic_core.variables import Record, is_string_kind
 
 
-class FileIOMixin:
+def _record_leaves(rec: Record, prefix: str = '') -> list[tuple[str, Any]]:
+    """(field path, value) for every non-record field of a record."""
+    out: list[tuple[str, Any]] = []
+    for key, val in rec.items():
+        path = f"{prefix}{key}"
+        if isinstance(val, Record):
+            out.extend(_record_leaves(val, path + '.'))
+        else:
+            out.append((path, val))
+    return out
+
+
+def _literal(val: Any) -> str:
+    """A value as a BASIC literal for SAVE."""
+    if isinstance(val, str):
+        return '"' + val.replace('"', '" + CHR$(34) + "') + '"'
+    return str(val)
+
+
+def number_source(lines: list[str]) -> list[tuple[int, str]]:
+    """(line number, text) for QBASIC source lines. Blank lines are skipped;
+    a line that starts with a number keeps it, and runs of unnumbered lines
+    are numbered in steps of up to 10 that fit before the next numbered line."""
+    entries: list[tuple[int | None, str]] = []
+    for raw in lines:
+        text = raw.rstrip()
+        if not text.strip():
+            continue
+        m = re.match(r'\s*(\d+)(?:\s+(.*))?$', text)
+        if m:
+            if m.group(2):
+                entries.append((int(m.group(1)), m.group(2).strip()))
+            continue
+        entries.append((None, text.strip()))
+    out: list[tuple[int, str]] = []
+    prev = 0
+    i = 0
+    while i < len(entries):
+        num, text = entries[i]
+        if num is not None:
+            if num <= prev:
+                raise ValueError(f"line {num} is out of order (after {prev})")
+            out.append((num, text))
+            prev = num
+            i += 1
+            continue
+        j = i
+        while j < len(entries) and entries[j][0] is None:
+            j += 1
+        count = j - i
+        nxt = entries[j][0] if j < len(entries) else None
+        step = 10 if nxt is None else min(10, (nxt - prev) // (count + 1))
+        if step < 1:
+            raise ValueError(f"no room to number {count} line(s) between {prev} and {nxt}")
+        for k in range(count):
+            out.append((prev + (k + 1) * step, entries[i + k][1]))
+        prev = out[-1][0]
+        i = j
+    return out
+
+
+class FileIOMixin(HostState):
     """File I/O commands for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.program, self.num_qubits, self.shots,
@@ -41,6 +103,17 @@ class FileIOMixin:
         if checked is None:
             return
         path = checked
+        if path.lower().endswith('.bas'):
+            imported_bas: set[int] = getattr(self, '_imported_lines', set())
+            lines = [n for n in sorted(self.program) if n not in imported_bas]
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    for num in lines:
+                        f.write(f"{num} {self.program[num]}\n")
+                self.io.writeln(f"SAVED {len(lines)} lines to {path}")
+            except OSError as e:
+                self.io.writeln(f"?SAVE ERROR: {e}")
+            return
         if not path.endswith('.qb'):
             path += '.qb'
         try:
@@ -52,6 +125,8 @@ class FileIOMixin:
                     f.write(f"METHOD {self.sim_method}\n")
                 if self.sim_device != 'CPU':
                     f.write(f"METHOD {self.sim_device}\n")
+                if self.sim_precision != 'double':
+                    f.write(f"PRECISION {self.sim_precision.upper()}\n")
                 if getattr(self, '_screen_mode', 0):
                     f.write(f"SCREEN {self._screen_mode}\n")
                 if getattr(self, '_option_base', 0):
@@ -60,8 +135,8 @@ class FileIOMixin:
                     f.write("OPTION ENDIAN BIG\n")
                 if getattr(self, '_seed', None) is not None:
                     f.write(f"SEED {self._seed}\n")
-                if getattr(self, '_noise_spec', None):
-                    f.write(f"NOISE {self._noise_spec}\n")
+                for line in self._device_lines():
+                    f.write(line + "\n")
                 # Save LOCC config if active
                 if self.locc_mode and self.locc:
                     mode = "JOINT" if self.locc.joint else "SPLIT"
@@ -96,14 +171,19 @@ class FileIOMixin:
                 # Save registers
                 for name, (start, size) in self.registers.items():
                     f.write(f"REG {name} {size}\n")
-                # Save variables (skip internal _vars and record dicts)
+                # Save variables (internal _vars skipped; a record as its DIM
+                # and one LET per field)
                 for name, val in self.variables.items():
-                    if name.startswith('_') or isinstance(val, dict):
+                    if name.startswith('_'):
                         continue
-                    if isinstance(val, str):
-                        f.write(f'LET {name} = "{val}"\n')
-                    else:
-                        f.write(f"LET {name} = {val}\n")
+                    if isinstance(val, Record):
+                        f.write(f"DIM {name} AS {val.type_name}\n")
+                        for path, leaf in _record_leaves(val):
+                            f.write(f"LET {name}.{path} = {_literal(leaf)}\n")
+                        continue
+                    if not isinstance(val, (int, float, str)):
+                        continue        # arrays of results, matrices, records of other kinds
+                    f.write(f"LET {name} = {_literal(val)}\n")
                 # Save program (exclude lines injected by IMPORT)
                 imported: set[int] = getattr(self, '_imported_lines', set())
                 saved = [n for n in sorted(self.program.keys()) if n not in imported]
@@ -113,8 +193,51 @@ class FileIOMixin:
         except Exception as e:
             self.io.writeln(f"?SAVE ERROR: {e}")
 
+    def _device_lines(self) -> list[str]:
+        """The session lines that rebuild the noise model, device model and
+        logical-qubit mode on LOAD (SAVE writes them after QUBITS and METHOD)."""
+        lines: list[str] = []
+        lm = self._logical_mode
+        edges = ', '.join(f"{a}-{b}" for a, b in
+                          sorted({tuple(sorted(e)) for e in self._coupling_map or ()}))
+        if self._device_spec:
+            lines.append(f"DEVICE {self._device_spec}")
+            if edges:
+                lines.append(f"COUPLING {edges}")
+            elif self._device_spec.split()[0] not in ('all', 'full'):
+                lines.append("COUPLING OFF")
+        else:
+            spec = (lm.get('saved_noise') or (None, None))[1] if lm else self._noise_spec
+            if spec:
+                lines.append(f"NOISE {spec}")
+            if edges:
+                lines.append(f"COUPLING {edges}")
+        if self._basis_gates:
+            lines.append("BASIS " + ', '.join(self._basis_gates))
+        if lm:
+            if lm['code'] == 'STEANE':
+                lines.append(f"LQUBITS {lm['n']} CODE STEANE PHYS {lm['p']:g}")
+            else:
+                mode = (' ENCODED' if lm.get('force_encoded')
+                        else '' if lm.get('encoded') else ' MODEL')
+                lines.append(f"LQUBITS {lm['n']} CODE {lm['code']} {lm['d']} "
+                             f"PHYS {lm['p']:g}{mode}")
+        return lines
+
+    def _load_bas(self, path: str) -> int:
+        """Load QBASIC source (.bas): every non-blank line is a program line;
+        numbered lines keep their numbers and the rest are numbered to fit
+        around them. Returns the number of lines loaded."""
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            numbered = number_source(f.read().splitlines())
+        self.cmd_new(silent=True)
+        for num, text in numbered:
+            self.process(f"{num} {text}", track_undo=False)
+        return len(numbered)
+
     def cmd_load(self, rest: str) -> None:
-        """LOAD <filename> — clear state and load a .qb program file."""
+        """LOAD <filename> — clear state and load a .qb program file (or QBASIC
+        source, .bas, whose unnumbered lines are numbered)."""
         if not rest:
             self.io.writeln("?USAGE: LOAD <filename>")
             return
@@ -130,6 +253,14 @@ class FileIOMixin:
             path += '.qb'
         if not os.path.isfile(path):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
+            return
+        if path.lower().endswith('.bas'):
+            try:
+                count = self._load_bas(path)
+            except (ValueError, OSError) as e:
+                self.io.writeln(f"?LOAD ERROR: {e}")
+                return
+            self.io.writeln(f"LOADED {path} ({count} lines)")
             return
         try:
             prev_qubits = self.num_qubits
@@ -417,7 +548,7 @@ class FileIOMixin:
             self.io.writeln(f"?SAVEPNG ERROR: {e}")
 
     def cmd_dir(self, rest: str = '') -> None:
-        """List .qb files in current or specified directory."""
+        """DIR [path] — list the .qb files in a directory."""
         if rest.strip():
             path = self._sanitize_path(rest)
         else:
@@ -554,6 +685,8 @@ class FileIOMixin:
 
     def _init_file_handles(self) -> None:
         self._file_handles: dict[int, Any] = {}
+        # Values read from a line by INPUT # and not yet assigned, per handle.
+        self._file_fields: dict[int, list[str]] = {}
         self._lprint_path: str | None = None
         self._imported_lines: set[int] = set()
 
@@ -592,120 +725,176 @@ class FileIOMixin:
             return None
         return str(resolved)
 
-    def cmd_open(self, rest: str) -> None:
-        """OPEN file FOR INPUT|OUTPUT|APPEND AS #n [ENCODING "enc"]"""
+    def _open_file(self, rest: str) -> tuple[int, str, str]:
+        """Open a file handle for `OPEN file FOR mode AS #n [ENCODING "enc"]`;
+        returns (handle, path, mode) or raises with the QBASIC error."""
         m = RE_OPEN.match(f"OPEN {rest}")
         if not m:
-            self.io.writeln('?USAGE: OPEN "file" FOR INPUT|OUTPUT|APPEND AS #n [ENCODING "enc"]')
-            return
+            raise ValueError('SYNTAX ERROR: OPEN "file" FOR INPUT|OUTPUT|APPEND|RANDOM AS #n')
         path, mode_str, handle = m.group(1).strip(), m.group(2).upper(), int(m.group(3))
         encoding = m.group(4).strip() if m.group(4) else 'utf-8'
-        try:
-            path = self._sanitize_path(path)
-        except ValueError as e:
-            self.io.writeln(f"?OPEN ERROR: {e}")
-            return
+        if handle in self._file_handles:
+            raise RuntimeError(f"FILE ALREADY OPEN: #{handle}")
+        path = self._sanitize_path(path)
         checked = self._check_agent_path(path, "OPEN")
         if checked is None:
-            return
+            raise RuntimeError(f"PERMISSION DENIED: {path} is outside the working directory")
         path = checked
-        mode_map = {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a', 'RANDOM': 'r+'}
-        mode = mode_map.get(mode_str, 'r')
+        mode = {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a', 'RANDOM': 'r+'}.get(mode_str, 'r')
+        if mode_str == 'INPUT' and not os.path.isfile(path):
+            raise RuntimeError(f"FILE NOT FOUND: {path}")
+        binary = encoding.lower() == 'binary'
+        if mode_str == 'RANDOM' and not os.path.isfile(path):
+            open(path, 'wb').close()
+        if binary:
+            self._file_handles[handle] = open(path, mode + 'b')
+        else:
+            self._file_handles[handle] = open(path, mode, encoding=encoding)
+        return handle, path, mode_str
+
+    def cmd_open(self, rest: str) -> None:
+        """OPEN "file" FOR INPUT|OUTPUT|APPEND|RANDOM AS #n [ENCODING "enc"] — open a file handle."""
         try:
-            if encoding.lower() == 'binary':
-                bin_mode = mode + 'b'
-                if mode_str == 'RANDOM' and not os.path.isfile(path):
-                    open(path, 'wb').close()
-                    self.io.writeln(f"  (created new file {path})")
-                if mode_str == 'RANDOM' and os.path.isfile(path):
-                    self.io.writeln(f"  (opening existing file {path} for random access)")
-                self._file_handles[handle] = open(path, bin_mode)
-            else:
-                if mode_str == 'RANDOM' and not os.path.isfile(path):
-                    open(path, 'w', encoding=encoding).close()
-                    self.io.writeln(f"  (created new file {path})")
-                if mode_str == 'RANDOM' and os.path.isfile(path):
-                    self.io.writeln(f"  (opening existing file {path} for random access)")
-                self._file_handles[handle] = open(path, mode, encoding=encoding)
-            self.io.writeln(f"OPENED #{handle} ({path}, {mode_str})")
+            handle, path, mode_str = self._open_file(rest)
         except Exception as e:
             self.io.writeln(f"?OPEN ERROR: {e}")
+            return
+        self.io.writeln(f"OPENED #{handle} ({path}, {mode_str})")
+
+    def _close_file(self, handle: int) -> bool:
+        f = self._file_handles.pop(handle, None)
+        self._file_fields.pop(handle, None)
+        if f is None:
+            return False
+        f.close()
+        return True
 
     def cmd_close(self, rest: str) -> None:
-        """CLOSE #n — close a file handle."""
+        """CLOSE [#n] — close a file handle (every handle with no number)."""
+        if not rest.strip():
+            for h in list(self._file_handles):
+                self._close_file(h)
+            self.io.writeln("CLOSED ALL")
+            return
         m = RE_CLOSE.match(f"CLOSE {rest}")
         if not m:
-            self.io.writeln("?USAGE: CLOSE #n")
+            self.io.writeln("?USAGE: CLOSE [#n]")
             return
         handle = int(m.group(1))
-        if handle in self._file_handles:
-            self._file_handles[handle].close()
-            del self._file_handles[handle]
+        if self._close_file(handle):
             self.io.writeln(f"CLOSED #{handle}")
         else:
             self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
 
-    def _exec_print_file(self, stmt: str, run_vars: dict[str, Any]) -> bool:
-        """Handle PRINT #n, data during execution."""
-        m = RE_PRINT_FILE.match(stmt)
-        if not m:
-            return False
-        if getattr(self.io, 'replay', False):
-            return True     # later live shots write nothing; the first shot did
-        handle = int(m.group(1))
-        data = m.group(2).strip()
+    def _writable(self, handle: int):
+        """The open file for handle, or None after reporting why it cannot
+        be written."""
         if handle not in self._file_handles:
             self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
-            return True
+            return None
         f = self._file_handles[handle]
         fmode = getattr(f, 'mode', '')
         if fmode.startswith('r') and '+' not in fmode:
             self.io.writeln(f"?HANDLE #{handle} NOT OPEN FOR WRITING")
-            return True
-        # Evaluate data
-        if (data.startswith('"') and data.endswith('"')):
-            f.write(data[1:-1] + '\n')
-        else:
-            try:
-                val = self._eval_with_vars(data, run_vars) if run_vars else self.eval_expr(data)
-                f.write(str(val) + '\n')
-            except Exception:
-                f.write(data + '\n')
-        f.flush()
+            return None
+        return f
+
+    def _write_to_handle(self, handle: int, text: str, newline: bool = True) -> bool:
+        if getattr(self.io, 'replay', False):
+            return True     # later live shots write nothing; the first shot did
+        f = self._writable(handle)
+        if f is not None:
+            f.write(text + ('\n' if newline else ''))
+            f.flush()
         return True
 
-    def _exec_input_file(self, stmt: str, run_vars: dict[str, Any]) -> bool:
-        """Handle INPUT #n, var during execution."""
-        m = RE_INPUT_FILE.match(stmt)
+    def _exec_print_file(self, stmt: str, run_vars: dict[str, Any]) -> bool:
+        """PRINT #n, list — what PRINT would show, written to the file
+        (PRINT #n, USING fmt$; values formats as PRINT USING)."""
+        m = RE_PRINT_FILE.match(stmt)
         if not m:
             return False
         handle = int(m.group(1))
-        var = m.group(2)
+        data = m.group(2).strip()
+        um = re.match(r'USING\s+(.+)$', data, re.IGNORECASE)
+        if um:
+            from qubasic_core.parser import _top_split
+            head, *tail = _top_split(um.group(1), ';')
+            text, newline = self._using_text(head.strip(), ';'.join(tail), run_vars)
+        else:
+            text, newline = self._format_print(data, run_vars)
+        return self._write_to_handle(handle, text, newline)
+
+    def _readable(self, handle: int):
         if handle not in self._file_handles:
-            self.io.writeln(f"?HANDLE #{handle} NOT OPEN")
-            return True
+            raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{handle} is not open")
         f = self._file_handles[handle]
         fmode = getattr(f, 'mode', '')
         if fmode.startswith(('w', 'a')) and '+' not in fmode:
-            self.io.writeln(f"?HANDLE #{handle} NOT OPEN FOR READING")
-            return True
+            raise RuntimeError(f"BAD FILE MODE: #{handle} is not open for input")
+        return f
+
+    def _exec_input_file(self, stmt: str, run_vars: dict[str, Any]) -> bool:
+        """INPUT #n, var[, var ...] — read comma- or line-separated values;
+        reading past the end of the file is an error, as in QBASIC (test
+        EOF(n) first)."""
+        m = re.match(r'INPUT\s*#\s*(\d+)\s*,\s*(.+)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        handle = int(m.group(1))
+        f = self._readable(handle)
+        pending = self._file_fields.setdefault(handle, [])
+        from qubasic_core.stmt_handlers import _input_fields, _parse_input_number
+        for target in self._split_arg_list(m.group(2)):
+            lv = self._lvalue(target, run_vars)
+            while not pending:
+                line = f.readline()
+                if not line:
+                    raise RuntimeError("INPUT PAST END OF FILE")
+                pending.extend(_input_fields(line.rstrip('\r\n')))
+            field = pending.pop(0)
+            if is_string_kind(self._lvalue_kind(lv)):
+                value: Any = field
+            else:
+                value = _parse_input_number(field.strip()) if field.strip() else 0
+                if value is None:
+                    from qubasic_core.strings import _val_fn
+                    value = _val_fn(field)
+            self._write_lvalue(lv, value, run_vars)
+        return True
+
+    def _exec_line_input_file(self, stmt: str, run_vars: dict[str, Any]) -> bool:
+        """LINE INPUT #n, var$ — the next whole line of the file."""
+        m = re.match(r'LINE\s+INPUT\s*#\s*(\d+)\s*,\s*(.+)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        handle = int(m.group(1))
+        f = self._readable(handle)
+        self._file_fields.pop(handle, None)
         line = f.readline()
         if not line:
-            run_vars[var] = 0
-            self.variables[var] = 0
-        else:
-            line = line.strip()
-            if var.endswith('$'):
-                run_vars[var] = line
-                self.variables[var] = line
-            else:
-                try:
-                    val = float(line) if '.' in line else int(line)
-                except ValueError:
-                    val = line
-                run_vars[var] = val
-                self.variables[var] = val
+            raise RuntimeError("INPUT PAST END OF FILE")
+        self._write_lvalue(self._lvalue(m.group(2), run_vars), line.rstrip('\r\n'), run_vars)
         return True
+
+    def _freefile(self) -> int:
+        """FREEFILE: the lowest file number not in use."""
+        n = 1
+        while n in self._file_handles:
+            n += 1
+        return n
+
+    def _lof(self, handle: Any) -> int:
+        """LOF(n): length of the open file in bytes."""
+        h = int(handle)
+        if h not in self._file_handles:
+            raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{h} is not open")
+        f = self._file_handles[h]
+        try:
+            f.flush()
+        except Exception:
+            pass
+        return os.fstat(f.fileno()).st_size
 
     def _exec_lprint(self, stmt: str, run_vars: dict[str, Any]) -> bool:
         """Handle LPRINT data — output to log file or stderr."""
@@ -729,18 +918,20 @@ class FileIOMixin:
             self.io.writeln(text)
         return True
 
-    def _eof(self, handle: float) -> float:
-        """EOF(n) — return 1 if at end of file, 0 otherwise."""
+    def _eof(self, handle: float) -> int:
+        """EOF(n) — -1 (true) at the end of the file, else 0."""
         h = int(handle)
         if h not in self._file_handles:
-            return 1.0
+            return -1
+        if self._file_fields.get(h):
+            return 0
         f = self._file_handles[h]
         pos = f.tell()
         try:
             ch = f.read(1)
             if not ch:
-                return 1.0
+                return -1
             f.seek(pos)
         except (UnicodeDecodeError, Exception):
-            return 1.0
-        return 0.0
+            return -1
+        return 0

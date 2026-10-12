@@ -5,12 +5,12 @@ from __future__ import annotations
 import os
 import re
 import hashlib
-from typing import Any
 
 from qubasic_core.engine import RE_CHAIN, RE_MERGE, RE_DEF_BEGIN
+from qubasic_core.host import HostState
 
 
-class ProgramMgmtMixin:
+class ProgramMgmtMixin(HostState):
     """Program management commands for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.program, self.variables,
@@ -322,7 +322,7 @@ class ProgramMgmtMixin:
     # ── Introspection ─────────────────────────────────────────────────
 
     def cmd_defs(self) -> None:
-        """List all defined subroutines."""
+        """DEFS — list the DEF subroutines and the program's SUB and FUNCTION blocks."""
         found = False
         if self.subroutines:
             for name, sub in self.subroutines.items():
@@ -348,7 +348,7 @@ class ProgramMgmtMixin:
             self.io.writeln("NO SUBROUTINES DEFINED")
 
     def cmd_regs(self) -> None:
-        """List all named registers with their qubit ranges."""
+        """REGS — list the named registers and their qubit ranges."""
         if not self.registers:
             self.io.writeln("NO REGISTERS DEFINED")
             return
@@ -356,7 +356,7 @@ class ProgramMgmtMixin:
             self.io.writeln(f"  {name}[0:{size}] -> qubits {start}-{start+size-1}")
 
     def cmd_vars(self) -> None:
-        """List all variables and their current values."""
+        """VARS — list the variables and their values."""
         if not self.variables:
             self.io.writeln("NO VARIABLES SET")
             return

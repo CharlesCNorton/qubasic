@@ -420,12 +420,15 @@ class TestCommands(unittest.TestCase):
         else:
             self.assertEqual(self.t.sim_device, 'GPU')
 
-    def test_variable_substitution(self):
-        self.assertIn('PI', self.t._substitute_vars('RX PI, 0', {}))
-        r = self.t._substitute_vars('H 0', {'H': 99})
-        self.assertIn('H', r); self.assertNotIn('99', r)
-        r2 = self.t._substitute_vars('RX angle, qubit', {'angle': '0.5', 'qubit': '2'})
-        self.assertIn('0.5', r2); self.assertIn('2', r2)
+    def test_variables_in_gate_operands(self):
+        t = QBasicTerminal(); t.num_qubits = 3
+        t.variables.update({'angle': 0.5, 'qubit': 2})
+        t.process('10 RX angle, qubit', track_undo=False)
+        capture(t.cmd_run)
+        inst = t.last_circuit.data[0]
+        self.assertEqual(inst.operation.name, 'rx')
+        self.assertAlmostEqual(float(inst.operation.params[0]), 0.5)
+        self.assertEqual(t.last_circuit.find_bit(inst.qubits[0]).index, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1875,7 +1878,7 @@ class TestFrontier(unittest.TestCase):
 
 
 class TestQECExtras(unittest.TestCase):
-    """Surface code, union-find decoder, magic-state distillation, lattice surgery."""
+    """Surface code, matching decoder, magic-state distillation, lattice surgery."""
 
     def test_surface_code_valid_and_distance(self):
         from qubasic_core.qec import _anticommute, _pmul
@@ -1894,7 +1897,7 @@ class TestQECExtras(unittest.TestCase):
                 res = _pmul(err, dec.get(synd, 'I' * 9))
                 self.assertFalse(_anticommute(res, c['lx']) or _anticommute(res, c['lz']))
 
-    def test_union_find_decoder(self):
+    def test_matching_decoder(self):
         from qubasic_core.qec import _anticommute, _pmul
         t = QBasicTerminal()
         # Corrects all weight-1 errors on repetition and surface (matching codes).
@@ -1920,11 +1923,15 @@ class TestQECExtras(unittest.TestCase):
         self.assertLess(p_out, 5e-3)                 # cubic suppression (~35 p^3)
 
     def test_lattice_surgery(self):
-        t = QBasicTerminal(); t.shots = 500; t._seed = 1
-        _, out_even = capture(t.cmd_lattice, '0 0')
-        _, out_odd = capture(t.cmd_lattice, '0 1')
-        self.assertIn('even', out_even)
-        self.assertIn('odd', out_odd)
+        # Z_A Z_B of |0>|0> is +1 and of |0>|1> is -1 in every shot, and the
+        # split readout agrees with the merge outcome.
+        t = QBasicTerminal(); t._seed = 1
+        capture(t.cmd_lattice, '0 0 SHOTS 60')
+        self.assertEqual(t.variables['_LATTICE_PLUS'], 1.0)
+        self.assertEqual(t.variables['_LATTICE_AGREE'], 1.0)
+        capture(t.cmd_lattice, '0 1 SHOTS 60')
+        self.assertEqual(t.variables['_LATTICE_PLUS'], 0.0)
+        self.assertEqual(t.variables['_LATTICE_AGREE'], 1.0)
 
 
 class TestResources(unittest.TestCase):

@@ -3,25 +3,29 @@
   LQUBITS 2 CODE STEANE PHYS 1e-3     2 logical qubits, encoded Steane simulation
   LQUBITS 2 CODE SURFACE 5            2 logical qubits, rotated surface d=5
   LQUBITS 2 CODE SURFACE 5 PHYS 1e-3  ...at physical error rate p
+  LQUBITS 2 CODE SURFACE 5 MODEL      the modeled logical channel only
   LQUBITS STATUS                      Show the active logical configuration
   LQUBITS OFF                         Back to physical qubits
 
 While active, program gates address LOGICAL qubits and the histogram is over
 logical outcomes.
 
-CODE STEANE runs the program encoded: each logical qubit is a [[7,1,3]] block
-of 7 physical qubits, logical Clifford gates are transversal, depolarizing
-noise at the physical rate follows every physical gate and readout, a round
-of syndrome extraction (ideal, with conditional corrections) follows every
-logical gate, and readout is decoded block by block. The report compares the
-decoded histogram with the ideal one.
+CODE STEANE runs the program encoded as a circuit: each logical qubit is a
+[[7,1,3]] block of 7 physical qubits, logical Clifford gates are transversal,
+depolarizing noise at the physical rate follows every physical gate and
+readout, a round of syndrome extraction (ideal, with conditional
+corrections) follows every logical gate, and readout is decoded block by
+block. The report compares the decoded histogram with the ideal one.
 
-The other codes (SURFACE, REP, SHOR) model the code: every operation carries
-the code's per-op logical error channel (X/Z flips at the code-capacity
-logical rate for the chosen code, distance, and physical p), measurement
-carries a logical readout flip, and RUN appends a lattice-surgery compilation
-report (surgery ops, syndrome rounds, physical qubits, wall time, error
-budget).
+CODE SURFACE, REP and SHOR run a program of transversal gates encoded too,
+by Pauli frames with a decoder after every logical gate (encoded.py). A
+program with other gates (T, rotations), and every program under MODEL, runs
+on the modeled code instead: every operation carries the code's per-op
+logical error channel (X/Z flips at the code-capacity logical rate for the
+chosen code, distance, and physical p), measurement carries a logical
+readout flip, and RUN appends a lattice-surgery compilation report (surgery
+ops, syndrome rounds, physical qubits, wall time, error budget). Other
+commands (SAMPLE, SWEEP, ...) see the modeled channel.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from __future__ import annotations
 from math import comb
 
 import numpy as np
+from qubasic_core.host import HostState
 
 # Steane [[7,1,3]] code: the Hamming parity checks, shared by its X and Z
 # stabilizers. Check k covers the qubits q whose q+1 has bit 2-k set, so a
@@ -57,7 +62,7 @@ def steane_decode(bits: str) -> int:
     return sum(b) & 1
 
 
-class LogicalMixin:
+class LogicalMixin(HostState):
     """LQUBITS logical-qubit mode for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.io, self.variables, self.cmd_qubits,
@@ -100,19 +105,26 @@ class LogicalMixin:
     # ── Command ─────────────────────────────────────────────────────────
 
     def cmd_lqubits(self, rest: str) -> None:
-        """LQUBITS <n> CODE <name> [d] [PHYS p] | STATUS | OFF — logical-qubit mode.
+        """LQUBITS <n> CODE <name> [d] [PHYS p] [MODEL|ENCODED] | STATUS | OFF — logical-qubit mode.
 
-        Program gates then act on error-corrected logical qubits: each op is
-        followed by the code's logical error channel and RUN reports the
-        lattice-surgery compilation (ops, rounds, physical qubits, budget)."""
+        Program gates then act on error-corrected logical qubits. RUN simulates
+        a program of transversal gates encoded (STEANE as a circuit, SURFACE,
+        REP and SHOR by Pauli frames); otherwise each op carries the code's
+        logical error channel and RUN reports the lattice-surgery compilation
+        (ops, rounds, physical qubits, budget). MODEL always uses the channel,
+        ENCODED refuses programs the code cannot run transversally."""
         arg = rest.strip()
         if not arg or arg.upper() == 'STATUS':
             lm = self._logical_mode
             if not lm:
                 self.io.writeln("LQUBITS OFF (physical mode)")
-            elif lm.get('encoded'):
+            elif lm.get('encoded') and lm['code'] == 'STEANE':
                 self.io.writeln(f"LQUBITS {lm['n']}: STEANE [[7,1,3]] phys p={lm['p']:g}  "
                                 f"(encoded simulation, {7 * lm['n'] + 1} physical qubits)")
+            elif lm.get('encoded'):
+                self.io.writeln(f"LQUBITS {lm['n']}: {lm['code']} d={lm['d']} phys p={lm['p']:g}  "
+                                f"(encoded Pauli-frame simulation of transversal programs; "
+                                f"modeled p_L={lm['pl']:.3e}/op otherwise)")
             else:
                 self.io.writeln(f"LQUBITS {lm['n']}: {lm['code']} d={lm['d']} "
                                 f"phys p={lm['p']:g}  p_L={lm['pl']:.3e}/op (model)")
@@ -129,11 +141,15 @@ class LogicalMixin:
             self.io.writeln(f"LQUBITS OFF — back to physical qubits{restored}")
             return
         import re as _re
+        mode = _re.search(r'\s+(MODEL|ENCODED)\s*$', arg, _re.IGNORECASE)
+        mode_word = mode.group(1).upper() if mode else ''
+        if mode:
+            arg = arg[:mode.start()]
         m = _re.match(r'(\d+)\s+CODE\s+(\w+)(?:\s+(\d+))?(?:\s+PHYS\s+(\S+))?\s*$',
                       arg, _re.IGNORECASE)
         if not m:
-            self.io.writeln("?USAGE: LQUBITS <n> CODE <SURFACE|REP|STEANE|SHOR> [d] [PHYS p]"
-                            "  |  LQUBITS OFF")
+            self.io.writeln("?USAGE: LQUBITS <n> CODE <SURFACE|REP|STEANE|SHOR> [d] [PHYS p] "
+                            "[MODEL|ENCODED]  |  LQUBITS OFF")
             return
         try:
             n = int(m.group(1))
@@ -175,15 +191,21 @@ class LogicalMixin:
             self._noise_model = nm
             self._noise_spec = None
             self._logical_mode = {'n': n, 'code': cname, 'd': d, 'p': p, 'pl': pl,
-                                  'saved_noise': saved}
+                                  'saved_noise': saved, 'encoded': mode_word != 'MODEL',
+                                  'force_encoded': mode_word == 'ENCODED'}
             self.cmd_qubits(str(n))
             patch = 2 * d * d - 1 if cname in ('SURFACE', 'SURF') else \
                 self._qec_code(cname, d)['n']
             self._logical_mode['patch'] = patch
-            self.io.writeln(f"LQUBITS {n}: {cname} d={d}, physical p={p:g}")
-            self.io.writeln(f"  p_L = {pl:.3e} per logical op "
-                            f"({patch} physical qubits per patch; modeled as a "
-                            f"logical error channel per operation)")
+            self.io.writeln(f"LQUBITS {n}: {cname} d={d}, physical p={p:g} "
+                            f"({patch} physical qubits per patch)")
+            if mode_word != 'MODEL':
+                self.io.writeln("  RUN simulates a program of transversal gates encoded (Pauli "
+                                "frames, a decoder after every logical gate); other programs use "
+                                f"the modeled channel, p_L = {pl:.3e} per op")
+                return
+            self.io.writeln(f"  p_L = {pl:.3e} per logical op (the modeled logical error "
+                            f"channel per operation)")
             if pl > 0.05:
                 self.io.writeln("  WARNING: p is at or above threshold for this "
                                 "distance — logical qubits are worse than physical")

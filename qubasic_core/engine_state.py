@@ -11,16 +11,18 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from qubasic_core.engine import (
-    DEFAULT_QUBITS, DEFAULT_SHOTS, MAX_LOOP_ITERATIONS, MAX_UNDO_STACK,
+    DEFAULT_QUBITS, DEFAULT_SHOTS, MAX_LOOP_ITERATIONS,
 )
-from qubasic_core.io_protocol import StdIOPort, IOPort
+from qubasic_core.io_protocol import NullIO, StdIOPort, IOPort
 from qubasic_core.parser import parse_stmt
+from qubasic_core.host import HostState
 
 
-class Engine:
+class Engine(HostState):
     """Standalone execution state container.
 
     Holds all program state that was previously scattered across
@@ -47,8 +49,10 @@ class Engine:
         # amplitude_damping, or phase_flip; 'none' if unsupported there).
         self._noise_locc_type: str = 'none'
         self._noise_locc_param: float = 0.0
-        # The original NOISE command args, for SAVE round-tripping.
+        # The NOISE model as its command arguments, and the DEVICE that built
+        # the model (topology, qubits, T1, T2), for SAVE round-tripping.
         self._noise_spec: str | None = None
+        self._device_spec: str | None = None
         self._seed: int | None = None
         self._max_iterations: int = MAX_LOOP_ITERATIONS
         self._include_depth: int = 0
@@ -123,6 +127,16 @@ class Engine:
         """Record a zero-argument callable that produces the state on demand."""
         self._last_sv = None
         self._state_source = source
+
+    @contextmanager
+    def _silenced(self) -> Iterator[None]:
+        """Run a block with its output discarded (the inner runs of COMPARE,
+        PLOT, ANIMATE, MINIMIZE, GRADIENT and STATS)."""
+        old, self.io = self.io, NullIO()
+        try:
+            yield
+        finally:
+            self.io = old
 
     def _get_parsed(self, line_num: int) -> Any:
         """Get parsed Stmt for a line, lazily parsing if needed.

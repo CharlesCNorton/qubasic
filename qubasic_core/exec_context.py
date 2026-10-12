@@ -10,7 +10,7 @@ from typing import Any
 class ExecContext:
     """Mutable execution state passed through the entire call tree."""
 
-    sorted_lines: list[int]
+    sorted_lines: Any  # the CompiledProgram (indexing gives line numbers)
     ip: int
     run_vars: Any  # dict[str, Any] or a Scope wrapper
     loop_stack: list[dict[str, Any]] = field(default_factory=list)
@@ -22,6 +22,3 @@ class ExecContext:
 
     # Backend abstraction (QiskitBackend or LOCCRegBackend)
     backend: Any = None
-
-    # Pending ResumePoint: the statement within line `ip` to continue from
-    resume: Any = None

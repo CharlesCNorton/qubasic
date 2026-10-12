@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import sys
+from qubasic_core.host import HostState
 
 
-class ScreenMixin:
+class ScreenMixin(HostState):
     """Screen control commands for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self._screen_mode, self.last_counts,

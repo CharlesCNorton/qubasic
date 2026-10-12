@@ -15,12 +15,12 @@ measures. All offline on Qiskit/Aer/numpy.
 
 from __future__ import annotations
 
-import re
 
 import numpy as np
+from qubasic_core.host import HostState
 
 
-class BenchmarkingMixin:
+class BenchmarkingMixin(HostState):
     """XEB, quantum volume, RB variants, GST, and entanglement measures.
 
     Requires: TerminalProtocol — uses self.num_qubits, self.shots, self._seed,
@@ -197,7 +197,6 @@ class BenchmarkingMixin:
         if g not in ('H', 'S'):
             self.io.writeln("?RBINT gate must be H or S")
             return
-        cliffords = self._single_qubit_cliffords()
         gmat = {'H': np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2),
                 'S': np.array([[1, 0], [0, 1j]], dtype=complex)}[g]
         max_len = int(parts[1]) if len(parts) > 1 else 32

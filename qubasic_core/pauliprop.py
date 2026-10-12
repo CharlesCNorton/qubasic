@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 
 import numpy as np
+from qubasic_core.host import HostState
 
 _P1 = {
     'I': np.eye(2, dtype=complex),
@@ -23,7 +24,7 @@ _P1 = {
 }
 
 
-class PauliPropMixin:
+class PauliPropMixin(HostState):
     """Sparse Pauli-dynamics observable estimator for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self.num_qubits, self.build_circuit(),

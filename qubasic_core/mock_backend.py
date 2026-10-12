@@ -7,7 +7,6 @@ Use for tests that verify REPL behavior, not quantum correctness.
 from __future__ import annotations
 
 import random
-from typing import Any
 from unittest.mock import MagicMock
 
 
@@ -58,12 +57,24 @@ class MockAerSimulator:
         return mock_job
 
 
+# Modules that bind AerSimulator / transpile at import time.
+_SIMULATOR_USERS = ('run_pipeline', 'terminal', 'analysis', 'sweep', 'config_commands')
+_TRANSPILE_USERS = ('run_pipeline', 'terminal', 'analysis', 'sweep', 'config_commands',
+                    'executor')
+
+
+def _identity_transpile(qc, backend=None, **kwargs):
+    return qc
+
+
 def patch_aer(monkeypatch):
-    """Patch AerSimulator with MockAerSimulator and transpile with identity."""
-    monkeypatch.setattr('qubasic_core.terminal.AerSimulator', MockAerSimulator)
-    monkeypatch.setattr('qubasic_core.terminal.transpile', lambda qc, backend, **kw: qc)
-    monkeypatch.setattr('qubasic_core.analysis.AerSimulator', MockAerSimulator)
-    monkeypatch.setattr('qubasic_core.analysis.transpile', lambda qc, backend, **kw: qc)
-    monkeypatch.setattr('qubasic_core.sweep.AerSimulator', MockAerSimulator)
-    monkeypatch.setattr('qubasic_core.sweep.transpile', lambda qc, backend, **kw: qc)
-    monkeypatch.setattr('qubasic_core.executor.transpile', lambda qc, backend, **kw: qc)
+    """Replace AerSimulator with MockAerSimulator and transpile with the
+    identity in every module that imports them, so RUN, SWEEP and the
+    analysis commands return uniform random counts without simulating."""
+    import importlib
+    for name in _SIMULATOR_USERS:
+        monkeypatch.setattr(importlib.import_module(f'qubasic_core.{name}'),
+                            'AerSimulator', MockAerSimulator)
+    for name in _TRANSPILE_USERS:
+        monkeypatch.setattr(importlib.import_module(f'qubasic_core.{name}'),
+                            'transpile', _identity_transpile)

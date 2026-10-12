@@ -1,10 +1,10 @@
 """QUBASIC quantum error correction.
 
-Stabilizer codes with an optimal (minimum-weight lookup) decoder, logical error
-rates, and threshold sweeps, computed by classical Pauli-frame simulation (no
-statevector needed, so it is exact and fast). Built-in codes: the repetition
-(bit-flip) code at any odd distance, the [[7,1,3]] Steane code, and the [[9,1,3]]
-Shor code.
+Stabilizer codes with a minimum-weight lookup decoder and an exact matching
+decoder, logical error rates, and threshold sweeps, computed by classical
+Pauli-frame simulation (no statevector needed, so it is exact and fast).
+Built-in codes: the repetition (bit-flip) code at any odd distance, the
+[[7,1,3]] Steane code, the [[9,1,3]] Shor code and the rotated surface code.
 
   QEC LIST                       List the built-in codes
   QEC STEANE                     Show a code's stabilizers and logical operators
@@ -14,10 +14,10 @@ Shor code.
 
 from __future__ import annotations
 
-import re
 import itertools
 
 import numpy as np
+from qubasic_core.host import HostState
 
 # Phase-free single-qubit Pauli multiplication (we only need the group structure).
 _PMUL = {
@@ -50,7 +50,7 @@ def _weight(p: str) -> int:
     return sum(1 for c in p if c != 'I')
 
 
-class QECMixin:
+class QECMixin(HostState):
     """Stabilizer codes, decoding, and logical error rates for QBasicTerminal.
 
     Requires: TerminalProtocol — uses self._eval_with_vars(), self._seed, self.io.
@@ -386,8 +386,27 @@ class QECMixin:
             which = rng.integers(0, 3, (trials, n))          # 0 X, 1 Y, 2 Z
             ex = (hit & (which != 2)).astype(np.uint8)
             ez = (hit & (which != 0)).astype(np.uint8)
-        synd = ((ex.astype(np.int64) @ b['Sz'].T.astype(np.int64)
+        synd = self._syndromes(code, ex, ez)
+        rec_x, rec_z = self._decode_batch(code, synd, decoder)
+        res_x = ex ^ rec_x
+        res_z = ez ^ rec_z
+        lxx, lxz = b['LX']
+        lzx, lzz = b['LZ']
+        fail = (((res_x.astype(np.int64) @ lxz + res_z.astype(np.int64) @ lxx) & 1)
+                | ((res_x.astype(np.int64) @ lzz + res_z.astype(np.int64) @ lzx) & 1))
+        return float(np.mean(fail))
+
+    def _syndromes(self, code: dict, ex: np.ndarray, ez: np.ndarray) -> np.ndarray:
+        """Syndrome bits (rows: error samples, columns: the code's stabilizers)
+        of X parts ex and Z parts ez."""
+        b = self._qec_binary(code)
+        return ((ex.astype(np.int64) @ b['Sz'].T.astype(np.int64)
                  + ez.astype(np.int64) @ b['Sx'].T.astype(np.int64)) & 1).astype(np.uint8)
+
+    def _decode_batch(self, code: dict, synd: np.ndarray, decoder: str) -> tuple[np.ndarray, np.ndarray]:
+        """(X recovery, Z recovery) for each syndrome row, by the lookup table
+        or by matching; each distinct syndrome is decoded once."""
+        n = code['n']
         keys, inverse = np.unique(np.packbits(synd, axis=1, bitorder='little'),
                                   axis=0, return_inverse=True)
         inverse = np.asarray(inverse).reshape(-1)
@@ -397,20 +416,16 @@ class QECMixin:
         table = self._qec_lookup_table(code) if decoder == 'lookup' else None
         for k, packed in enumerate(keys):
             bits = np.unpackbits(packed, bitorder='little')[:m]
+            if not bits.any():
+                continue
             if table is not None:
-                s = int(sum(int(v) << i for i, v in enumerate(bits)))
-                xm, zm = table.get(s, (0, 0))
+                s_val = int(sum(int(v) << i for i, v in enumerate(bits)))
+                xm, zm = table.get(s_val, (0, 0))
                 rec_x[k] = [(xm >> q) & 1 for q in range(n)]
                 rec_z[k] = [(zm >> q) & 1 for q in range(n)]
             else:
                 rec_x[k], rec_z[k] = self._match_recovery(code, bits)
-        res_x = ex ^ rec_x[inverse]
-        res_z = ez ^ rec_z[inverse]
-        lxx, lxz = b['LX']
-        lzx, lzz = b['LZ']
-        fail = (((res_x.astype(np.int64) @ lxz + res_z.astype(np.int64) @ lxx) & 1)
-                | ((res_x.astype(np.int64) @ lzz + res_z.astype(np.int64) @ lzx) & 1))
-        return float(np.mean(fail))
+        return rec_x[inverse], rec_z[inverse]
 
     def cmd_distill(self, rest: str) -> None:
         """DISTILL <p> [trials] — 15-to-1 magic-state (T-state) distillation.
@@ -440,7 +455,7 @@ class QECMixin:
                         errors += 1
             acc = accepted / trials
             p_out = errors / accepted if accepted else 0.0
-            self.io.writeln(f"\n  15-to-1 magic-state distillation:")
+            self.io.writeln("\n  15-to-1 magic-state distillation:")
             self.io.writeln(f"    input error p      = {p:g}")
             self.io.writeln(f"    acceptance rate    = {acc:.4f}")
             self.io.writeln(f"    output error p_out = {p_out:.3e}   (~35 p^3 = {35 * p ** 3:.3e})")
@@ -449,50 +464,6 @@ class QECMixin:
             self.variables['_DISTILL_POUT'] = p_out
         except Exception as e:
             self.io.writeln(f"?DISTILL ERROR: {e}")
-
-    def cmd_lattice(self, rest: str) -> None:
-        """LATTICE <stateA> <stateB> — lattice-surgery logical ZZ measurement.
-
-        Encodes two distance-3 repetition logical qubits in the given logical
-        states (0, 1, +, -), then performs a merge that measures the joint
-        operator Zbar_A Zbar_B (the basis of a lattice-surgery CNOT) via an
-        ancilla, and reports the logical parity outcome."""
-        parts = rest.split()
-        if len(parts) < 2:
-            self.io.writeln("?USAGE: LATTICE <stateA> <stateB>   (states: 0, 1, +, -)")
-            return
-        from qiskit import QuantumCircuit, transpile
-        from qiskit_aer import AerSimulator
-        try:
-            sa, sb = parts[0], parts[1]
-            # 3 data qubits per patch (A: 0-2, B: 3-5) + 1 merge ancilla (6).
-            qc = QuantumCircuit(7, 1)
-
-            def encode(base, state):
-                if state in ('1',):
-                    qc.x(base)
-                elif state in ('+', '-'):
-                    qc.h(base)
-                    if state == '-':
-                        qc.z(base)
-                qc.cx(base, base + 1); qc.cx(base, base + 2)   # repetition encode
-            encode(0, sa); encode(3, sb)
-            # Merge: measure Zbar_A Zbar_B = Z_{A0} Z_{B0} via an ancilla.
-            anc = 6
-            qc.h(anc)
-            qc.cz(anc, 0)
-            qc.cz(anc, 3)
-            qc.h(anc)
-            qc.measure(anc, 0)
-            backend = AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
-            counts = backend.run(transpile(qc, backend), shots=max(500, self.shots)).result().get_counts()
-            par = '+1 (even)' if counts.get('0', 0) >= counts.get('1', 0) else '-1 (odd)'
-            self.io.writeln(f"\n  Lattice surgery: merge of |{sa}>_L (A) and |{sb}>_L (B)")
-            self.io.writeln(f"    joint Zbar_A Zbar_B measurement -> {par}   {dict(counts)}")
-            self.io.writeln(f"    (a deterministic joint parity for computational inputs; the "
-                            f"building block of a lattice-surgery CNOT)")
-        except Exception as e:
-            self.io.writeln(f"?LATTICE ERROR: {e}")
 
     # ── Commands ────────────────────────────────────────────────────────
 
@@ -509,8 +480,10 @@ class QECMixin:
             self.io.writeln("    SHOR        [[9,1,3]] code")
             self.io.writeln("    SURFACE [d] rotated surface code, odd distance d (default 3)")
             self.io.writeln("    BB [l m]    bivariate-bicycle qLDPC (6 6 -> [[72,12,6]], 12 6 -> [[144,12,12]])")
-            self.io.writeln("  Decoders: optimal lookup (default), union-find (UF), pymatching (MWPM),")
-            self.io.writeln("            BP+OSD (BB codes), stim circuit-level (LOGICAL_ERROR_RATE ... CIRCUIT)")
+            self.io.writeln("  Decoders: minimum-weight lookup (LOOKUP), exact matching (MATCH, alias UF),")
+            self.io.writeln("            pymatching (MWPM), BP+OSD (BP, BB codes)")
+            self.io.writeln("  Noise:    code capacity (default), PHENOM (space-time memory),")
+            self.io.writeln("            CIRCUIT (stim circuit-level); LATTICE RATE for surgery")
             return
         parts = arg.split()
         if parts[0] == 'BB':
@@ -554,7 +527,7 @@ class QECMixin:
             u = t.upper()
             if u in self._DECODER_FLAGS:
                 decoder = self._DECODER_FLAGS[u]
-            elif u in ('CIRCUIT',):
+            elif u in ('CIRCUIT', 'PHENOM'):
                 other.add(u)
             else:
                 rest.append(t)
@@ -571,7 +544,7 @@ class QECMixin:
         return rate, self._DECODER_LABEL[chosen]
 
     def cmd_logical_error_rate(self, rest: str) -> None:
-        """LOGICAL_ERROR_RATE <code> [distance] <p> [trials] [LOOKUP|MATCH|MWPM|BP|CIRCUIT] — logical error rate.
+        """LOGICAL_ERROR_RATE <code> [distance] <p> [trials] [LOOKUP|MATCH|MWPM|BP|CIRCUIT|PHENOM] — logical error rate.
 
         Code-capacity Monte Carlo (i.i.d. physical errors, decode, count
         residual logical errors), vectorized over trials. The decoder defaults
@@ -580,18 +553,21 @@ class QECMixin:
         MATCH (alias UF) forces matching, MWPM uses pymatching when installed,
         BP the internal BP+OSD. CIRCUIT switches to circuit-level noise: stim
         syndrome-extraction circuits over d rounds decoded from the detector
-        error model (the trailing count is then shots, default 100000). BB
-        codes decode with BP+OSD."""
+        error model (the trailing count is then shots, default 100000). PHENOM
+        runs a memory experiment under phenomenological noise (data errors
+        and check-measurement errors at rate p in each of d rounds, then a
+        noisy readout) decoded by space-time matching, with no stim needed.
+        BB codes decode with BP+OSD."""
         parts = rest.split()
         if len(parts) < 2:
             self.io.writeln("?USAGE: LOGICAL_ERROR_RATE <code> [distance] <p> [trials] "
-                            "[LOOKUP|MATCH|MWPM|BP|CIRCUIT]")
+                            "[LOOKUP|MATCH|MWPM|BP|CIRCUIT|PHENOM]")
             return
         try:
             name = parts[0]
             idx = 1
             distance = 3
-            _FLAGS = tuple(self._DECODER_FLAGS) + ('CIRCUIT',)
+            _FLAGS = tuple(self._DECODER_FLAGS) + ('CIRCUIT', 'PHENOM')
             if name.upper() == 'BB':
                 # BB takes l and m instead of a distance.
                 l = m = 6
@@ -626,6 +602,11 @@ class QECMixin:
                 shots = int(tail[1]) if len(tail) > 1 else 100000
                 rounds = int(tail[2]) if len(tail) > 2 else None
                 self._qec_circuit_level(name, distance, p, shots, rounds)
+                return
+            if 'PHENOM' in other:
+                shots = int(tail[1]) if len(tail) > 1 else 10000
+                rounds = int(tail[2]) if len(tail) > 2 else None
+                self._qec_phenomenological(name, distance, p, shots, rounds)
                 return
             trials = int(tail[1]) if len(tail) > 1 else 20000
             code = self._qec_code(name, distance)

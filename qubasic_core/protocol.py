@@ -1,15 +1,11 @@
-"""Mixin contract — documents what QBasicTerminal provides to its mixins.
+"""The terminal's public surface as a runtime-checkable Protocol.
 
-Mixins (ExpressionMixin, DisplayMixin, LOCCMixin, ControlFlowMixin, DemoMixin)
-rely on attributes and methods defined on QBasicTerminal.  This Protocol
-formalizes that contract so that type checkers and future refactors can verify
-it is not broken.
-
-Usage:
-    from qubasic_core.protocol import TerminalProtocol
-
-Mixins should document ``Requires: TerminalProtocol`` in their class docstring.
-QBasicTerminal implicitly satisfies this protocol by construction.
+TerminalProtocol names the state and methods an embedding or a front end
+(the web REPL, the Jupyter kernel, qubasic_core.api) relies on, so
+``isinstance(obj, TerminalProtocol)`` tells whether an object can stand in
+for a QBasicTerminal. The full contract between the mixins themselves, every
+shared attribute and method, is HostState in qubasic_core/host.py, which
+mypy checks.
 """
 
 from __future__ import annotations
@@ -62,7 +58,6 @@ class TerminalProtocol(Protocol):
     def _eval_condition(self, cond: str, run_vars: dict[str, Any]) -> bool: ...
     def _gate_info(self, name: str) -> tuple[int, int] | None: ...
     def _resolve_qubit(self, arg: str) -> int: ...
-    def _substitute_vars(self, stmt: str, run_vars: dict[str, Any]) -> str: ...
     def _expand_statement(self, stmt: str) -> list[str]: ...
     def _tokenize_gate(self, stmt: str) -> list[str]: ...
     def _parse_syndrome(self, stmt: str, run_vars: dict[str, Any]) -> tuple[str, list[int], str] | None: ...

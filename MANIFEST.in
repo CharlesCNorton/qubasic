@@ -2,3 +2,4 @@ include LICENSE
 include README.md
 include CHANGELOG.md
 recursive-include examples *.qb
+recursive-include examples *.bas

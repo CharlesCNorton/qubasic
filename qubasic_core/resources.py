@@ -11,10 +11,8 @@ reports circuit optimization. All offline.
 
 from __future__ import annotations
 
-import math
-import re
 
-import numpy as np
+from qubasic_core.host import HostState
 
 # Surface-code logical error rate per code cycle, p_L = A (p / p_th)^((d+1)/2)
 # with A = 0.1 and p_th = 0.01 (Litinski, "A Game of Surface Codes", 2019),
@@ -61,7 +59,7 @@ def heavy_hex_edges(n: int) -> list[list[int]]:
     return [list(e) for e in sorted(edges)]
 
 
-class ResourceMixin:
+class ResourceMixin(HostState):
     """Resource estimation, calibrated device models, and circuit optimization.
 
     Requires: TerminalProtocol — uses self.num_qubits, self.program,
@@ -97,23 +95,23 @@ class ResourceMixin:
             n_logical = self.num_qubits
             phys_per_logical = 2 * d * d - 1
             data_qubits = n_logical * phys_per_logical
-            # T-count from the program circuit, if any.
-            t_count = 0
+            # T-count and logical depth from the program circuit, if any.
+            t_count = depth = 0
             if self.program:
                 try:
                     qc, _ = self.build_circuit()
                     ops = qc.count_ops()
                     t_count = ops.get('t', 0) + ops.get('tdg', 0)
+                    depth = qc.depth()
                 except Exception:
-                    t_count = 0
+                    t_count = depth = 0
             # 15-to-1 T factory footprint and a parallelism assumption.
             factory_qubits = 15 * phys_per_logical
             n_factories = max(1, min(t_count, 8)) if t_count else 0
             total_qubits = data_qubits + n_factories * factory_qubits
             cycle_us = 1.0   # ~1 microsecond per surface-code cycle (typical SC qubit)
-            depth = qc.depth() if self.program else 0
             runtime_us = depth * d * cycle_us + t_count * d * cycle_us
-            self.io.writeln(f"\n  Fault-tolerant resource estimate (surface code):")
+            self.io.writeln("\n  Fault-tolerant resource estimate (surface code):")
             self.io.writeln(f"    target logical error : {target:g}")
             self.io.writeln(f"    physical error       : {p:g}  (threshold ~{self._SC_THRESHOLD})")
             self.io.writeln(f"    code distance        : d = {d}  (achieves p_L ~ {pL:.2e})")
@@ -146,6 +144,8 @@ class ResourceMixin:
             return
         if parts[0].upper() in ('OFF', 'NONE'):
             self._noise_model = None
+            self._noise_spec = None
+            self._device_spec = None
             self._coupling_map = None
             self._circuit_cache_key = None
             self.io.writeln("DEVICE OFF")
@@ -194,7 +194,8 @@ class ResourceMixin:
                 edges += [[a, b], [b, a]]
             self._noise_model = nm
             self._coupling_map = edges if topo not in ('all', 'full') else None
-            self._noise_spec = f"device {topo} T1={t1 * 1e6}us T2={t2 * 1e6}us"
+            self._noise_spec = None
+            self._device_spec = f"{topo} {n} {t1 * 1e6:g} {t2 * 1e6:g}"
             self._circuit_cache_key = None
             self.io.writeln(f"DEVICE {topo}: {n} qubits, T1={t1 * 1e6:.0f}us T2={t2 * 1e6:.0f}us, "
                             f"thermal noise + coupling map loaded")
