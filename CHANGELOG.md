@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.20.0 (2026-10-12)
+
+### Added
+- Records: `TYPE Name … END TYPE` declares fields of INTEGER, LONG, SINGLE, DOUBLE, STRING, `STRING * n` or another record type. `DIM b AS Body` and `DIM crowd(1 TO 3) AS Body` create records and arrays of records, whose fields (`b.pos.x`, `crowd(2).name`) work in expressions, LET, INPUT, READ, SWAP and by-reference arguments. Assigning a whole record copies it, fixed-length strings pad and truncate, and a malformed TYPE block is a compile error. Record variables work at the prompt, and SAVE writes them.
+- Typed and array procedure parameters: in `SUB Total (a() AS INTEGER, n AS INTEGER, s AS LONG)` each argument converts to its parameter's type, and a string passed for a number or the reverse is TYPE MISMATCH (13). `v()` passes an array by reference, so a REDIM PRESERVE inside the routine reaches the caller, and records pass by reference. FUNCTIONs take array arguments, and arrays DIMmed inside a procedure are local to the call.
+- Line labels (`Handler:`) as targets of GOTO, GOSUB, ON … GOTO/GOSUB, RESTORE, ON ERROR GOTO and RESUME, and `RETURN n`, `RESTORE n` and `RESUME 0`, which retries the failing statement. An undefined or duplicate label, or a jump to a missing line, is a compile error.
+- Typed variables: the `%`, `&`, `!`, `#` and `$` suffixes, `DEFINT`/`DEFLNG`/`DEFSNG`/`DEFDBL`/`DEFSTR` letter ranges and `DIM x AS type`, with OVERFLOW (6) and TYPE MISMATCH (13) on assignment and DUPLICATE DEFINITION (10) on assigning a CONST. CINT and CLNG round half to even, `\`, `EQV` and `IMP` are operators, and AND, OR, XOR and NOT act on rounded integers.
+- Arrays take lower bounds (`DIM a(1 TO 3, 0 TO 1) AS INTEGER`) and bounds computed from expressions. LBOUND and UBOUND take a dimension argument, an index outside the bounds is SUBSCRIPT OUT OF RANGE (9), and SWAP exchanges elements. An array used without DIM is created on first use: one dimension grows as it is written, and several dimensions span OPTION BASE to 10.
+- Input and output: INPUT reads several values, with the `;` and `,` prompt forms and `?Redo from start`. LINE INPUT, WRITE and the `MID$` statement are available. `OPEN … FOR INPUT|OUTPUT|APPEND AS #n` works with PRINT #, PRINT # USING, WRITE #, INPUT #, LINE INPUT #, CLOSE, FREEFILE and LOF, and reading past the end of a file is error 62. `?` is PRINT, BEEP writes a bell, SYSTEM ends the program, and DECLARE, WIDTH, CLS, COLOR, LOCATE, SCREEN and SLEEP are accepted.
+- PRINT USING takes QBASIC's field set: `#`, `.`, `,`, `+`, a trailing `-`, `**`, `$$`, `**$`, `^^^^`, `!`, `\  \`, `&` and `_` literals, with `%` marking a number too wide for its field.
+- Functions: UCASE$, LCASE$, LTRIM$, RTRIM$, SPACE$, STRING$, OCT$, HEX$, INSTR with a start position, TIMER, DATE$, TIME$, INKEY$, `RANDOMIZE n` and `RND(0)`. VAL parses as QBASIC does (`&H`, `&O`, embedded spaces), and ERR reports QBASIC error codes.
+- QBASIC source files: LOAD and the command line take `.bas` files and number their unnumbered lines, and `SAVE name.bas` writes the program lines alone. `examples/classic.bas` is a classical QBASIC program.
+- Composable noise: `NOISE depolarizing 0.001 0.01; readout 0.02` joins channels with `;`, `NOISE ADD` extends the active model and `NOISE INFO` lists it. `depolarizing p1 [p2]` takes a separate rate for two- and three-qubit gates, and single-qubit channels act on every qubit a multi-qubit gate touches. `thermal T1 T2 tg [tg2]` takes a multi-qubit gate time and requires T2 ≤ 2·T1, `readout p01 [p10]` is asymmetric, and readout errors compose as a matrix product.
+- `LATTICE` runs lattice surgery on rotated surface-code patches of any odd distance in a stabilizer simulation (`qubasic_core/lattice.py`, `surface.py`). It merges and splits patches prepared in 0, 1, + or − along ZZ or XX and compares the merge outcome with the split readout (`_LATTICE_PLUS`, `_LATTICE_AGREE`). `LATTICE CNOT c t` runs the merge-and-split CNOT, and `LATTICE RATE d,… p [ROUNDS r]` estimates a noisy merge's logical failure rate under phenomenological noise, decoded by space-time matching (`_LATTICE_RATE`).
+- `LOGICAL_ERROR_RATE … PHENOM` runs a memory experiment under phenomenological noise (data and check-measurement errors in each of d rounds, then a noisy readout). It decodes by space-time matching on a detector error model (`qubasic_core/dem.py`) and needs no stim.
+- Encoded simulation for more codes: under LQUBITS, RUN simulates a program of transversal gates encoded, STEANE as a circuit and SURFACE, REP and SHOR by Pauli frames, and reports the logical error rate (`_LOGICAL_ERR`) and the TVD. Other programs run on the modeled logical channel with the lattice-surgery compilation report, and `MODEL` or `ENCODED` forces one path.
+- `GROVER <bits> [<bits> ...]` searches for one or more marked states with the optimal iteration count (or `ITERS k`), reading the states in OPTION ENDIAN order, and `PROGRAM` writes its circuit. `SIMON <secret>` recovers a hidden XOR period.
+- `QAOA` runs on MaxCut graphs (`0-1, 1-2:0.5`, `RING n`, `COMPLETE n`, `RANDOM n [p]`) or a diagonal HAMILTONIAN, with `P`, `METHOD`, `ITERS`, `SHOTS` and `PROGRAM`. It reports the approximation ratio and the probability of an optimal answer (`_QAOA_RATIO`, `_QAOA_POPT`).
+- `VQE <HAMILTONIAN>` minimizes over a hardware-efficient RY or RY-RZ ansatz with `LAYERS`, `RESTARTS` and `PROGRAM`, and prints the exact ground energy beside its result (`_VQE_ENERGY`, `_VQE_EXACT`).
+- Python API (`qubasic_core.run`, `qubasic_core.Session`): runs `.qb` or QBASIC source under settings (qubits, shots, seed, method, precision, noise, INPUT answers) and returns counts, variables, the statevector of a small register, the printed output and the error lines.
+
+### Changed
+- HHL solves systems of any size, given as matrix and vector literals and padded to a power of two, with `CLOCK n` and `SHOTS n` sampling the post-selected solution (`_HHL_FIDELITY`, `_HHL_X`). A non-Hermitian matrix runs through its Hermitian dilation.
+- SHOR runs Beauregard's circuit for N < 256: Fourier-basis adders and controlled modular multipliers on 2n + 3 qubits, with the phase read through one recycled control qubit. `ORACLE` runs phase estimation of the permutation x → a·x mod N. Even N, primes and prime powers are settled classically (`_SHOR_ORDER`, `_SHOR_FACTOR`).
+- RENUM rewrites every line-number reference: GOTO, GOSUB, ON … GOTO/GOSUB lists, ON ERROR GOTO, RESUME, RETURN, RESTORE and IF … THEN/ELSE line numbers. Strings and comments keep their text.
+- SAVE writes PRECISION, DEVICE, COUPLING, BASIS, the LQUBITS mode, the composed NOISE specification and strings containing quotes, so LOAD restores the session.
+- PRINT and STR$ show numbers to seven significant digits without a leading zero (`.5`, `.3333333`, `1.234568E+07`).
+- An assignment at the prompt follows the variable's type: `n% = 2.5` stores 2, and OVERFLOW and TYPE MISMATCH are reported.
+- EOF returns -1 at end of file and 0 otherwise, QBASIC's true and false.
+- A program without gates prints only its own output, with no RUN summary.
+- NOISE OFF also clears a DEVICE model and LOCC noise. LOCC mode takes the noise model when it is a single depolarizing, amplitude-damping or phase-flip channel.
+- The inner runs of COMPARE, PLOT, ANIMATE, MINIMIZE, GRADIENT and STATS discard the program's printed output.
+- Expressions are parsed with QBASIC precedence into a tree and evaluated (`qubasic_core/basic_expr.py`).
+- Each command's docstring opens with its syntax, which `HELP <command>` prints.
+- The terminal is split into modules by concern, and mypy checks attribute access across the mixins against `HostState` (`qubasic_core/host.py`).
+- scipy and rustworkx are declared dependencies, and the wheel includes `examples/classic.bas`.
+
 ## 0.19.0 (2026-10-10)
 
 ### Added
