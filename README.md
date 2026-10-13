@@ -30,10 +30,9 @@ as a Jupyter kernel and as a browser REPL.
 
 **Documentation**: [tutorial](docs/tutorial.md) (from a first circuit to error
 correction, every example tested), [reference](docs/reference.md) (every
-command, statement, function and gate, generated from the code), the
-[changelog](CHANGELOG.md), and [Development](#development) below for how the
-interpreter is built. At the prompt, `HELP` lists the commands and
-`HELP <name>` describes one.
+command, statement, function and gate, generated from the code), and
+[Development](#development) below for how the interpreter is built. At the
+prompt, `HELP` lists the commands and `HELP <name>` describes one.
 
 ## Install
 
