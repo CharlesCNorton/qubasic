@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from qubasic_core.engine import RAM_BUDGET_FRACTION, ExecResult
-from qubasic_core.host import HostState
+from qubasic_core.host import SimulationHost
 from qubasic_core.parser import GATE_ALIASES, RE_CTRL, RE_INV
 from qubasic_core.simtools import (
     _apply_gate_inplace,
@@ -329,12 +329,8 @@ class LOCCEngine:
 # QUBASIC LOCC commands mixin — cmd_locc, cmd_send, cmd_share, cmd_loccinfo.
 # ---------------------------------------------------------------------------
 
-class LOCCCommandsMixin(HostState):
-    """LOCC user-facing commands for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.locc, self.locc_mode, self.program,
-    self.variables, self.eval_expr(), self.io.
-    """
+class LOCCCommandsMixin(SimulationHost):
+    """LOCC user-facing commands for QBasicTerminal."""
 
     @property
     def _locc_engine(self) -> LOCCEngine:
@@ -593,82 +589,11 @@ class LOCCCommandsMixin(HostState):
 
 
 # ---------------------------------------------------------------------------
-# QUBASIC LOCC display mixin — state inspection and Bloch sphere for LOCC registers.
-# ---------------------------------------------------------------------------
-
-class LOCCDisplayMixin(HostState):
-    """LOCC display methods for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.locc, self._print_statevector(),
-    self._print_bloch_single(), self.print_histogram(), self.io.
-    """
-
-    def _locc_state(self, rest: str = '') -> None:
-        reg = rest.strip().upper() if rest else ''
-        if self._locc_engine.joint:
-            if not reg or reg in self._locc_engine.names:
-                sizes = '+'.join(str(s) for s in self._locc_engine.sizes)
-                self.io.writeln(f"\n  Joint statevector ({sizes} qubits):")
-                self._print_statevector(self._locc_engine.sv, self._locc_engine.n_total)
-        else:
-            show = [reg] if reg and reg in self._locc_engine.names else self._locc_engine.names
-            for name in show:
-                size = self._locc_engine.get_size(name)
-                self.io.writeln(f"\n  Register {name} ({size} qubits):")
-                self._print_statevector(self._locc_engine.svs[name], size)
-
-    def _locc_bloch(self, rest: str) -> None:
-        m = re.match(r'([A-Z])\s*(\d*)', rest.strip(), re.IGNORECASE) if rest.strip() else None
-        if m and m.group(1):
-            reg = m.group(1).upper()
-            if reg not in self._locc_engine.names:
-                self.io.writeln(f"?UNKNOWN REGISTER: {reg}")
-                return
-            sv = self._locc_engine.get_sv(reg)
-            n = self._locc_engine.get_n(reg)
-            idx = self._locc_engine._idx(reg)
-            if m.group(2):
-                q = int(m.group(2))
-                actual_q = q if not self._locc_engine.joint else q + self._locc_engine.offsets[idx]
-                self.io.writeln(f"  [Register {reg}, qubit {q}]")
-                self._print_bloch_single(sv, actual_q, n)
-            else:
-                n_show = self._locc_engine.get_size(reg)
-                for q in range(min(n_show, 4)):
-                    actual_q = q if not self._locc_engine.joint else q + self._locc_engine.offsets[idx]
-                    self.io.writeln(f"  [Register {reg}, qubit {q}]")
-                    self._print_bloch_single(sv, actual_q, n)
-                    self.io.writeln('')
-        else:
-            self.io.writeln(f"?USAGE: BLOCH <reg> [qubit]  (registers: {', '.join(self._locc_engine.names)})")
-
-    def _locc_display_results(self, per_reg: dict, counts_joint: dict) -> None:
-        """Display per-register and joint histograms."""
-        for name in self._locc_engine.names:
-            size = self._locc_engine.get_size(name)
-            self.io.writeln(f"\n  Register {name} ({size}q):")
-            self.print_histogram(per_reg[name])
-        if counts_joint and self._locc_engine.n_regs <= 4:
-            jlabel = '|'.join(self._locc_engine.names)
-            self.io.writeln(f"\n  Joint ({jlabel}):")
-            self.print_histogram(counts_joint)
-
-
-# ---------------------------------------------------------------------------
 # QUBASIC LOCC execution mixin — program execution in LOCC mode.
 # ---------------------------------------------------------------------------
 
-class LOCCExecutionMixin(HostState):
-    """LOCC execution methods for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.locc, self.program, self.shots,
-    self.variables, self._max_iterations, self._custom_gates,
-    self.eval_expr(), self._eval_with_vars(), self._expand_statement(),
-    self._tokenize_gate(), self._gate_info(), self._resolve_qubit(),
-    self._parse_syndrome(), self._split_colon_stmts(), self._exec_control_flow(),
-    self._get_parsed(), self._gosub_stack, self._locc_display_results(),
-    self.last_counts, self.io.
-    """
+class LOCCExecutionMixin(SimulationHost):
+    """LOCC execution methods for QBasicTerminal."""
 
     def _locc_run(self) -> None:
         """Execute program in LOCC mode (N registers)."""
@@ -928,7 +853,7 @@ class LOCCExecutionMixin(HostState):
             run_vars = Scope(self.variables)
         ctx = ExecContext(
             sorted_lines=prog, ip=start_ip, run_vars=run_vars,
-            max_iterations=self._max_iterations,
+            max_iterations=self._loop_limit(),
         )
         n = len(prog)
         prev_strict, self._strict_names = self._strict_names, False
@@ -1134,11 +1059,22 @@ class LOCCExecutionMixin(HostState):
             return np.asarray(self._custom_gates[canonical]), list(reversed(qubits))
         return _np_gate_matrix(canonical, tuple(params)), list(qubits)
 
+    def _locc_display_results(self, per_reg: dict, counts_joint: dict) -> None:
+        """Display per-register and joint histograms."""
+        for name in self._locc_engine.names:
+            size = self._locc_engine.get_size(name)
+            self.io.writeln(f"\n  Register {name} ({size}q):")
+            self.print_histogram(per_reg[name])
+        if counts_joint and self._locc_engine.n_regs <= 4:
+            jlabel = '|'.join(self._locc_engine.names)
+            self.io.writeln(f"\n  Joint ({jlabel}):")
+            self.print_histogram(counts_joint)
+
 
 # ---------------------------------------------------------------------------
 # QUBASIC LOCC mixin — re-exports from split modules.
 # ---------------------------------------------------------------------------
 
-class LOCCMixin(LOCCCommandsMixin, LOCCDisplayMixin, LOCCExecutionMixin):
+class LOCCMixin(LOCCCommandsMixin, LOCCExecutionMixin):
     """Combined LOCC mixin — commands, display, and execution."""
     pass

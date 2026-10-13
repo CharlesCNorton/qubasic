@@ -1709,7 +1709,7 @@ def line_index(lines: Any, target: int) -> int | None:
 #
 # Every program statement and built-in function, with its syntax and a
 # one-line description, grouped by topic. HELP <keyword>, `qubasic --spec`
-# and docs/reference.md (written by tools/gen_reference.py) read it; the
+# and docs/reference.md (written by tools/generate.py) read it; the
 # commands typed at the prompt are described by their own docstrings.
 # ---------------------------------------------------------------------------
 

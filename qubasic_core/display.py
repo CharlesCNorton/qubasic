@@ -24,7 +24,7 @@ from qubasic_core.engine import (
     MAX_HISTOGRAM_STATES,
     _RichTable,
 )
-from qubasic_core.host import HostState
+from qubasic_core.host import PresentationHost
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -121,11 +121,8 @@ def _get_console() -> Console | None:
     return None
 
 
-class DisplayMixin(HostState):
-    """Display and visualization methods for the QUBASIC terminal.
-
-    Requires: TerminalProtocol — uses self.num_qubits, self.arrays.
-    """
+class DisplayMixin(PresentationHost):
+    """Display and visualization methods for the QUBASIC terminal."""
 
     def _rich_print(self, *renderables: Any) -> None:
         """Render rich content to a string and emit it through the IOPort.
@@ -143,18 +140,6 @@ class DisplayMixin(HostState):
         Console(file=buf, highlight=False, force_terminal=force).print(*renderables)
         self.io.write(buf.getvalue())
 
-    def _bits(self, s: str) -> str:
-        """A bitstring in the active display convention.
-
-        Little-endian (qubit 0 rightmost, the qiskit order) unless
-        OPTION ENDIAN BIG reversed it. LOCC joint keys ('0|01|1') reverse
-        per register segment, keeping the A|B|C register order.
-        """
-        if not getattr(self, '_endian_big', False):
-            return s
-        if '|' in s:
-            return '|'.join(seg[::-1] for seg in s.split('|'))
-        return s[::-1]
 
     def _bit_order_note(self, display: list) -> str | None:
         """Human-facing reminder of which bit is which qubit.
@@ -415,12 +400,31 @@ class DisplayMixin(HostState):
             raise ValueError(f"QUBIT {qubit} OUT OF RANGE (0-{n - 1})")
         return bloch(sv, qubit, n)
 
+    def _auto_display(self) -> None:
+        """Display results using current SCREEN mode after RUN."""
+        mode = self._screen_mode
+        if mode <= 1:
+            return  # text/histogram mode: histogram already shown by cmd_run
+        if mode == 2:
+            if self.last_sv is not None:
+                self._print_statevector(self.last_sv)
+        elif mode == 3:
+            if self.last_sv is not None:
+                from qubasic_core.engine import MAX_BLOCH_DISPLAY
+                for q in range(min(self.num_qubits, MAX_BLOCH_DISPLAY)):
+                    self._print_bloch_single(self.last_sv, q)
+                    self.io.writeln('')
+        elif mode == 4:
+            self.cmd_density()
+        elif mode == 5:
+            self.cmd_circuit()
+
 
 # ---------------------------------------------------------------------------
 # QUBASIC state display mixin — STATE, BLOCH, HIST, PROBS, PRINT STATE, DECOMPOSE.
 # ---------------------------------------------------------------------------
 
-class StateDisplayMixin(HostState):
+class StateDisplayMixin(PresentationHost):
     """State inspection commands for QBasicTerminal.
 
     All state commands use _active_sv / _active_nqubits to read from
@@ -594,6 +598,45 @@ class StateDisplayMixin(HostState):
             self.io.writeln(f"    {name:>10}  {count:>4}  {bar}")
         self.io.writeln('')
 
+    def _locc_state(self, rest: str = '') -> None:
+        reg = rest.strip().upper() if rest else ''
+        if self._locc_engine.joint:
+            if not reg or reg in self._locc_engine.names:
+                sizes = '+'.join(str(s) for s in self._locc_engine.sizes)
+                self.io.writeln(f"\n  Joint statevector ({sizes} qubits):")
+                self._print_statevector(self._locc_engine.sv, self._locc_engine.n_total)
+        else:
+            show = [reg] if reg and reg in self._locc_engine.names else self._locc_engine.names
+            for name in show:
+                size = self._locc_engine.get_size(name)
+                self.io.writeln(f"\n  Register {name} ({size} qubits):")
+                self._print_statevector(self._locc_engine.svs[name], size)
+
+    def _locc_bloch(self, rest: str) -> None:
+        m = re.match(r'([A-Z])\s*(\d*)', rest.strip(), re.IGNORECASE) if rest.strip() else None
+        if m and m.group(1):
+            reg = m.group(1).upper()
+            if reg not in self._locc_engine.names:
+                self.io.writeln(f"?UNKNOWN REGISTER: {reg}")
+                return
+            sv = self._locc_engine.get_sv(reg)
+            n = self._locc_engine.get_n(reg)
+            idx = self._locc_engine._idx(reg)
+            if m.group(2):
+                q = int(m.group(2))
+                actual_q = q if not self._locc_engine.joint else q + self._locc_engine.offsets[idx]
+                self.io.writeln(f"  [Register {reg}, qubit {q}]")
+                self._print_bloch_single(sv, actual_q, n)
+            else:
+                n_show = self._locc_engine.get_size(reg)
+                for q in range(min(n_show, 4)):
+                    actual_q = q if not self._locc_engine.joint else q + self._locc_engine.offsets[idx]
+                    self.io.writeln(f"  [Register {reg}, qubit {q}]")
+                    self._print_bloch_single(sv, actual_q, n)
+                    self.io.writeln('')
+        else:
+            self.io.writeln(f"?USAGE: BLOCH <reg> [qubit]  (registers: {', '.join(self._locc_engine.names)})")
+
 
 # ---------------------------------------------------------------------------
 # QUBASIC visualization: braille Bloch spheres (DRAW), HEATMAP, ANIMATE and PLOT.
@@ -660,7 +703,7 @@ def braille_bloch(x: float, y: float, z: float, radius: int = 10) -> list[str]:
     return lines
 
 
-class VisualizeMixin(HostState):
+class VisualizeMixin(PresentationHost):
     """Text-mode pictures of states and sweeps."""
 
     def cmd_draw(self, rest: str) -> None:
@@ -826,13 +869,8 @@ class VisualizeMixin(HostState):
 # QUBASIC sweep mixin — parameter sweep command.
 # ---------------------------------------------------------------------------
 
-class SweepMixin(HostState):
-    """Parameter sweep command for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.variables, self.shots,
-    self.sim_method, self.sim_device, self._noise_model,
-    self.eval_expr(), self.build_circuit().
-    """
+class SweepMixin(PresentationHost):
+    """Parameter sweep command for QBasicTerminal."""
 
     def cmd_sweep(self, rest: str) -> None:
         """SWEEP var start end [steps] — run circuit for each parameter value.

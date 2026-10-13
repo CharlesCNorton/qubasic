@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
 
-from qubasic_core.host import HostState
+from qubasic_core.host import SimulationHost
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -125,7 +125,7 @@ def add_channel(nm: NoiseModel, ntype: str, params: list[str], readout: list) ->
     raise ValueError(f"UNKNOWN NOISE TYPE: {ntype}")
 
 
-class NoiseMixin(HostState):
+class NoiseMixin(SimulationHost):
     """NOISE: the active noise model (see the module docstring)."""
 
     def cmd_noise(self, rest: str) -> None:
@@ -311,7 +311,7 @@ def extrapolate(scales: Sequence[float], values: Sequence[float], fit: str) -> f
     raise ValueError(f"FIT is LINEAR, QUADRATIC, RICHARDSON or EXP, not {fit}")
 
 
-class MitigationMixin(HostState):
+class MitigationMixin(SimulationHost):
     """MITIGATE READOUT and ZNE."""
 
     def _init_mitigation(self) -> None:

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
 from qiskit import QuantumCircuit
 
-from qubasic_core.host import HostState
+from qubasic_core.host import SimulationHost
 
 if TYPE_CHECKING:
     import scipy.sparse as sp
@@ -71,12 +71,8 @@ def _embed_sparse(op1: np.ndarray, qubit: int, n: int) -> sp.csr_matrix:
                    sp.identity(2 ** qubit, format='csr'), format='csr')
 
 
-class DynamicsMixin(HostState):
-    """Hamiltonian declaration, Trotter evolution, and Lindblad open dynamics.
-
-    Requires: TerminalProtocol — uses self.num_qubits, self.variables,
-    self.last_sv, self._safe_eval(), self._eval_with_vars(), self.io.
-    """
+class DynamicsMixin(SimulationHost):
+    """Hamiltonian declaration, Trotter evolution, and Lindblad open dynamics."""
 
     def _init_dynamics(self) -> None:
         self._hamiltonians: dict = {}   # name -> SparsePauliOp
@@ -671,12 +667,8 @@ _P1 = {
 }
 
 
-class PauliPropMixin(HostState):
-    """Sparse Pauli-dynamics observable estimator for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.num_qubits, self.build_circuit(),
-    self._eval_with_vars(), self.io.
-    """
+class PauliPropMixin(SimulationHost):
+    """Sparse Pauli-dynamics observable estimator for QBasicTerminal."""
 
     @staticmethod
     def _local_pauli_matrix(chars: Sequence[str]) -> np.ndarray:
@@ -802,11 +794,8 @@ class PauliPropMixin(HostState):
 #   QMEASURE [shots]  Sample measurement outcomes (base-d strings)
 # ---------------------------------------------------------------------------
 
-class QuditMixin(HostState):
-    """A d-level (qudit) statevector engine for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.shots, self._seed, self.io.
-    """
+class QuditMixin(SimulationHost):
+    """A d-level (qudit) statevector engine for QBasicTerminal."""
 
     def _init_qudits(self) -> None:
         self._qd = 0
@@ -969,11 +958,8 @@ def _expm_anti(G: np.ndarray) -> np.ndarray:
     return (V * np.exp(-1j * w)) @ V.conj().T
 
 
-class BosonicMixin(HostState):
-    """Continuous-variable Fock-space engine for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self._eval_with_vars(), self.io.
-    """
+class BosonicMixin(SimulationHost):
+    """Continuous-variable Fock-space engine for QBasicTerminal."""
 
     def _init_bosonic(self) -> None:
         self._bmodes = 0
@@ -1068,7 +1054,7 @@ class BosonicMixin(HostState):
             self.io.writeln(f"?BS ERROR: {e}")
 
     def cmd_cat(self, rest: str) -> None:
-        """CAT <mode> <re> [im] — prepare an even cat state (|alpha> + |-alpha>)/N."""
+        """CAT <mode> <re> [im] — put a mode in an even cat state (|alpha> + |-alpha>)/N, keeping the other modes; a mode entangled with them is refused."""
         parts = rest.split()
         try:
             mode = int(parts[0])
@@ -1083,19 +1069,23 @@ class BosonicMixin(HostState):
             Dm = _expm_anti(-alpha * a.conj().T + np.conj(alpha) * a)
             cat = Dp @ vac + Dm @ vac
             cat = cat / np.linalg.norm(cat)
-            # Replace the mode's state (assumes a fresh/vacuum register for clarity).
-            if self._bmodes == 1:
-                self._bsv = cat
-            else:
-                # Project the mode onto the cat by applying it as a state-prep matrix
-                # from vacuum on that mode (only valid if the mode is in vacuum).
-                prep = np.outer(cat, vac.conj())
-                prep += np.eye(N) - np.outer(vac, vac.conj())  # identity off the vacuum
-                self._bos_apply(prep, [mode])
+            self._replace_mode(mode, cat)
             self.io.writeln(f"  cat state |alpha>+|-alpha>, alpha={alpha} on mode {mode}")
             self._report_n(mode)
         except Exception as e:
             self.io.writeln(f"?CAT ERROR: {e}")
+
+    def _replace_mode(self, mode: int, state: np.ndarray) -> None:
+        """Put one mode in `state`, keeping the other modes' state; a mode
+        entangled with the others has no state of its own to replace."""
+        N, m = self._bcut, self._bmodes
+        t = np.moveaxis(self._bsv.reshape([N] * m), mode, 0).reshape(N, -1)
+        _, s, vh = np.linalg.svd(t, full_matrices=False)
+        if len(s) > 1 and s[1] > 1e-6:
+            raise ValueError(f"mode {mode} is entangled with the other modes")
+        rest = s[0] * vh[0]
+        joint = np.outer(state, rest).reshape([N] * m)
+        self._bsv = np.moveaxis(joint, 0, mode).reshape(-1)
 
     def _mode_rdm_diag(self, mode: int) -> np.ndarray:
         """Photon-number distribution (diagonal of the reduced density matrix) of a mode."""

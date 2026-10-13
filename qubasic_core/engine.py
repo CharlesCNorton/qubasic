@@ -5,13 +5,18 @@ satisfy, the execution context and the progress spinner.
 
 from __future__ import annotations
 
+import os
+import sys
 from collections import OrderedDict
-from collections.abc import MutableMapping
+from collections.abc import Iterator, MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
+
+from qubasic_core.host import CoreHost
 
 try:
     from rich.console import Console as _RichConsole
@@ -58,6 +63,8 @@ MAX_BLOCH_DISPLAY = 8
 HISTOGRAM_BAR_WIDTH = 35
 AMPLITUDE_THRESHOLD = 1e-8
 MAX_INCLUDE_DEPTH = 8
+# Instructions one circuit build may produce, whatever the statement cap.
+MAX_CIRCUIT_INSTRUCTIONS = 1_000_000
 RAM_BUDGET_FRACTION = 0.8
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -178,8 +185,8 @@ class StdIOPort:
 # (the web REPL, the Jupyter kernel, qubasic_core.api) relies on, so
 # ``isinstance(obj, TerminalProtocol)`` tells whether an object can stand in
 # for a QBasicTerminal. The full contract between the mixins themselves, every
-# shared attribute and method, is HostState in qubasic_core/host.py, which
-# mypy checks.
+# shared attribute and method layer by layer, is the hosts in
+# qubasic_core/host.py, which mypy checks.
 # ---------------------------------------------------------------------------
 
 @runtime_checkable
@@ -298,3 +305,69 @@ _QUANTUM_SPINNER = [
 def quantum_spin(step: int) -> str:
     """Return the spinner frame for the given step."""
     return _QUANTUM_SPINNER[step % len(_QUANTUM_SPINNER)]
+
+
+# ---------------------------------------------------------------------------
+# Services every layer's mixins use: discarding a block's output, and the
+# rules for the file paths programs and commands name.
+# ---------------------------------------------------------------------------
+
+class ServicesMixin(CoreHost):
+    """Output suppression, path checking, and what running on a terminal
+    changes, for every layer."""
+
+    @staticmethod
+    def _on_terminal() -> bool:
+        """Whether output goes to an interactive terminal."""
+        return bool(sys.stdout and sys.stdout.isatty())
+
+    def _loop_limit(self) -> int:
+        """How many statements a run may execute: the configured limit
+        (_max_iterations, POKE $D006) off a terminal and in agent mode, where
+        nobody can interrupt a run, and no limit at an interactive terminal,
+        where Ctrl+C stops a program as it does in QBASIC."""
+        if self.agent_mode or not self._on_terminal():
+            return self._max_iterations
+        return sys.maxsize
+
+    @contextmanager
+    def _silenced(self) -> Iterator[None]:
+        """Run a block with its output discarded (the inner runs of COMPARE,
+        PLOT, ANIMATE, MINIMIZE, GRADIENT and STATS)."""
+        old, self.io = self.io, NullIO()
+        try:
+            yield
+        finally:
+            self.io = old
+
+    @staticmethod
+    def _sanitize_path(path: str) -> str:
+        """Path sanitization: reject null bytes, control characters, and traversal.
+
+        Blocks directory-traversal sequences (..) and absolute paths that
+        escape the working directory.  For a local REPL the user already has
+        shell access, but this prevents accidental overwrites of system files
+        and hardens INCLUDE chains against path confusion.
+        """
+        if not path or not path.strip():
+            raise ValueError("Empty path")
+        if '\x00' in path:
+            raise ValueError("Path contains null bytes")
+        if any(ord(c) < 32 for c in path):
+            raise ValueError("Path contains control characters")
+        path = path.strip()
+        # Reject traversal sequences — the primary injection vector
+        normalized = os.path.normpath(path)
+        if '..' in normalized.split(os.sep):
+            raise ValueError("Path traversal (..) is not allowed")
+        # Reject absolute paths (Unix / or Windows drive letters)
+        if os.path.isabs(path):
+            raise ValueError("Absolute paths are not allowed")
+        # Catch Windows drive letters on non-Windows hosts (e.g. CI on Linux)
+        import re as _re
+        if _re.match(r'^[A-Za-z]:[/\\]', path):
+            raise ValueError("Absolute paths are not allowed")
+        # Reject UNC paths (\\server\share) and extended-length paths (\\?\)
+        if path.startswith('\\\\'):
+            raise ValueError("UNC/extended paths are not allowed")
+        return path

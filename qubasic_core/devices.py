@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import struct
+import time
 import wave
 import zlib
 from collections.abc import MutableMapping
@@ -22,7 +23,7 @@ import numpy as np
 
 from qubasic_core.engine import NullIO
 from qubasic_core.expression import Record, fixed_length, is_string_kind, next_column
-from qubasic_core.host import HostState
+from qubasic_core.host import LanguageHost
 from qubasic_core.parser import RE_LPRINT, _top_split
 
 # ---------------------------------------------------------------------------
@@ -559,11 +560,13 @@ def parse_png(data: bytes) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # QUBASIC graphics statements: SCREEN modes 1, 2 and 7-13 with PSET, PRESET,
 # LINE, CIRCLE, PAINT, DRAW, VIEW, WINDOW, PALETTE, GET and PUT on images,
-# PCOPY, and the POINT and PMAP functions (the framebuffer is canvas.py).
+# PCOPY, and the POINT and PMAP functions (the framebuffer is Canvas, above).
 #
-# A program's picture is shown when RUN ends: as colour half-block cells on a
-# terminal, as text shading elsewhere. SHOW redraws it and SAVEPNG <file>
-# SCREEN writes it as a PNG.
+# A program's picture is drawn as colour half-block cells on a terminal and
+# as text shading elsewhere. On a terminal it is redrawn in place while the
+# program runs, once the program waits for time or a key or has run for half a
+# second; otherwise it is shown when RUN ends. SHOW redraws it and SAVEPNG
+# <file> SCREEN writes it as a PNG.
 # ---------------------------------------------------------------------------
 
 _RE_STEP_PAREN = re.compile(r'\s*(STEP\b)?\s*\(', re.IGNORECASE)
@@ -587,12 +590,16 @@ def _match_paren(text: str, start: int) -> int:
     raise ValueError("unbalanced parentheses")
 
 
-class GraphicsMixin(HostState):
+class GraphicsMixin(LanguageHost):
     """QBASIC's graphics statements on a Canvas."""
 
     def _init_graphics(self) -> None:
         self._canvas: Canvas | None = None
         self._sprites: dict[tuple[str, int], np.ndarray] = {}
+        self._gfx_live = False                      # this run draws its frames in place
+        self._gfx_frame_at = 0.0                    # when the last frame was drawn
+        self._gfx_shown: tuple[bytes, bytes] | None = None   # that frame's pixels and palette
+        self._gfx_run_start = 0.0
 
     # ── helpers ─────────────────────────────────────────────────────────
 
@@ -648,13 +655,53 @@ class GraphicsMixin(HostState):
     def _gfx_begin_run(self) -> None:
         if self._canvas is not None:
             self._canvas.drawn = False
+        self._gfx_live = False
+        self._gfx_shown = None
+        self._gfx_run_start = time.monotonic()
 
     def _gfx_present(self) -> None:
-        """Show the picture a run drew (on a terminal in colour)."""
+        """Show the picture a run drew (on a terminal in colour): in place when
+        the run drew frames, else after its output."""
         c = self._canvas
         if c is None or not c.drawn or isinstance(self.io, NullIO):
             return
+        if self._gfx_live:
+            self._gfx_draw_in_place(c)
+            return
         self._gfx_show()
+
+    def _gfx_frame(self, *, start: bool = False, force: bool = False) -> None:
+        """During a run on a terminal, redraw the graphics screen in place when
+        it has changed, so an animation shows as it runs. Frames begin when the
+        program waits for time or a key (start), or after half a second of
+        running, and come at most 15 times a second unless the program is
+        about to wait (force)."""
+        c = self._canvas
+        if c is None or not c.drawn or getattr(self.io, 'replay', False) or not self._on_terminal():
+            return
+        now = time.monotonic()
+        if not (self._gfx_live or start or now - self._gfx_run_start >= 0.5):
+            return
+        if self._gfx_live and not force and now - self._gfx_frame_at < 1 / 15:
+            return
+        frame = (c.pixels.tobytes(), np.asarray(c.palette).tobytes())
+        if frame == self._gfx_shown:
+            return
+        self._gfx_draw_in_place(c)
+        self._gfx_shown = frame
+        self._gfx_frame_at = now
+
+    def _gfx_draw_in_place(self, c: Canvas) -> None:
+        """Draw the screen at the top of the terminal and put the cursor back
+        where the program's text output left it; the first frame scrolls the
+        text down to make room."""
+        cols = min(160, shutil.get_terminal_size((100, 40)).columns - 1)
+        rows = [f"SCREEN {c.mode} ({c.width}x{c.height}, {c.colors} colours):"]
+        rows += c.text_rows(max(8, cols), color=True)
+        if not self._gfx_live:
+            self.io.write('\n' * len(rows))
+            self._gfx_live = True
+        self.io.write('\x1b7\x1b[H' + ('\x1b[K\n').join(rows) + '\x1b[K\x1b8')
 
     def _gfx_show(self, cols: int | None = None) -> None:
         c = self._gfx()
@@ -1065,7 +1112,7 @@ def wav_bytes(samples: np.ndarray, rate: int = SAMPLE_RATE) -> bytes:
     return buf.getvalue()
 
 
-class SoundMixin(HostState):
+class SoundMixin(LanguageHost):
     """PLAY, SOUND and BEEP gathered for SAVEWAV."""
 
     def _init_sound(self) -> None:
@@ -1140,14 +1187,8 @@ class SoundMixin(HostState):
 # QUBASIC screen control — SCREEN, COLOR, CLS, LOCATE, PLAY, prompt.
 # ---------------------------------------------------------------------------
 
-class ScreenMixin(HostState):
-    """Screen control commands for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self._screen_mode, self.last_counts,
-    self.last_sv, self.last_circuit, self.print_histogram(),
-    self._print_statevector(), self._print_bloch_single(),
-    self.cmd_density(), self.cmd_circuit().
-    """
+class ScreenMixin(LanguageHost):
+    """Screen control commands for QBasicTerminal."""
 
     def _init_screen(self) -> None:
         self._color_fg: str = ''
@@ -1208,24 +1249,6 @@ class ScreenMixin(HostState):
         self._screen_mode = mode
         self.io.writeln(f"DISPLAY {self._DISPLAY_NAMES[mode]}")
 
-    def _auto_display(self) -> None:
-        """Display results using current SCREEN mode after RUN."""
-        mode = self._screen_mode
-        if mode <= 1:
-            return  # text/histogram mode: histogram already shown by cmd_run
-        if mode == 2:
-            if self.last_sv is not None:
-                self._print_statevector(self.last_sv)
-        elif mode == 3:
-            if self.last_sv is not None:
-                from qubasic_core.engine import MAX_BLOCH_DISPLAY
-                for q in range(min(self.num_qubits, MAX_BLOCH_DISPLAY)):
-                    self._print_bloch_single(self.last_sv, q)
-                    self.io.writeln('')
-        elif mode == 4:
-            self.cmd_density()
-        elif mode == 5:
-            self.cmd_circuit()
 
     def cmd_color(self, rest: str) -> None:
         """COLOR foreground[, background] — set terminal colors (on a graphics
@@ -1301,7 +1324,7 @@ class ScreenMixin(HostState):
 
 # ---------------------------------------------------------------------------
 # QUBASIC file statements: OPEN (INPUT, OUTPUT, APPEND, RANDOM, BINARY),
-# CLOSE, PRINT #, WRITE # (stmt_handlers), INPUT #, LINE INPUT #, FIELD, LSET,
+# CLOSE, PRINT #, WRITE # (StatementMixin), INPUT #, LINE INPUT #, FIELD, LSET,
 # RSET, GET #, PUT #, SEEK, LPRINT; the FREEFILE, LOF, EOF, LOC, SEEK and
 # INPUT$ functions; and KILL, NAME, MKDIR, RMDIR, CHDIR and FILES.
 #
@@ -1349,7 +1372,7 @@ def _bytes(text: str) -> bytes:
     return text.encode('latin-1', errors='replace')
 
 
-class FileIOMixin(HostState):
+class FileIOMixin(LanguageHost):
     """Numbered file handles, as QBASIC opens them."""
 
     def _init_file_handles(self) -> None:

@@ -28,8 +28,9 @@ from qubasic_core.devices import (
 )
 from qubasic_core.editing import number_source
 from qubasic_core.expression import format_using, number_text, print_text, str_text
-from qubasic_core.interpreter import _input_fields, _parse_input_number, _resolve_named_state, error_code
+from qubasic_core.interpreter import _input_fields, _parse_input_number, error_code
 from qubasic_core.parser import CompileError, compile_program, parse_stmt, strip_comment
+from qubasic_core.simulator import _resolve_named_state
 from qubasic_core.terminal import QBasicTerminal
 
 # ---------------------------------------------------------------------------
@@ -1787,6 +1788,52 @@ PSET (0, 0), 3
         self.assertEqual(rgb.shape, (480, 640, 3))
         self.assertEqual(tuple(rgb[240, 420]), (255, 85, 85))
 
+class TestTerminalRuns(unittest.TestCase):
+    """What an interactive terminal changes: no statement limit, and the
+    graphics screen drawn in place while a program runs."""
+
+    @staticmethod
+    def terminal():
+        t = term(1)
+        t._on_terminal = lambda: True
+        return t
+
+    def test_the_statement_limit_holds_off_a_terminal_and_in_agent_mode(self):
+        prog = ('10 c = 0', '20 FOR i = 1 TO 5000', '30 c = c + 1', '40 NEXT i', '50 PRINT c')
+        t = term(1)
+        t._max_iterations = 1000
+        self.assertIn('LOOP LIMIT (1000)', feed(t, *prog, 'RUN'))
+        t = self.terminal()
+        t._max_iterations = 1000
+        self.assertEqual(feed(t, *prog, 'RUN').split('RAN ')[0].split()[-1], '5000')
+        t.agent_mode = True
+        self.assertIn('LOOP LIMIT (1000)', feed(t, 'RUN'))
+
+    def test_a_circuit_build_stops_at_the_instruction_limit(self):
+        t = self.terminal()
+        with mock.patch('qubasic_core.simulator.MAX_CIRCUIT_INSTRUCTIONS', 50):
+            out = feed(t, '10 H 0', '20 GOTO 10', 'RUN')
+        self.assertIn('CIRCUIT LIMIT (50 instructions)', out)
+
+    def test_frames_are_drawn_in_place_while_the_program_waits(self):
+        t = self.terminal()
+        out = feed(t, '10 SCREEN 13', '20 PSET (1, 1), 4', '30 SLEEP 0', '40 PSET (2, 2), 4',
+                   '50 SLEEP 0', '60 SLEEP 0', 'RUN')
+        # two frames (the third SLEEP sees no change) and the final picture, each in place
+        self.assertEqual(out.count('\x1b7\x1b[H'), 3)
+        self.assertEqual(out.count('SCREEN 13 (320x200, 256 colours):'), 3)
+
+    def test_a_quick_drawing_prints_once_after_the_run(self):
+        t = self.terminal()
+        out = feed(t, '10 SCREEN 13', '20 PSET (1, 1), 4', 'RUN')
+        self.assertNotIn('\x1b7', out)
+        self.assertEqual(out.count('SCREEN 13 (320x200, 256 colours):'), 1)
+
+    def test_no_frame_is_drawn_off_a_terminal(self):
+        out = feed(term(1), '10 SCREEN 13', '20 PSET (1, 1), 4', '30 SLEEP 0', 'RUN')
+        self.assertNotIn('\x1b7', out)
+        self.assertEqual(out.count('SCREEN 13 (320x200, 256 colours):'), 1)
+
 
 # ---------------------------------------------------------------------------
 # SAVE and LOAD round trips of a whole session, QBASIC source files,
@@ -1901,11 +1948,14 @@ class TestIncludeImportDir(InTempDir):
 
     def test_dir_and_search_path(self):
         t = term(seed=None, agent=True)
-        self.assertIn('No .qb files found', feed(t, 'DIR'))
+        self.assertIn('No .qb or .bas files found', feed(t, 'DIR'))
         os.mkdir('libs')
         with open(os.path.join('libs', 'extra.qb'), 'w') as f:
             f.write('DEF ONE = X 0\n')
-        self.assertIn('extra.qb', feed(t, 'DIR libs'))
+        with open(os.path.join('libs', 'old.bas'), 'w') as f:
+            f.write('PRINT 1\n')
+        listed = [line.split()[0] for line in feed(t, 'DIR libs').splitlines() if line.strip()]
+        self.assertEqual(listed, ['extra.qb', 'old.bas'])
         with mock.patch.dict(os.environ, {'QUBASIC_PATH': os.path.abspath('libs')}):
             out = feed(t, 'INCLUDE extra')
         self.assertIn('INCLUDED', out)

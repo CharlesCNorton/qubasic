@@ -27,14 +27,10 @@ from qubasic_core.expression import (
     print_text,
     type_text,
 )
-from qubasic_core.host import HostState
+from qubasic_core.host import LanguageHost
 from qubasic_core.parser import (
     RE_GET,
     RE_LET_STR,
-    RE_MEAS,
-    RE_MEASURE_BASIS,
-    RE_POKE,
-    RE_RESET,
     RE_UNITARY,
     AssertStmt,
     CallStmt,
@@ -91,6 +87,7 @@ from qubasic_core.parser import (
 
 if TYPE_CHECKING:
     from qubasic_core.engine import CircuitBackend
+    from qubasic_core.parser import CompiledProgram
 
 
 # ---------------------------------------------------------------------------
@@ -101,17 +98,12 @@ if TYPE_CHECKING:
 _RE_TAB_SPC = re.compile(r'(TAB|SPC)\s*\((.+)\)$', re.IGNORECASE)
 
 
-class ControlFlowMixin(HostState):
-    """Mixin providing control flow helpers for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.program, self.variables,
-    self.arrays, self.locc_mode, self.locc, self._gosub_stack,
-    self._eval_with_vars(), self._eval_condition().
-    """
+class ControlFlowMixin(LanguageHost):
+    """Mixin providing control flow helpers for QBasicTerminal."""
 
     # ── Compiled block structure ────────────────────────────────────
     #
-    # Statements run from a CompiledProgram (program.py): `ip` indexes a
+    # Statements run from a CompiledProgram (parser.py): `ip` indexes a
     # statement, and the program carries the jump targets of block structure.
 
     @staticmethod
@@ -196,7 +188,7 @@ class ControlFlowMixin(HostState):
     def _cf_let_array(self, stmt: str, run_vars: MutableMapping[str, Any],
                       parsed: LetArrayStmt) -> tuple[bool, ExecOutcome]:
         """LET a(i[, j ...])[.field] = expr — a typed element (or record element
-        field) write (see variables.py)."""
+        field) write (see VariableMixin)."""
         name = parsed.name
         self._assert_assignable(name)
         value = self._safe_eval(parsed.value_expr, extra_ns=run_vars)
@@ -500,7 +492,7 @@ class ControlFlowMixin(HostState):
         MeasureStmt:     lambda s, st, p, ls, sl, ip, rv, ef: (True, ExecResult.ADVANCE),
         EndStmt:         lambda s, st, p, ls, sl, ip, rv, ef: (True, ExecResult.END),
         ReturnStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_return(sl, p),
-        # Handlers defined in control_flow.py (parsed is positional)
+        # ControlFlowMixin's handlers (parsed is positional)
         WendStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_wend(rv, ls, sl, ip),
         LetArrayStmt:    lambda s, st, p, ls, sl, ip, rv, ef: s._cf_let_array(st, rv, p),
         LetStmt:         lambda s, st, p, ls, sl, ip, rv, ef: s._cf_let_var(st, rv, p),
@@ -513,7 +505,7 @@ class ControlFlowMixin(HostState):
         ForStmt:         lambda s, st, p, ls, sl, ip, rv, ef: s._cf_for(st, rv, ls, ip, p, sl),
         NextStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_next(st, rv, ls, p),
         WhileStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_while(st, rv, ls, sl, ip, p),
-        # Handlers defined in classic.py (parsed is keyword-only)
+        # ClassicMixin's handlers (parsed is keyword-only)
         DataStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_data(st, parsed=p),
         ReadStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_read(st, rv, parsed=p),
         OnGotoStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_goto(st, rv, sl, parsed=p),
@@ -531,7 +523,7 @@ class ControlFlowMixin(HostState):
         DefFnStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_def_fn(st, rv, parsed=p),
         OptionBaseStmt:  lambda s, st, p, ls, sl, ip, rv, ef: s._cf_option_base(st, parsed=p),
         OptionEndianStmt: lambda s, st, p, ls, sl, ip, rv, ef: s._cf_option_endian(st, parsed=p),
-        # Handlers defined in subs.py (parsed is keyword-only)
+        # SubroutineMixin's handlers (parsed is keyword-only)
         SubStmt:         lambda s, st, p, ls, sl, ip, rv, ef: s._cf_sub(st, sl, ip, parsed=p),
         EndSubStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_end_sub(st, parsed=p),
         FunctionStmt:    lambda s, st, p, ls, sl, ip, rv, ef: s._cf_function(st, sl, ip, parsed=p),
@@ -540,7 +532,7 @@ class ControlFlowMixin(HostState):
         LocalStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_local(st, rv, parsed=p),
         StaticStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_static(st, rv, parsed=p),
         SharedStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_shared(st, rv, parsed=p),
-        # Handlers defined in debug.py (parsed is keyword-only)
+        # DebugMixin's handlers (parsed is keyword-only)
         OnErrorStmt:     lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_error(st, parsed=p),
         ResumeStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_resume(st, sl, parsed=p),
         ErrorStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_error(st, parsed=p),
@@ -548,7 +540,7 @@ class ControlFlowMixin(HostState):
         StopStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_stop(st, sl, ip, parsed=p),
         OnMeasureStmt:   lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_measure(st, parsed=p),
         OnTimerStmt:     lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_timer(st, parsed=p),
-        # Compiled control transfers (program.py)
+        # Compiled control transfers (parser.py)
         IfJumpStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_if_jump(rv, p),
         JumpStmt:        lambda s, st, p, ls, sl, ip, rv, ef: (True, p.target),
     }
@@ -577,6 +569,16 @@ class ControlFlowMixin(HostState):
 
         # RawStmt or unmapped type -- not handled by control flow
         return False, None
+
+    def _compiled(self) -> CompiledProgram:
+        """The compiled form of the current program (cached until it changes)."""
+        from qubasic_core.parser import compile_program
+        key = tuple(sorted(self.program.items()))
+        cached = getattr(self, '_compiled_cache', None)
+        if cached is None or cached[0] != key:
+            cached = (key, compile_program(self.program))
+            self._compiled_cache = cached
+        return cached[1]
 
 
 # ---------------------------------------------------------------------------
@@ -608,13 +610,8 @@ def _data_items(text: str) -> list[tuple[str, bool]]:
     return items
 
 
-class ClassicMixin(HostState):
-    """Classic BASIC features for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.program, self.variables,
-    self.arrays, self._gosub_stack, self._eval_with_vars(),
-    self._eval_condition(), self.eval_expr().
-    """
+class ClassicMixin(LanguageHost):
+    """Classic BASIC features for QBasicTerminal."""
 
     def _init_classic(self) -> None:
         self._data_pool: list[Any] = []
@@ -824,7 +821,7 @@ class ClassicMixin(HostState):
 
     def _cf_loop(self, stmt: str, run_vars: MutableMapping[str, Any],
                  loop_stack: list[dict[str, Any]],
-                 sorted_lines: Sequence[int], ip: int, *, parsed: LoopStmt) -> tuple[bool, ExecOutcome] | None:
+                 sorted_lines: Sequence[int], ip: int, *, parsed: LoopStmt) -> tuple[bool, ExecOutcome | None]:
         loop_kind = parsed.kind
         loop_cond = parsed.condition
         # Only handle as DO/LOOP keyword if we're inside a DO block (loops a
@@ -833,15 +830,10 @@ class ClassicMixin(HostState):
         while idx >= 0 and loop_stack[idx].get('type') != 'do':
             idx -= 1
         if idx < 0:
-            # Bare "LOOP" (no WHILE/UNTIL) that matches a SUB name should
-            # be handed off to subroutine expansion, not treated as a keyword.
-            is_bare = loop_kind is None  # no WHILE/UNTIL suffix
-            if is_bare and hasattr(self, '_sub_defs') and 'LOOP' in self._sub_defs:
-                return None  # let subroutine expansion handle it
-            # Otherwise it's either bare LOOP with no sub, or LOOP WHILE/UNTIL
-            # without a DO — both are errors or no-ops.  Return None so the
-            # caller can decide (gate dispatch will surface an error if needed).
-            return None
+            # Outside a DO block a bare LOOP calls a SUB or DEF named LOOP.
+            if loop_kind is None and ('LOOP' in self._sub_defs or 'LOOP' in self.subroutines):
+                return False, None
+            raise ValueError("LOOP without DO")
         del loop_stack[idx + 1:]
         loop = loop_stack[-1]
         # Post-test condition on LOOP
@@ -915,7 +907,7 @@ class ClassicMixin(HostState):
 
     def _cf_option_base(self, stmt: str, *, parsed: OptionBaseStmt) -> tuple[bool, ExecOutcome]:
         """OPTION BASE 0|1 — the lower bound of arrays declared with an upper
-        bound only (variables.py)."""
+        bound only (VariableMixin)."""
         self._option_base = parsed.base
         return True, ExecResult.ADVANCE
 
@@ -992,7 +984,7 @@ def _names_storage(text: str) -> bool:
     return False
 
 
-class SubroutineMixin(HostState):
+class SubroutineMixin(LanguageHost):
     """SUB/FUNCTION procedures with local scope, typed and array parameters,
     by-reference arguments and LOCAL/STATIC/SHARED declarations (see the
     module docstring)."""
@@ -1254,7 +1246,7 @@ class SubroutineMixin(HostState):
                     ip=func['start_ip'],
                     run_vars=self.variables,
                     loop_stack=[],
-                    max_iterations=self._max_iterations,
+                    max_iterations=self._loop_limit(),
                 )
 
                 def _no_clause(s: str, ls: list[dict[str, Any]], sl: Sequence[int], i: int, rv: MutableMapping[str, Any]) -> None:
@@ -1393,12 +1385,8 @@ def error_code(err: Exception) -> int:
     return 1
 
 
-class DebugMixin(HostState):
-    """Error handling, debugging, and event callbacks for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.program, self.variables,
-    self._eval_condition(), self._gosub_stack.
-    """
+class DebugMixin(LanguageHost):
+    """Error handling, debugging, and event callbacks for QBasicTerminal."""
 
     def _init_debug(self) -> None:
         self._error_target: int | None = None
@@ -1498,31 +1486,6 @@ class DebugMixin(HostState):
             total -= self._sv_checkpoints.pop(0)[1].nbytes
         self._tt_position = len(self._sv_checkpoints) - 1
 
-    def cmd_rewind(self, rest: str = '') -> None:
-        """REWIND [N] — go back N steps in the statevector history."""
-        if not self._sv_checkpoints:
-            self.io.writeln("?NO CHECKPOINTS — use STEP mode to build history")
-            return
-        n = int(rest.strip()) if rest.strip() else 1
-        new_pos = max(0, self._tt_position - n)
-        self._tt_position = new_pos
-        line_num, sv = self._sv_checkpoints[new_pos]
-        self.last_sv = sv.copy()
-        self.io.writeln(f"REWIND to step {new_pos} (line {line_num})")
-        self._print_sv_compact(sv)
-
-    def cmd_forward(self, rest: str = '') -> None:
-        """FORWARD [N] — go forward N steps in the statevector history."""
-        if not self._sv_checkpoints:
-            self.io.writeln("?NO CHECKPOINTS")
-            return
-        n = int(rest.strip()) if rest.strip() else 1
-        new_pos = min(len(self._sv_checkpoints) - 1, self._tt_position + n)
-        self._tt_position = new_pos
-        line_num, sv = self._sv_checkpoints[new_pos]
-        self.last_sv = sv.copy()
-        self.io.writeln(f"FORWARD to step {new_pos} (line {line_num})")
-        self._print_sv_compact(sv)
 
     def cmd_history(self, rest: str = '') -> None:
         """HISTORY — show statevector checkpoint list."""
@@ -1732,7 +1695,9 @@ class DebugMixin(HostState):
 
 
 # ---------------------------------------------------------------------------
-# QUBASIC keyword statements: measurement, arrays, input, memory, file I/O, SAVE_*, SET_STATE.
+# QUBASIC keyword statements of the language: arrays, input, file I/O, the
+# screen, graphics and sound statements and the event traps. The statements
+# on qubits are QuantumStatementMixin's (simulator.py).
 # ---------------------------------------------------------------------------
 
 _RE_INPUT_STMT = re.compile(r'INPUT\s*(;)?\s*(?:"([^"]*)"\s*([;,]))?\s*(.*)$', re.IGNORECASE)
@@ -1783,131 +1748,23 @@ def _parse_input_number(text: str) -> int | float | None:
     return float(text.replace('d', 'e').replace('D', 'E'))
 
 
-def _resolve_named_state(name: str, n_qubits: int) -> np.ndarray:
-    dim = 2 ** n_qubits
-    sv = np.zeros(dim, dtype=complex)
-    if name == '|0>':
-        sv[0] = 1.0
-    elif name == '|1>':
-        if dim < 2:
-            raise ValueError(f"State |1> requires at least 1 qubit (dim >= 2), got dim={dim}")
-        sv[1] = 1.0
-    elif name == '|+>':
-        if dim < 2:
-            raise ValueError(f"State |+> requires at least 1 qubit (dim >= 2), got dim={dim}")
-        sv[0] = 1.0 / np.sqrt(2)
-        sv[1] = 1.0 / np.sqrt(2)
-    elif name == '|->':
-        if dim < 2:
-            raise ValueError(f"State |-> requires at least 1 qubit (dim >= 2), got dim={dim}")
-        sv[0] = 1.0 / np.sqrt(2)
-        sv[1] = -1.0 / np.sqrt(2)
-    elif name == '|BELL>':
-        sv[0] = 1.0 / np.sqrt(2)
-        sv[dim - 1] = 1.0 / np.sqrt(2)
-    elif name == '|GHZ>':
-        sv[0] = 1.0 / np.sqrt(2)
-        sv[dim - 1] = 1.0 / np.sqrt(2)
-    elif name == '|GHZ3>':
-        if dim >= 8:
-            sv[0] = 1.0 / np.sqrt(2)
-            sv[7] = 1.0 / np.sqrt(2)
-        else:
-            sv[0] = 1.0  # fallback to |0>
-    elif name == '|GHZ4>':
-        if dim >= 16:
-            sv[0] = 1.0 / np.sqrt(2)
-            sv[15] = 1.0 / np.sqrt(2)
-        else:
-            sv[0] = 1.0  # fallback to |0>
-    elif name in ('|W>', '|W3>'):
-        if dim >= 8:
-            sv[1] = 1.0 / np.sqrt(3)
-            sv[2] = 1.0 / np.sqrt(3)
-            sv[4] = 1.0 / np.sqrt(3)
-        else:
-            # fallback: equal superposition of available states
-            sv[:] = 1.0 / np.sqrt(dim)
-    else:
-        sv[0] = 1.0
-    return sv
-
-def _named_state_fits(name: str, n_qubits: int) -> bool:
-    """Whether a named SET_STATE target fits the current qubit count."""
-    dim = 2 ** n_qubits
-    need = {'|1>': 2, '|+>': 2, '|->': 2, '|GHZ3>': 8, '|GHZ4>': 16,
-            '|W>': 8, '|W3>': 8}
-    return dim >= need.get(name.upper(), 1)
+def merge_statements(*tables: dict[str, tuple[Any, ...]]) -> dict[str, tuple[Any, ...]]:
+    """One keyword-statement table from each layer's: a keyword's handlers in
+    table order, the first table's first."""
+    merged: dict[str, tuple[Any, ...]] = {}
+    for table in tables:
+        for word, handlers in table.items():
+            merged[word] = merged.get(word, ()) + handlers
+    return merged
 
 
-class StatementMixin(HostState):
-    """Keyword statements for QBasicTerminal, dispatched by first word through
-    _STMT_KEYWORDS: MEAS, RESET, MEASURE_X/Y/Z, SYNDROME, UNITARY, DIM, REDIM,
-    ERASE, GET, INPUT, POKE, SYS, file I/O, PRINT USING, SAVE_*, SET_STATE and
-    the algorithm primitives."""
+class StatementMixin(LanguageHost):
+    """The language's keyword statements, registered in _LANGUAGE_STATEMENTS:
+    UNITARY, DIM, REDIM, ERASE, CONST, the DEF types, GET, INPUT and LINE
+    INPUT, file I/O, graphics, PLAY and SOUND, PRINT USING, WRITE, the screen
+    statements and the event traps. _try_stmt_handlers dispatches every
+    layer's statements by first word through the terminal's _STMT_KEYWORDS."""
 
-    # Mid-circuit measurement returns this value in Qiskit circuit-build mode.
-    # Qiskit defers measurement to simulation time, so the variable cannot hold
-    # the actual outcome during circuit construction. For classical feedforward,
-    # use LOCC mode with SEND instead.
-    MEAS_CIRCUIT_MODE_VALUE = 0
-
-    def _try_exec_meas(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any], *, backend: CircuitBackend | None = None) -> bool:
-        """Handle MEAS qubit -> var (mid-circuit measurement).
-
-        In standard Aer mode this is a real dynamic-circuit measurement: the
-        qubit is measured into a classical register recorded under `var`, which a
-        later ``IF var THEN <gate>`` turns into a Qiskit if_test (feedforward) at
-        build time. In LOCC mode it routes through the numpy engine as before.
-        """
-        m = RE_MEAS.match(stmt)
-        if not m:
-            # Bare MEAS (no "-> bit") is the classic confusion with MEASURE:
-            # MEAS is a mid-circuit measurement that must name a classical bit,
-            # MEASURE collapses qubits into the result histogram.
-            if re.match(r'MEAS\b', stmt, re.IGNORECASE):
-                raise ValueError(
-                    "MEAS needs a target bit: MEAS <qubit> -> <bit> "
-                    "(mid-circuit measurement used by IF). To collapse qubits "
-                    "into the result histogram, use MEASURE <qubit>.")
-            return False
-        qubit = self._resolve_qubit(m.group(1))
-        var = m.group(2)
-        if self._live is not None:
-            bit = self._live.measure(qubit)
-            run_vars[var] = bit
-            self.variables[var] = bit
-            return True
-        self._measure_into_bit(qc, qubit, var, 'mc')
-        run_vars[var] = self.MEAS_CIRCUIT_MODE_VALUE
-        self.variables[var] = self.MEAS_CIRCUIT_MODE_VALUE
-        return True
-
-    def _measure_into_bit(self, qc: QuantumCircuit, qubit: int, var: str, prefix: str) -> None:
-        """Measure `qubit` into a fresh one-bit register recorded as `var`, so
-        IF var THEN ... compiles to feedforward on this outcome. Measuring the
-        same name again (in a loop) gets a new register; IF reads the latest."""
-        from qiskit.circuit import ClassicalRegister
-        taken = {r.name for r in qc.cregs}
-        name, k = f'{prefix}_{var}', 1
-        while name in taken:
-            name, k = f'{prefix}_{var}_{k}', k + 1
-        cr = ClassicalRegister(1, name)
-        qc.add_register(cr)
-        qc.measure(qubit, cr[0])
-        self._classical_bits[var] = cr
-
-    def _try_exec_reset(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any], *, backend: CircuitBackend | None = None) -> bool:
-        """Handle RESET qubit."""
-        m = RE_RESET.match(stmt)
-        if not m:
-            return False
-        qubit = self._resolve_qubit(m.group(1))
-        if self._live is not None:
-            self._live.reset(qubit)
-        else:
-            qc.reset(qubit)
-        return True
 
     def _try_exec_unitary(self, stmt: str) -> bool:
         """Handle UNITARY name = [[...]] gate definition."""
@@ -1940,6 +1797,7 @@ class StatementMixin(HostState):
             return False
         var = m.group(1)
         ch = ''
+        self._gfx_frame(start=True, force=True)
         try:
             if getattr(self.io, 'replay', False):
                 ch = self.io.read_line('')[:1]      # a later live shot replays
@@ -1988,6 +1846,7 @@ class StatementMixin(HostState):
         else:
             prompt = '? '
         targets = [self._lvalue(t, run_vars) for t in self._split_arg_list(m.group(4))]
+        self._gfx_frame(start=True, force=True)
         for _attempt in range(3):
             try:
                 line = self.io.read_line(prompt)
@@ -2026,88 +1885,11 @@ class StatementMixin(HostState):
             values.append(num)
         return values
 
-    def _try_exec_measure_basis(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any],
-                               *, backend: CircuitBackend | None = None) -> bool:
-        """Handle MEASURE_X/Y/Z qubit — measurement in a non-computational basis."""
-        m = RE_MEASURE_BASIS.match(stmt)
-        if not m:
-            return False
-        basis = m.group(1).upper()
-        qubit = self._resolve_qubit(m.group(2))
-        var = f"m{basis.lower()}_{qubit}"
-        rotation = {'X': ['H'], 'Y': ['SDG', 'H'], 'Z': []}[basis]
-        live = self._live
-        if live is not None:
-            live.flush()
-            for g in rotation:
-                live.apply_named(g, (), [qubit])
-            bit = live.measure(qubit)
-            run_vars[var] = bit
-            self.variables[var] = bit
-            return True
-        for g in rotation:
-            self._apply_gate(qc, g, [], [qubit])
-        self._measure_into_bit(qc, qubit, var, 'meas')
-        run_vars[var] = 0
-        self.variables[var] = 0
-        return True
 
-    _PAULI_TO_CONTROLLED = {'X': 'CX', 'Y': 'CY', 'Z': 'CZ'}
-
-    def _try_exec_syndrome(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any],
-                           *, backend: CircuitBackend | None = None) -> bool:
-        """Handle SYNDROME — non-destructive stabilizer measurement via ancilla."""
-        parsed = self._parse_syndrome(stmt, run_vars)
-        if parsed is None:
-            return False
-        pauli_str, qubits, var = parsed
-        anc = self.num_qubits - 1
-        if anc in qubits:
-            raise ValueError(
-                f"Qubit {anc} needed as ancilla but appears in stabilizer. "
-                f"Increase QUBITS by 1.")
-        gates = [('H', [anc])] + [(self._PAULI_TO_CONTROLLED[p], [anc, q])
-                                  for p, q in zip(pauli_str, qubits) if p != 'I'] + [('H', [anc])]
-        live = self._live
-        if live is not None:
-            live.flush()
-            for g, qs in gates:
-                live.apply_named(g, (), qs)
-            bit = live.measure(anc)
-            live.reset(anc)
-            run_vars[var] = bit
-            self.variables[var] = bit
-            return True
-        for g, qs in gates:
-            self._apply_gate(qc, g, [], qs)
-        self._measure_into_bit(qc, anc, var, 'synd')
-        qc.reset(anc)
-        run_vars[var] = 0
-        self.variables[var] = 0
-        return True
-
-    # Keyword statements: the statement's first word selects its handlers,
-    # each (self, stmt, qc, run_vars, backend) -> handled.
-    _STMT_KEYWORDS: dict[str, tuple[Any, ...]] = {
-        'MEAS': (lambda s, st, qc, rv, b: s._try_exec_meas(st, qc, rv, backend=b),),
-        'RESET': (lambda s, st, qc, rv, b: s._try_exec_reset(st, qc, rv, backend=b),),
-        **dict.fromkeys(('MEASURE_X', 'MEASURE_Y', 'MEASURE_Z'), (
-            lambda s, st, qc, rv, b: s._try_exec_measure_basis(st, qc, rv, backend=b),)),
-        'SYNDROME': (lambda s, st, qc, rv, b: s._try_exec_syndrome(st, qc, rv, backend=b),),
-        **dict.fromkeys(('QFT', 'IQFT'), (
-            lambda s, st, qc, rv, b: s._try_exec_qft(st, qc, rv, backend=b),)),
-        **dict.fromkeys(('DIFFUSE', 'DIFFUSION'), (
-            lambda s, st, qc, rv, b: s._try_exec_diffuse(st, qc, rv, backend=b),)),
-        **dict.fromkeys(('MCX', 'MCZ', 'MCP'), (
-            lambda s, st, qc, rv, b: s._try_exec_mcgate(st, qc, rv, backend=b),)),
-        'QADDC': (lambda s, st, qc, rv, b: s._try_exec_qaddc(st, qc, rv, backend=b),),
-        'QADD': (lambda s, st, qc, rv, b: s._try_exec_qadd(st, qc, rv, backend=b),),
-        'QPE': (lambda s, st, qc, rv, b: s._try_exec_qpe(st, qc, rv, backend=b),),
-        'EVOLVE': (lambda s, st, qc, rv, b: s._try_exec_evolve(st, qc, rv, backend=b),),
-        'APPLYCHANNEL': (lambda s, st, qc, rv, b: s._try_exec_applychannel(st, qc, rv, backend=b),),
-        'AMPLIFY': (lambda s, st, qc, rv, b: s._try_exec_amplify(st, qc, rv, backend=b),),
-        'GRAPHSTATE': (lambda s, st, qc, rv, b: s._try_exec_graphstate(st, qc, rv, backend=b),),
-        'FEATUREMAP': (lambda s, st, qc, rv, b: s._try_exec_featuremap(st, qc, rv, backend=b),),
+    # The language's keyword statements: the first word selects the handlers,
+    # each (self, stmt, qc, run_vars, backend) -> handled. The terminal merges
+    # every layer's table into _STMT_KEYWORDS (merge_statements).
+    _LANGUAGE_STATEMENTS: dict[str, tuple[Any, ...]] = {
         'UNITARY': (lambda s, st, qc, rv, b: s._try_exec_unitary(st),),
         'DIM': (lambda s, st, qc, rv, b: s._try_exec_dim(st, rv),),
         'REDIM': (lambda s, st, qc, rv, b: s._try_exec_redim(st, rv),),
@@ -2154,18 +1936,11 @@ class StatementMixin(HostState):
         'KEY': (lambda s, st, qc, rv, b: s._stmt_key(st),),
         'ON': (lambda s, st, qc, rv, b: s._stmt_on_event(st),),
         **dict.fromkeys(('PEN', 'STRIG', 'COM'), (lambda s, st, qc, rv, b: s._stmt_device_events(st),)),
-        'POKE': (lambda s, st, qc, rv, b: s._try_exec_poke(st, rv),),
-        'SYS': (lambda s, st, qc, rv, b: s._try_exec_sys(st),),
         'PRINT': (lambda s, st, qc, rv, b: s._exec_print_file(st, rv),),
         'LPRINT': (lambda s, st, qc, rv, b: s._exec_lprint(st, rv),),
         'LET': (lambda s, st, qc, rv, b: s._try_exec_let_str(st, rv),),
         **dict.fromkeys(('OPEN', 'CLOSE'), (
             lambda s, st, qc, rv, b: s._stmt_open_close(st, rv),)),
-        'SAVE_EXPECT': (lambda s, st, qc, rv, b: s._try_exec_save_expect(st, qc, rv),),
-        'SAVE_PROBS': (lambda s, st, qc, rv, b: s._try_exec_save_probs(st, qc, rv),),
-        'SAVE_AMPS': (lambda s, st, qc, rv, b: s._try_exec_save_amps(st, qc, rv),),
-        'SET_STATE': (lambda s, st, qc, rv, b: s._try_exec_set_state(st, qc),),
-        'APPLY_CIRCUIT': (lambda s, st, qc, rv, b: s._try_exec_apply_circuit(st, qc, backend=b),),
     }
 
     def _try_stmt_handlers(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any], *, backend: CircuitBackend | None = None) -> bool:
@@ -2178,34 +1953,6 @@ class StatementMixin(HostState):
                 return True
         return False
 
-    def _try_exec_apply_circuit(self, stmt: str, qc: QuantumCircuit, *, backend: CircuitBackend | None = None) -> bool:
-        """Handle APPLY_CIRCUIT name [@offset] inside program execution."""
-        m = re.match(r'APPLY_CIRCUIT\s+(\w+)(?:\s+@(\d+))?', stmt, re.IGNORECASE)
-        if not m:
-            return False
-        name = m.group(1).upper()
-        offset = int(m.group(2)) if m.group(2) else 0
-        if name not in self.subroutines:
-            raise ValueError(f"UNDEFINED CIRCUIT: {name}")
-        call_str = f"{name} @{offset}" if offset else name
-        self._apply_gate_str(call_str, qc, backend=backend)
-        return True
-
-    def _try_exec_poke(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
-        m = RE_POKE.match(stmt)
-        if not m:
-            return False
-        addr = self._eval_with_vars(m.group(1), run_vars)
-        val = self._eval_with_vars(m.group(2), run_vars)
-        self._poke(addr, val)
-        return True
-
-    def _try_exec_sys(self, stmt: str) -> bool:
-        m = re.match(r'SYS\s+(.+)', stmt, re.IGNORECASE)
-        if not m:
-            return False
-        self.cmd_sys(m.group(1))
-        return True
 
     def _try_exec_line_input(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
         """LINE INPUT [;]["prompt"{;|,}] var$ — read a whole line, commas and
@@ -2217,6 +1964,7 @@ class StatementMixin(HostState):
         if not m:
             return False
         lv = self._lvalue(m.group(3), run_vars)
+        self._gfx_frame(start=True, force=True)
         try:
             val = self.io.read_line(m.group(2) or '')
         except (EOFError, KeyboardInterrupt):
@@ -2262,10 +2010,6 @@ class StatementMixin(HostState):
             return self._write_to_handle(self._file_number(m.group(1), run_vars), text)
         self._emit_text(text, True)
         return True
-
-    @staticmethod
-    def _on_terminal() -> bool:
-        return bool(sys.stdout and sys.stdout.isatty())
 
     def _stmt_cls(self, stmt: str) -> bool:
         if not re.match(r'CLS\b', stmt.strip(), re.IGNORECASE):
@@ -2361,6 +2105,7 @@ class StatementMixin(HostState):
             return True
         arg = m.group(1).strip()
         secs = float(self._safe_eval(arg, extra_ns=run_vars)) if arg else 0.0
+        self._gfx_frame(start=True, force=True)
         if secs > 0:
             time.sleep(secs)
         return True
@@ -2391,6 +2136,7 @@ class StatementMixin(HostState):
 
     def _inkey(self) -> str:
         """INKEY$: a key already pressed, or "" (never waits)."""
+        self._gfx_frame(start=True)
         io = self.io
         if getattr(io, 'replay', False):
             try:
@@ -2422,190 +2168,4 @@ class StatementMixin(HostState):
             io.record(ch)
         return ch
 
-    def _try_exec_save_expect(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any]) -> bool:
-        """SAVE_EXPECT <pauli> <qubits> -> <var> — inline expectation value.
 
-        Also accepts a declared HAMILTONIAN name with no qubit list
-        (SAVE_EXPECT HM -> e), recording <HM> for VQE cost functions."""
-        from qubasic_core.parser import RE_SAVE_EXPECT
-        m = RE_SAVE_EXPECT.match(stmt)
-        if not m:
-            return False
-        pauli_str = m.group(1).upper()
-        qubits = [int(q.strip()) for q in m.group(2).replace(',', ' ').split() if q.strip()]
-        var = m.group(3)
-        try:
-            from qiskit.quantum_info import SparsePauliOp
-            if not qubits and pauli_str in getattr(self, '_hamiltonians', {}):
-                op = self._hamiltonians[pauli_str]
-                if op.num_qubits != self.num_qubits:
-                    raise ValueError(f"HAMILTONIAN {pauli_str} is {op.num_qubits}-qubit "
-                                     f"but QUBITS is {self.num_qubits}")
-            else:
-                full_pauli = ['I'] * self.num_qubits
-                for i, p in enumerate(pauli_str):
-                    if i < len(qubits):
-                        full_pauli[self.num_qubits - 1 - qubits[i]] = p
-                op = SparsePauliOp(''.join(full_pauli))
-            if self._live is not None:
-                # Live run: the value at this point of this shot (mean over
-                # shots once the run ends).
-                from qiskit.quantum_info import Statevector
-                val = float(np.real(Statevector(self._live.sv).expectation_value(op)))
-                self._record_save('exp', var, val)
-                run_vars[var] = val
-                self.variables[var] = val
-                return True
-            qc.save_expectation_value(op, list(range(self.num_qubits)), label=f'exp_{var}')
-            # Placeholder until the run fills the real value via
-            # _extract_save_results. Preserve any prior value instead of
-            # zeroing it, so a re-run that re-includes this SAVE line leaves
-            # earlier results readable to LET/PRINT during the build pass.
-            _prev = self.variables.get(var, 0)
-            run_vars[var] = _prev
-            self.variables[var] = _prev
-        except Exception as e:
-            self.io.writeln(f"?SAVE_EXPECT ERROR: {e}")
-        return True
-
-    def _try_exec_save_probs(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any]) -> bool:
-        """SAVE_PROBS <qubits> -> <var> — inline probability snapshot."""
-        from qubasic_core.parser import RE_SAVE_PROBS
-        m = RE_SAVE_PROBS.match(stmt)
-        if not m:
-            return False
-        qubits = [int(q.strip()) for q in m.group(1).split(',') if q.strip()]
-        var = m.group(2)
-        try:
-            if self._live is not None:
-                from qiskit.quantum_info import Statevector
-                probs = Statevector(self._live.sv).probabilities(qubits)
-                self._record_save('prob', var, probs)
-                run_vars[var] = probs
-                self.variables[var] = probs
-                self.arrays[var] = probs.tolist()
-                return True
-            qc.save_probabilities(qubits, label=f'prob_{var}')
-            _prev = self.variables.get(var, 0)   # preserve prior value (see SAVE_EXPECT)
-            run_vars[var] = _prev
-            self.variables[var] = _prev
-        except Exception as e:
-            self.io.writeln(f"?SAVE_PROBS ERROR: {e}")
-        return True
-
-    def _try_exec_save_amps(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any]) -> bool:
-        """SAVE_AMPS <indices> -> <var> — save specific amplitudes by index."""
-        from qubasic_core.parser import RE_SAVE_AMPS
-        m = RE_SAVE_AMPS.match(stmt)
-        if not m:
-            return False
-        indices = [int(q.strip()) for q in m.group(1).split(',') if q.strip()]
-        var = m.group(2)
-        try:
-            if self._live is not None:
-                amps = np.array(self._live.sv[indices], dtype=complex)
-                self._record_save('amp', var, amps)
-                run_vars[var] = amps
-                self.variables[var] = amps
-                self.arrays[var] = [complex(a) for a in amps]
-                return True
-            qc.save_amplitudes(indices, label=f'amp_{var}')
-            _prev = self.variables.get(var, 0)   # preserve prior value (see SAVE_EXPECT)
-            run_vars[var] = _prev
-            self.variables[var] = _prev
-        except Exception as e:
-            self.io.writeln(f"?SAVE_AMPS ERROR: {e}")
-        return True
-
-    _NAMED_STATES = ('|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>', '|GHZ3>', '|GHZ4>', '|W>', '|W3>')
-
-    def _state_from_spec(self, spec: str) -> np.ndarray:
-        """The normalized statevector SET_STATE describes: a named state (|0>,
-        |1>, |+>, |->, |BELL>, |GHZ>, |GHZ3>, |GHZ4>, |W>, |W3>) or a list of
-        amplitudes, rescaled to unit norm with a note when it is not."""
-        dim = 2 ** self.num_qubits
-        name = spec.strip().upper()
-        if name in self._NAMED_STATES:
-            if not _named_state_fits(name, self.num_qubits):
-                self.io.writeln(f"  (warning: {name} needs more qubits than "
-                                f"{self.num_qubits}; falling back to |0...0>)")
-            sv = _resolve_named_state(name, self.num_qubits)
-        else:
-            sv = np.array(self._parse_matrix(spec), dtype=complex).ravel()
-        if len(sv) != dim:
-            raise ValueError(f"State vector length {len(sv)} != 2^{self.num_qubits} = {dim}")
-        norm = float(np.sum(np.abs(sv) ** 2))
-        if norm < 1e-12:
-            raise ValueError("the state vector is zero")
-        if abs(norm - 1.0) > 1e-6:
-            sv = sv / np.sqrt(norm)
-            self.io.writeln(f"  (normalized: ||sv||={norm:.6f} -> 1.0)")
-        return sv
-
-    def _try_exec_set_state(self, stmt: str, qc: QuantumCircuit) -> bool:
-        """SET_STATE |name> | [amplitudes] — inject a state at this point of
-        the circuit (see _state_from_spec)."""
-        from qubasic_core.parser import RE_SET_STATE
-        m = RE_SET_STATE.match(stmt)
-        if not m:
-            return False
-        try:
-            from qiskit.quantum_info import Statevector
-            from qiskit_aer.library import SetStatevector
-            sv = self._state_from_spec(m.group(1))
-            qc.append(SetStatevector(Statevector(sv)), list(range(self.num_qubits)))
-        except Exception as e:
-            self.io.writeln(f"?SET_STATE ERROR: {e}")
-        return True
-
-    def cmd_set_state(self, rest: str) -> None:
-        """SET_STATE <state> — set the statevector immediately (stores for next RUN)."""
-        if not rest.strip():
-            self.io.writeln("?USAGE: SET_STATE |+> or SET_STATE [0.707, 0, 0, 0.707]")
-            return
-        try:
-            sv = self._state_from_spec(rest)
-            self.last_sv = sv
-            # Persist so the next RUN starts from this state (prepended at build).
-            self._pending_set_state = sv
-            self.io.writeln(f"STATE SET ({self.num_qubits} qubits) — applied on next RUN")
-        except Exception as e:
-            self.io.writeln(f"?SET_STATE ERROR: {e}")
-
-    def cmd_set_density(self, rest: str) -> None:
-        """SET_DENSITY [[...]] — inject a mixed state (density matrix) for the next RUN.
-
-        Accepts a 2^n x 2^n Hermitian, unit-trace, positive-semidefinite matrix
-        (e.g. [[0.5,0],[0,0.5]] for the maximally mixed qubit). Switches the
-        method to density_matrix; STATE is unavailable for a mixed state, but
-        DENSITY and the measurement histogram reflect it."""
-        expr = rest.strip()
-        if not expr:
-            self.io.writeln("?USAGE: SET_DENSITY [[a,b],[c,d]]  (2^n x 2^n, Hermitian, trace 1)")
-            return
-        try:
-            rho = np.array(self._parse_matrix(expr), dtype=complex)
-            dim = 2 ** self.num_qubits
-            if rho.shape != (dim, dim):
-                raise ValueError(f"matrix is {rho.shape}, need ({dim}, {dim}) for {self.num_qubits} qubit(s)")
-            if not np.allclose(rho, rho.conj().T, atol=1e-6):
-                raise ValueError("matrix is not Hermitian")
-            tr = complex(np.trace(rho))
-            if abs(tr - 1.0) > 1e-6:
-                if abs(tr) < 1e-12:
-                    raise ValueError("matrix has zero trace")
-                rho = rho / tr
-                self.io.writeln(f"  (normalized: trace {tr.real:.4f} -> 1.0)")
-            evals = np.linalg.eigvalsh(rho)
-            if evals.min() < -1e-6:
-                raise ValueError(f"matrix is not positive semidefinite (min eigenvalue {evals.min():.4f})")
-            self._pending_set_density = rho
-            self._pending_set_state = None
-            self.last_sv = None
-            self.sim_method = 'density_matrix'
-            self._circuit_cache_key = None
-            purity = float(np.real(np.trace(rho @ rho)))
-            self.io.writeln(f"DENSITY MATRIX SET ({self.num_qubits} qubits, purity {purity:.4f}) "
-                            f"— applied on next RUN (method=density_matrix)")
-        except Exception as e:
-            self.io.writeln(f"?SET_DENSITY ERROR: {e}")

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import numpy as np
 
-from qubasic_core.host import HostState
+from qubasic_core.host import ApplicationsHost
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 _RE_RANGE = re.compile(r'^(\d+)\s*-\s*(\d+)$')
 
 
-class PrimitivesMixin(HostState):
+class PrimitivesMixin(ApplicationsHost):
     """Program statements that expand to standard subcircuits."""
 
     def _alg_qubit_list(self, spec: str, run_vars: MutableMapping[str, Any] | None = None) -> list[int]:
@@ -330,12 +330,29 @@ class PrimitivesMixin(HostState):
             qc.cz(a, b)
         return True
 
+    # Circuit-building statements, merged into _STMT_KEYWORDS by the terminal;
+    # each handler is (self, stmt, qc, run_vars, backend) -> handled.
+    _CIRCUIT_STATEMENTS: dict[str, tuple[Any, ...]] = {
+        **dict.fromkeys(('QFT', 'IQFT'), (
+            lambda s, st, qc, rv, b: s._try_exec_qft(st, qc, rv, backend=b),)),
+        **dict.fromkeys(('DIFFUSE', 'DIFFUSION'), (
+            lambda s, st, qc, rv, b: s._try_exec_diffuse(st, qc, rv, backend=b),)),
+        **dict.fromkeys(('MCX', 'MCZ', 'MCP'), (
+            lambda s, st, qc, rv, b: s._try_exec_mcgate(st, qc, rv, backend=b),)),
+        'QADDC': (lambda s, st, qc, rv, b: s._try_exec_qaddc(st, qc, rv, backend=b),),
+        'QADD': (lambda s, st, qc, rv, b: s._try_exec_qadd(st, qc, rv, backend=b),),
+        'QPE': (lambda s, st, qc, rv, b: s._try_exec_qpe(st, qc, rv, backend=b),),
+        'AMPLIFY': (lambda s, st, qc, rv, b: s._try_exec_amplify(st, qc, rv, backend=b),),
+        'GRAPHSTATE': (lambda s, st, qc, rv, b: s._try_exec_graphstate(st, qc, rv, backend=b),),
+        'FEATUREMAP': (lambda s, st, qc, rv, b: s._try_exec_featuremap(st, qc, rv, backend=b),),
+    }
+
 
 # ---------------------------------------------------------------------------
 # QUBASIC classical optimization over programs: MINIMIZE and GRADIENT.
 # ---------------------------------------------------------------------------
 
-class OptimizeMixin(HostState):
+class OptimizeMixin(ApplicationsHost):
     """Nelder-Mead, SPSA and gradient descent over program variables."""
 
     def _alg_eval_cost(self, params: list[str], vec: Iterable[float], cost_expr: str) -> float:
@@ -653,7 +670,7 @@ class OptimizeMixin(HostState):
 # QUBASIC phase and amplitude estimation: IQPE, AMPEST and AMPLIFY.
 # ---------------------------------------------------------------------------
 
-class EstimationMixin(HostState):
+class EstimationMixin(ApplicationsHost):
     """Iterative phase estimation, maximum-likelihood amplitude estimation, amplitude amplification."""
 
     def cmd_iqpe(self, rest: str) -> None:
@@ -900,7 +917,7 @@ class EstimationMixin(HostState):
 # QUBASIC quantum machine learning: FEATUREMAP and QKERNEL.
 # ---------------------------------------------------------------------------
 
-class QMLMixin(HostState):
+class QMLMixin(ApplicationsHost):
     """Feature-map circuits and quantum kernel matrices."""
 
     def _emit_feature_map(self, qc: QuantumCircuit, x: Sequence[float], reps: int = 2) -> None:
@@ -1024,7 +1041,7 @@ def _options(rest: str, keys: tuple[str, ...]) -> tuple[str, dict[str, str]]:
     return text.strip(), opts
 
 
-class PhaseMixin(HostState):
+class PhaseMixin(ApplicationsHost):
     """QPE (energy estimation) and QCOUNT (quantum counting)."""
 
     def _phase_readout(self, probs: np.ndarray, shots: int | None) -> tuple[int, np.ndarray]:
@@ -1157,7 +1174,7 @@ class PhaseMixin(HostState):
 # solves the measured equations y . s = 0 over GF(2) for s.
 # ---------------------------------------------------------------------------
 
-class OracleMixin(HostState):
+class OracleMixin(ApplicationsHost):
     """GROVER and SIMON commands for QBasicTerminal."""
 
     def _internal_bits(self, typed: str) -> str:
@@ -1475,7 +1492,7 @@ def graph_edges(spec: str, rng: Any) -> tuple[list[tuple[int, int, float]], int]
     return edges, max(max(a, b) for a, b, _ in edges) + 1
 
 
-class VariationalMixin(HostState):
+class VariationalMixin(ApplicationsHost):
     """QAOA and VQE commands for QBasicTerminal (see the module docstring)."""
 
     # ── shared helpers ────────────────────────────────────────────────
@@ -1862,10 +1879,10 @@ class VariationalMixin(HostState):
 
 # ---------------------------------------------------------------------------
 # QUBASIC factoring: SHOR, order finding with Beauregard's circuit or a
-# permutation oracle (the arithmetic circuits are in shor.py).
+# permutation oracle (the arithmetic circuits are in the section below).
 # ---------------------------------------------------------------------------
 
-class FactoringMixin(HostState):
+class FactoringMixin(ApplicationsHost):
     """The SHOR command."""
 
     # Widest N the modular-arithmetic circuit runs (2n + 3 qubits, n = 8).
@@ -1877,7 +1894,7 @@ class FactoringMixin(HostState):
         Runs Beauregard's circuit: modular exponentiation from Fourier-basis
         adders and controlled modular multipliers on 2n + 3 qubits, with the
         phase read one bit at a time through a single control qubit (see
-        shor.py). The order r of a mod N comes from the measured phases by
+        order_finding_circuit). The order r of a mod N comes from the measured phases by
         continued fractions, and a factor from gcd(a^(r/2) +- 1, N). Even N,
         primes and prime powers are settled classically. ORACLE runs phase
         estimation of the permutation matrix x -> a x mod N instead, on 3n
@@ -2232,7 +2249,7 @@ def _is_prime(n: int) -> bool:
 # QUBASIC linear systems: HHL for Hermitian and dilated non-Hermitian matrices.
 # ---------------------------------------------------------------------------
 
-class HHLMixin(HostState):
+class HHLMixin(ApplicationsHost):
     """The HHL command."""
 
     def _parse_hhl_args(self, rest: str) -> tuple[np.ndarray, np.ndarray, int | None, int]:

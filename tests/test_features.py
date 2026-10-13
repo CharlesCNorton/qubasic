@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 
+import numpy as np
 import pytest
 from conftest import ScriptIO, capture
 
@@ -292,20 +293,13 @@ class TestClassicBasic(unittest.TestCase):
         self.assertEqual(t.variables['i'], 3)
 
     def test_print_using_edge_cases(self):
-        """PRINT USING edge cases: normal format and wider field."""
+        """PRINT USING right-aligns a number in its field."""
         t = QBasicTerminal()
-        # Normal case
         t.process('10 PRINT USING "##.##"; 3.14', track_undo=False)
-        t.process('20 END', track_undo=False)
+        t.process('20 PRINT USING "#####"; 42', track_undo=False)
+        t.process('30 END', track_undo=False)
         _, out = capture(t.cmd_run)
-        self.assertIn('3.14', out)
-
-        # Field wider than value
-        t.cmd_new(silent=True)
-        t.process('10 PRINT USING "#####"; 42', track_undo=False)
-        t.process('20 END', track_undo=False)
-        _, out2 = capture(t.cmd_run)
-        self.assertIn('42', out2)
+        self.assertEqual(out.split('RAN ')[0], ' 3.14\n   42\n')
 
 
 # =====================================================================
@@ -859,7 +853,8 @@ class TestDebugAndProfile(unittest.TestCase):
         self.assertIn('2 runs', out)
 
     def test_timer_callback_fires(self):
-        """_check_timer_callback fires only when interval has elapsed."""
+        """_check_timer_callback jumps to the ON TIMER handler once its interval
+        has passed, keeping the interrupted ip for RETURN."""
         from unittest.mock import patch
         t = QBasicTerminal()
         t._on_timer_target = 100
@@ -869,18 +864,15 @@ class TestDebugAndProfile(unittest.TestCase):
         t._gosub_stack = []
         t.program = {100: 'PRINT "timer"', 110: 'RETURN'}
         sorted_lines = [100, 110]
-
-        # Time hasn't elapsed enough
         with patch('qubasic_core.interpreter.time') as mock_time:
-            mock_time.time.return_value = 1000.5  # only 0.5s elapsed
-            result = t._check_timer_callback(sorted_lines, 0)
-            self.assertIsNone(result)  # should not fire
-
-        # Time has elapsed
+            mock_time.time.return_value = 1000.5  # only 0.5 s elapsed
+            self.assertIsNone(t._check_timer_callback(sorted_lines, 1))
+            self.assertEqual(t._gosub_stack, [])
         with patch('qubasic_core.interpreter.time') as mock_time:
-            mock_time.time.return_value = 1001.5  # 1.5s elapsed > 1.0 interval
-            result = t._check_timer_callback(sorted_lines, 0)
-            self.assertIsNotNone(result)  # should fire, returning ip to jump to
+            mock_time.time.return_value = 1001.5  # 1.5 s elapsed
+            self.assertEqual(t._check_timer_callback(sorted_lines, 1), 0)
+            self.assertEqual(t._gosub_stack, [1])
+            self.assertEqual(t._on_timer_last, 1001.5)
 
 
 # =====================================================================
@@ -1143,13 +1135,17 @@ class TestQuantumOps(unittest.TestCase):
         self.assertIn('MYID', self.t._custom_gates)
 
     def test_ctrl_custom_gate(self):
-        """CTRL H 0, 1 parses and runs."""
+        """CTRL H 0, 1 applies H to qubit 1 only when qubit 0 is 1."""
         self.t.num_qubits = 3
+        self.t.shots = 200
+        self.t._seed = 3
         self.t.process('10 CTRL H 0, 1')
         self.t.process('20 MEASURE')
-        self.t.shots = 10
-        _, out = capture(self.t.cmd_run)
-        self.assertNotIn('SYNTAX ERROR', out)
+        capture(self.t.cmd_run)
+        self.assertEqual(self.t.last_counts, {'000': 200})
+        self.t.process('5 X 0')
+        capture(self.t.cmd_run)
+        self.assertEqual(set(self.t.last_counts), {'001', '011'})
 
     @unittest.skip("requires real simulation")
     def test_inv_rx(self):
@@ -1166,29 +1162,35 @@ class TestQuantumOps(unittest.TestCase):
             self.assertGreater(zeros, total * 0.9)
 
     def test_measure_basis(self):
-        """MEASURE_X and MEASURE_Y parse without syntax error."""
+        """MEASURE_X on |+> always reads 0; MEASURE_Y on |0> reads either."""
+        self.t.num_qubits = 1
+        self.t.shots = 100
+        self.t._seed = 3
         self.t.process('10 H 0')
         self.t.process('20 MEASURE_X 0')
         self.t.process('30 MEASURE')
-        self.t.shots = 100
-        _, out = capture(self.t.cmd_run)
-        self.assertNotIn('SYNTAX ERROR', out)
-
+        capture(self.t.cmd_run)
+        self.assertEqual(self.t.last_counts, {'0': 100})
         t2 = QBasicTerminal()
+        t2.num_qubits = 1
+        t2.shots = 100
+        t2._seed = 3
         t2.process('10 MEASURE_Y 0')
         t2.process('20 MEASURE')
-        t2.shots = 10
-        _, out = capture(t2.cmd_run)
-        self.assertNotIn('SYNTAX ERROR', out)
+        capture(t2.cmd_run)
+        self.assertEqual(set(t2.last_counts), {'0', '1'})
 
     def test_syndrome(self):
-        """SYNDROME ZZ parity measurement."""
+        """SYNDROME ZZ reads the parity of two qubits into a bit."""
         self.t.num_qubits = 3
-        self.t.process('10 SYNDROME ZZ 0 1 -> s0')
-        self.t.process('20 MEASURE')
         self.t.shots = 10
+        self.t.process('10 X 1')
+        self.t.process('20 SYNDROME ZZ 0 1 -> s0')
+        self.t.process('30 PRINT s0')
+        self.t.process('40 MEASURE')
         _, out = capture(self.t.cmd_run)
-        self.assertNotIn('SYNTAX ERROR', out)
+        self.assertEqual(out.split('RAN ')[0].split(), ['1'])
+        self.assertEqual(self.t.last_counts, {'010': 10})
 
     def test_locc_meas_ctrl_connect(self):
         """LOCC mode MEAS (SEND), CTRL, and CONNECT/DISCONNECT."""
@@ -1207,30 +1209,28 @@ class TestQuantumOps(unittest.TestCase):
         self.assertNotIn('ERROR', out.upper())
 
     def test_save_expect_set_state(self):
-        """SAVE_EXPECT and SET_STATE (named + explicit) parse into program."""
-        # SAVE_EXPECT
+        """SAVE_EXPECT records <ZZ> = 1 on a Bell pair; SET_STATE starts the run
+        from a named state or from amplitudes."""
         self.t.num_qubits = 2
-        self.t.process('10 H 0', track_undo=False)
-        self.t.process('20 CX 0,1', track_undo=False)
-        self.t.process('30 SAVE_EXPECT ZZ 0,1 -> zz_val', track_undo=False)
-        self.t.process('40 MEASURE', track_undo=False)
-        self.assertIn(30, self.t.program)
-        self.assertIn('SAVE_EXPECT', self.t.program[30])
-
-        # SET_STATE named
+        for line in ('10 H 0', '20 CX 0,1', '30 SAVE_EXPECT ZZ 0,1 -> zz_val', '40 MEASURE'):
+            self.t.process(line, track_undo=False)
+        capture(self.t.cmd_run)
+        self.assertAlmostEqual(self.t.variables['zz_val'], 1.0, places=9)
         t2 = QBasicTerminal()
         t2.num_qubits = 2
+        t2._seed = 4
         t2.process('10 SET_STATE |BELL>', track_undo=False)
         t2.process('20 MEASURE', track_undo=False)
-        self.assertIn(10, t2.program)
-        self.assertIn('SET_STATE', t2.program[10])
-
-        # SET_STATE explicit amplitudes
+        capture(t2.cmd_run)
+        self.assertEqual(set(t2.last_counts), {'00', '11'})
         t3 = QBasicTerminal()
         t3.num_qubits = 1
+        t3.shots = 400
+        t3._seed = 4
         t3.process('10 SET_STATE [0.707, 0.707]', track_undo=False)
         t3.process('20 MEASURE', track_undo=False)
-        self.assertIn(10, t3.program)
+        capture(t3.cmd_run)
+        self.assertAlmostEqual(t3.last_counts['0'] / 400, 0.5, delta=0.08)
 
     def test_on_measure_on_timer(self):
         """ON MEASURE GOSUB and ON TIMER GOSUB set targets."""
@@ -1319,30 +1319,31 @@ class TestQuantumOps(unittest.TestCase):
         self.assertEqual(len(self.t._user_types['POINT']), 2)
 
     def test_sample_output_format(self):
-        """cmd_sample should produce measurement-like output."""
+        """SAMPLE n draws n shots of the program's circuit."""
         t = QBasicTerminal()
         t.num_qubits = 2
+        t._seed = 5
         t.process('10 H 0', track_undo=False)
         t.process('20 CX 0,1', track_undo=False)
         t.process('30 MEASURE', track_undo=False)
-        _, _ = capture(t.cmd_run)
+        capture(t.cmd_run)
         _, out = capture(t.cmd_sample, '100')
-        # Should contain either sample results or a graceful error message
-        self.assertTrue(len(out) > 0)
-        # Should not contain traceback
-        self.assertNotIn('Traceback', out)
+        self.assertIn('SAMPLED 100 shots (2 unique outcomes)', out)
+        rows = {line.split()[0]: int(line.split()[1])
+                for line in out.splitlines() if line.strip().startswith('|')}
+        self.assertEqual(set(rows), {'|00\u27e9', '|11\u27e9'})
+        self.assertEqual(sum(rows.values()), 100)
 
     def test_estimate_output_format(self):
-        """cmd_estimate should produce output without traceback."""
+        """ESTIMATE gives the exact expectation value: <ZZ> = 1 on a Bell pair."""
         t = QBasicTerminal()
         t.num_qubits = 2
         t.process('10 H 0', track_undo=False)
         t.process('20 CX 0,1', track_undo=False)
         t.process('30 MEASURE', track_undo=False)
-        _, _ = capture(t.cmd_run)
+        capture(t.cmd_run)
         _, out = capture(t.cmd_estimate, 'ZZ 0 1')
-        self.assertTrue(len(out) > 0)
-        self.assertNotIn('Traceback', out)
+        self.assertIn('<ZZ> on qubits [0, 1] = 1.000000', out)
 
 
 # =====================================================================
@@ -1433,32 +1434,24 @@ class TestParserAndErrors(unittest.TestCase):
 # =====================================================================
 class TestFuzz(unittest.TestCase):
     def test_expression_fuzz(self):
-        """Random arithmetic and nested functions do not crash."""
+        """Random arithmetic and function calls evaluate as Python evaluates them."""
+        import math
         import random
+        rng = random.Random(20261012)
         t = QBasicTerminal()
-        ops = ['+', '-', '*', '/']
+        ops = {'+': lambda a, b: a + b, '-': lambda a, b: a - b,
+               '*': lambda a, b: a * b, '/': lambda a, b: a / b}
         for _ in range(100):
-            a = random.uniform(-100, 100)
-            b = random.uniform(-100, 100)
-            op = random.choice(ops)
-            expr = f'{a} {op} {b}'
-            try:
-                t._safe_eval(expr)
-            except (ValueError, ZeroDivisionError):
-                pass
-            except Exception as e:
-                self.fail(f'Unexpected exception for "{expr}": {type(e).__name__}: {e}')
-
-        funcs = ['sin', 'cos', 'sqrt', 'abs', 'exp']
+            a, b = rng.uniform(-100, 100), rng.uniform(-100, 100)
+            op = rng.choice(list(ops))
+            self.assertAlmostEqual(t._safe_eval(f'{a} {op} {b}'), ops[op](a, b), places=9)
+        funcs = {'sin': math.sin, 'cos': math.cos, 'abs': abs, 'exp': math.exp}
         for _ in range(50):
-            f = random.choice(funcs)
-            arg = random.uniform(-10, 10)
-            try:
-                t._safe_eval(f'{f}({arg})')
-            except (ValueError, OverflowError):
-                pass
-            except Exception as e:
-                self.fail(f'Unexpected exception for {f}({arg}): {type(e).__name__}: {e}')
+            name, arg = rng.choice(list(funcs)), rng.uniform(-10, 10)
+            self.assertAlmostEqual(t._safe_eval(f'{name}({arg})'), funcs[name](arg), places=9)
+        for _ in range(20):
+            arg = rng.uniform(0, 100)
+            self.assertAlmostEqual(t._safe_eval(f'sqrt({arg})'), math.sqrt(arg), places=9)
 
     def test_parser_fuzz(self):
         """Random strings return Stmt subclass; known keywords parse to subclasses."""
@@ -1479,27 +1472,27 @@ class TestFuzz(unittest.TestCase):
             self.assertNotEqual(type(result).__name__, 'Stmt')
 
     def test_process_fuzz(self):
-        """Random dispatch and numbered lines do not crash."""
+        """Random command lines and numbered lines raise nothing, and the
+        terminal still runs a program afterwards."""
         import random
         import string
+        rng = random.Random(20261013)
         t = QBasicTerminal()
         for _ in range(100):
-            length = random.randint(1, 40)
-            line = ''.join(random.choices(string.ascii_letters + string.digits + ' ,.:+-*/', k=length))
+            line = ''.join(rng.choices(string.ascii_letters + string.digits + ' ,.:+-*/',
+                                       k=rng.randint(1, 40)))
             try:
-                _, out = capture(t.dispatch, line)
+                capture(t.dispatch, line)
             except (EOFError, SystemExit):
                 pass
-            except Exception as e:
-                self.fail(f'Unhandled exception for dispatch({line!r}): {type(e).__name__}: {e}')
-
         for _ in range(50):
-            num = random.randint(1, 9999)
-            content = ''.join(random.choices(string.ascii_letters + ' ,', k=random.randint(0, 20)))
-            try:
-                t.process(f'{num} {content}', track_undo=False)
-            except Exception as e:
-                self.fail(f'Unhandled exception for process("{num} {content}"): {type(e).__name__}: {e}')
+            content = ''.join(rng.choices(string.ascii_letters + ' ,', k=rng.randint(0, 20)))
+            t.process(f'{rng.randint(1, 9999)} {content}', track_undo=False)
+        t.io = io = ScriptIO()
+        t.cmd_new(silent=True)
+        t.process('10 PRINT 6 * 7', track_undo=False)
+        t.cmd_run()
+        self.assertEqual(io.text.split('RAN ')[0].split(), ['42'])
 
 
 # =====================================================================
@@ -1721,12 +1714,8 @@ class TestPropertyBased(unittest.TestCase):
     @given(st.text(alphabet='ABCDEFGHIJ 0123456789,', min_size=0, max_size=30))
     @settings(max_examples=100)
     def test_parser_no_crash(self, text):
-        """Parser should never crash on arbitrary input."""
-        from qubasic_core.parser import parse_stmt
-        try:
-            parse_stmt(text)
-        except Exception:
-            pass  # errors OK, crashes not
+        """parse_stmt turns any text into a statement and raises nothing."""
+        self.assertIsInstance(parse_stmt(text), Stmt)
 
     @given(st.integers(min_value=1, max_value=8))
     @settings(max_examples=5, deadline=None)
@@ -1848,11 +1837,8 @@ class TestLOCCNoise(unittest.TestCase):
         self.assertGreater(errors / total, 0.05)
 
     def test_non_depolarizing_warns(self):
-        """Noise the LOCC numpy path cannot reproduce should warn.
-
-        depolarizing/amplitude_damping/phase_flip are now supported in LOCC;
-        thermal is not, so it should still warn-and-ignore.
-        """
+        """The LOCC engine reproduces depolarizing, amplitude-damping and
+        phase-flip noise; thermal noise it warns about and ignores."""
         t = QBasicTerminal()
         t.cmd_noise('thermal 50e-6 70e-6 1e-6')
         _, out = capture(t.cmd_locc, 'JOINT 1 1')
@@ -1911,9 +1897,10 @@ class TestVersionAndProbe(unittest.TestCase):
     """VERSION and PROBE commands."""
 
     def test_version(self):
+        from qubasic_core import __version__
         t = QBasicTerminal()
         _, out = capture(t.cmd_version)
-        self.assertIn('QUBASIC', out)
+        self.assertIn(f'QUBASIC {__version__}', out)
         self.assertIn('Qiskit', out)
         self.assertIn('Features', out)
 
@@ -1958,23 +1945,28 @@ class TestStateAfterLOCC(unittest.TestCase):
     """EXPECT/DENSITY/BLOCH should work after LOCC runs."""
 
     def test_expect_after_locc_joint(self):
+        """After SHARE, A's qubit is half of a Bell pair: <Z> = 0."""
         t = QBasicTerminal()
         t.cmd_locc('JOINT 2 2')
         t.process('10 SHARE A 0, B 0', track_undo=False)
         t.process('20 MEASURE', track_undo=False)
-        _, _ = capture(t.cmd_run)
+        capture(t.cmd_run)
         _, out = capture(t.cmd_expect, 'Z 0')
-        self.assertNotIn('NO STATE', out)
-        self.assertIn('<Z>', out)
+        self.assertIn('<Z> on qubits [0] = 0.000000', out)
 
     def test_density_after_locc(self):
+        """DENSITY after SHARE shows the Bell pair's pure state."""
         t = QBasicTerminal()
         t.cmd_locc('JOINT 1 1')
         t.process('10 SHARE A 0, B 0', track_undo=False)
         t.process('20 MEASURE', track_undo=False)
-        _, _ = capture(t.cmd_run)
+        capture(t.cmd_run)
         _, out = capture(t.cmd_density)
-        self.assertIn('Purity', out)
+        bell = [[0.5, 0, 0, 0.5], [0, 0, 0, 0], [0, 0, 0, 0], [0.5, 0, 0, 0.5]]
+        rows = [[float(v) for v in line.split()] for line in out.splitlines()
+                if line.split() and all(c in '0123456789.-' for c in line.replace(' ', ''))]
+        np.testing.assert_allclose(rows, bell, atol=1e-3)
+        self.assertIn('Purity: 1.000000', out)
 
     def test_split_mode_warns(self):
         """SPLIT mode should tell user to use per-register commands."""
@@ -2035,11 +2027,14 @@ class TestRunManifest(unittest.TestCase):
         t.shots = 10
         t.process('10 H 0', track_undo=False)
         t.process('20 MEASURE', track_undo=False)
-        _, _ = capture(t.cmd_run)
+        capture(t.cmd_run)
         m = t._run_manifest
         for key in ['program', 'num_qubits', 'shots', 'method', 'device',
-                     'seed', 'noise_depol_p', 'depth', 'gates', 'time_s']:
+                    'seed', 'noise_depol_p', 'depth', 'gates', 'time_s']:
             self.assertIn(key, m, f"Missing manifest key: {key}")
+        self.assertEqual((m['program'], m['num_qubits'], m['shots'], m['method']),
+                         ({10: 'H 0', 20: 'MEASURE'}, 1, 10, 'stabilizer'))
+        self.assertEqual((m['depth'], m['gates']), (2, 2))
 
     def test_manifest_seed_captured(self):
         t = QBasicTerminal()
@@ -2099,26 +2094,19 @@ class TestGapCoverage(unittest.TestCase):
 
     # 2 quiet mode
     def test_cli_quiet_mode(self):
-        """Running a script with --quiet suppresses banner output."""
+        """A script runs its program after loading it, printing no banner."""
         from qubasic_core.cli import run_script
         with tempfile.NamedTemporaryFile(mode='w', suffix='.qb', delete=False) as f:
-            f.write('10 QUBITS 1\n20 H 0\n30 MEASURE\n40 END\n')
+            f.write('QUBITS 1\n10 H 0\n20 MEASURE\n')
             path = f.name
         try:
             t = QBasicTerminal()
-            buf = io.StringIO()
-            old = sys.stdout
-            sys.stdout = buf
-            try:
-                run_script(path, t)
-            finally:
-                sys.stdout = old
-            out = buf.getvalue()
-            # Banner contains art/title — quiet caller captures but doesn't call print_banner
-            # run_script itself does not print the banner, so output should lack it
-            self.assertNotIn('QUBASIC — Quantum BASIC', out.split('\n')[0] if out else '')
+            _, out = capture(run_script, path, t)
         finally:
             os.unlink(path)
+        self.assertEqual(t.num_qubits, 1)
+        self.assertEqual(set(t.last_counts), {'0', '1'})
+        self.assertNotIn('Quantum BASIC', out)
 
     # 3 JSON mode
     def test_cli_json_mode(self):
@@ -2225,16 +2213,17 @@ class TestGapCoverage(unittest.TestCase):
 
     # 9 CIRCUIT_DEF and APPLY_CIRCUIT
     def test_circuit_def_apply(self):
-        """CIRCUIT_DEF defines a macro; APPLY_CIRCUIT dispatches it."""
+        """CIRCUIT_DEF stores program lines as a macro; APPLY_CIRCUIT runs it at
+        the prompt."""
         self.t.num_qubits = 2
         self.t.process('10 H 0')
         self.t.process('20 CX 0,1')
         _, out_def = capture(self.t.cmd_circuit_def, 'BELL 10-20')
         self.assertIn('CIRCUIT BELL', out_def)
         self.assertIn('2 gates', out_def)
-        self.assertIn('BELL', self.t.subroutines)
-        # APPLY_CIRCUIT — just verify it doesn't crash
+        self.assertEqual(self.t.subroutines['BELL']['body'], ['H 0', 'CX 0,1'])
         _, out_apply = capture(self.t.cmd_apply_circuit, 'BELL')
+        self.assertIn('+0.707|00\u27e9 +0.707|11\u27e9', out_apply)
 
     # 10 TYPE definition
     def test_type_definition(self):
@@ -2428,16 +2417,19 @@ class TestCLIIntegration(unittest.TestCase):
         self.t = QBasicTerminal()
 
     def test_dispatch_unknown_command_no_crash(self):
-        """Unknown commands should produce error, not crash."""
-        self.t.io = buf = ScriptIO()
+        """An unknown word is reported as a syntax error."""
+        self.t.io = io = ScriptIO()
         self.t.dispatch('XYZZY')
-        output = buf.text
-        self.assertIn('?', output)
+        self.assertEqual(io.text.splitlines()[0], '?SYNTAX ERROR: UNKNOWN GATE: XYZZY')
 
     def test_dispatch_empty_line(self):
-        """Empty dispatch should be a no-op."""
+        """An empty or blank line does nothing."""
+        self.t.io = io = ScriptIO()
+        program = dict(self.t.program)
         self.t.dispatch('')
         self.t.dispatch('   ')
+        self.assertEqual(io.text, '')
+        self.assertEqual(self.t.program, program)
 
     def test_seed_dispatch_with_arg(self):
         """SEED 42 should work via dispatch."""
@@ -2458,25 +2450,26 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIn('integer', output.lower())
 
     def test_method_no_args_no_crash(self):
-        """METHOD with no args should not crash."""
+        """METHOD alone shows the method and device and lists the choices."""
         self.t.io = buf = ScriptIO()
-        # This exercises the GPU probe path
         self.t.cmd_method('')
-        output = buf.text
-        self.assertIn('METHOD', output)
+        self.assertIn('METHOD = automatic  DEVICE = CPU', buf.text)
+        self.assertIn('matrix_product_state', buf.text)
 
     def test_cli_seed_flag(self):
-        """--seed flag should be accepted by CLI."""
+        """--seed makes a script's result repeat exactly."""
         import json
         import subprocess
-        result = subprocess.run(
-            [sys.executable, '-m', 'qubasic_core',
-             '--seed', '42', '--json',
-             os.path.join('examples', 'bell.qb')],
-            capture_output=True, text=True, cwd=_ROOT, timeout=30)
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            self.assertIn('counts', data)
+        runs = []
+        for _ in range(2):
+            result = subprocess.run(
+                [sys.executable, '-m', 'qubasic_core', '--seed', '42', '--json',
+                 os.path.join('examples', 'bell.qb')],
+                capture_output=True, text=True, cwd=_ROOT, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            runs.append(json.loads(result.stdout)['counts'])
+        self.assertEqual(set(runs[0]), {'00', '11'})
+        self.assertEqual(runs[0], runs[1])
 
     def test_cli_help_flag(self):
         """--help should exit 0."""
@@ -2508,15 +2501,18 @@ class TestRegressionBehaviors(unittest.TestCase):
     def test_dollar_address_peek(self):
         t = QBasicTerminal(); t.num_qubits = 3
         _, out = capture(t.cmd_peek, '$D000')
-        self.assertNotIn('SYNTAX', out)
-        self.assertIn('3', out)
+        self.assertIn('$D000 = 3.0', out)
 
     def test_option_base_one_indexing(self):
         t = QBasicTerminal(); t.num_qubits = 1
         t.program = {10: 'OPTION BASE 1', 20: 'DIM a(3)',
                      30: 'LET a(1) = 7', 40: 'PRINT a(1)', 50: 'END'}
         _, out = capture(t.cmd_run)
-        self.assertIn('7', out)
+        self.assertEqual(out.split('RAN ')[0].split(), ['7'])
+        self.assertEqual(t.arrays['a'], [7.0, 0.0, 0.0])
+        t.program = {10: 'OPTION BASE 1', 20: 'DIM a(3)', 30: 'LET a(0) = 7', 40: 'END'}
+        _, out = capture(t.cmd_run)
+        self.assertIn('SUBSCRIPT OUT OF RANGE: a(0)', out)
 
     def test_set_state_persists_into_run(self):
         t = QBasicTerminal(); t.num_qubits = 1; t.shots = 400
@@ -2576,57 +2572,161 @@ class TestRegressionBehaviors(unittest.TestCase):
         t.program = {10: 'LET c = 0', 20: 'FOR i = 1 TO 2', 30: 'FOR j = 1 TO 2',
                      40: 'LET c = c + 1', 50: 'NEXT j, i', 60: 'PRINT c', 70: 'END'}
         _, out = capture(t.cmd_run)
-        self.assertIn('4', out)
+        self.assertEqual(out.split('RAN ')[0].split(), ['4'])
 
 
-class TestCommandSurfaceCoverage(unittest.TestCase):
-    """Drive the broad command surface (under the fast mock) for crash-safety
-    and coverage: QoL, program management, debug, screen, and memory commands."""
+class TestCommandEffects(unittest.TestCase):
+    """Commands across the surface, each checked for what it prints and the
+    state it changes."""
 
-    def _ready(self):
+    def _ready(self, answers=()):
         t = QBasicTerminal()
+        t.io = ScriptIO(answers)
         t.num_qubits = 2
         t.shots = 20
-        t.process('10 H 0', track_undo=False)
-        t.process('20 CX 0,1', track_undo=False)
-        t.process('30 MEASURE', track_undo=False)
-        capture(t.cmd_run)
+        t._seed = 5
+        for line in ('10 H 0', '20 CX 0,1', '30 MEASURE'):
+            t.process(line, track_undo=False)
+        t.cmd_run()
         return t
 
-    def test_qol_surface(self):
-        import builtins
-        t = self._ready()
-        for fn, arg in [
-            (t.cmd_draw, '0'), (t.cmd_draw, ''), (t.cmd_list_colored, None),
-            (t.cmd_compare, 'statevector stabilizer'), (t.cmd_heatmap, ''),
-            (t.cmd_plot, 'a 0 1 3'), (t.cmd_animate, 'a 0 1 2 0'),
-            (t.cmd_theme, ''), (t.cmd_theme, 'retro'), (t.cmd_theme, 'none'),
-            (t.cmd_theme, 'bogus'), (t.cmd_explain, ''), (t.cmd_clip, ''),
-        ]:
-            if arg is None:
-                _, out = capture(fn)
-            else:
-                _, out = capture(fn, arg)
-            self.assertIsInstance(out, str)
-        capture(t.cmd_bank, '1')
-        capture(t.cmd_bank, '0')
-        capture(t.cmd_diff, '1')
-        orig = builtins.input
-        builtins.input = lambda p='': 'A'
-        try:
-            capture(t.cmd_quiz)
-        finally:
-            builtins.input = orig
-        from qubasic_core.analysis import did_you_mean, tip_of_the_day
-        from qubasic_core.display import braille_bloch
-        from qubasic_core.engine import quantum_spin
-        self.assertIsInstance(tip_of_the_day(), str)
+    @staticmethod
+    def said(t, fn, *args):
+        """What `fn(*args)` writes to the terminal."""
+        start = len(t.io.parts)
+        fn(*args)
+        return ''.join(t.io.parts[start:])
+
+    def test_assist_commands(self):
+        from unittest import mock
+
+        from qubasic_core.analysis import did_you_mean
+        t = self._ready(answers=['A'])
+        self.assertIn('q0 (0.00,0.00,0.00)', self.said(t, t.cmd_draw, '0'))   # each half of a Bell pair is mixed
+        self.assertIn('q1 (0.00,0.00,0.00)', self.said(t, t.cmd_draw, ''))
+        self.assertIn('\x1b[36mCX\x1b[0m 0,1', self.said(t, t.cmd_list_colored))
+        compared = self.said(t, t.cmd_compare, 'statevector stabilizer')
+        self.assertEqual(sorted(ln.split()[0] for ln in compared.splitlines() if ln.strip().startswith('|')),
+                         ['|00⟩', '|11⟩'])
+        heat = self.said(t, t.cmd_heatmap, '')
+        self.assertIn('mutual information', heat)
+        self.assertEqual(heat.count('2.00'), 2)                                  # I(0:1) = 2 bits
+        self.assertIn('P(top) vs a: 0.0 to 1.0', self.said(t, t.cmd_plot, 'a 0 1 3'))
+        self.assertEqual(self.said(t, t.cmd_animate, 'a 0 1 2 0').count('a='), 2)
+        self.assertIn('?Unknown theme: bogus', self.said(t, t.cmd_theme, 'bogus'))
+        for name in ('retro', 'none'):
+            self.said(t, t.cmd_theme, name)
+            self.assertEqual(t._theme_name, name)
+        explained = self.said(t, t.cmd_explain, '')
+        self.assertIn('put qubit 0 in superposition', explained)
+        self.assertIn('measure all qubits', explained)
+        with mock.patch('subprocess.run') as clipboard:
+            self.assertIn('COPIED 2 lines to clipboard', self.said(t, t.cmd_clip, ''))
+        copied = clipboard.call_args.kwargs['input'].decode()
+        self.assertEqual(sorted(line.split()[0] for line in copied.splitlines()), ['|00>', '|11>'])
+        self.assertIn('BANK 1 (empty)', self.said(t, t.cmd_bank, '1'))
+        self.assertIn('BANK 0 (3 lines)', self.said(t, t.cmd_bank, '0'))
+        self.assertIn('?BANK 1 is empty', self.said(t, t.cmd_diff, '1'))
+        with mock.patch('random.choice', lambda seq: seq[0]), mock.patch('random.shuffle', lambda seq: None):
+            quiz = self.said(t, t.cmd_quiz)
+        self.assertIn('QUIZ: H|0> = ?', quiz)
+        self.assertIn('Correct!', quiz)
+        self.assertEqual(did_you_mean('BLASCH'), 'BLOCH')
         self.assertIsNone(did_you_mean('BLOCH'))
-        self.assertIsInstance(did_you_mean('BLASCH'), (str, type(None)))
-        self.assertIsInstance(quantum_spin(3), str)
-        self.assertTrue(braille_bloch(0.5, 0.5, 0.5))
-        self.assertIsInstance(t._status_prompt(), str)
-        capture(t._suggest_command, 'XYZ')
+        self.assertEqual(t._status_prompt(), '2q ] ')
+
+    def test_program_management(self):
+        t = self._ready(answers=['.', 'REM edited'])
+        self.assertIn('COPIED 10-20 TO 100-110', self.said(t, t.cmd_copy, '10-20 TO 100'))
+        self.assertEqual((t.program[100], t.program[110]), ('H 0', 'CX 0,1'))
+        self.assertIn('MOVED 100-110 TO 200-210', self.said(t, t.cmd_move, '100-110 TO 200'))
+        self.assertEqual(sorted(t.program), [10, 20, 30, 200, 210])
+        self.assertIn('2 match(es)', self.said(t, t.cmd_find, '"H"'))
+        self.assertIn('2 replacement(s)', self.said(t, t.cmd_replace, '"H 0" WITH "X 0"'))
+        self.assertEqual((t.program[10], t.program[200]), ('X 0', 'X 0'))
+        checksum = self.said(t, t.cmd_checksum)
+        self.assertRegex(checksum, r'CHECKSUM: [0-9A-F]{8} \(5 lines\)')
+        self.assertEqual(self.said(t, t.cmd_checksum), checksum)
+        self.assertIn('No subroutines defined', self.said(t, t.cmd_list, 'SUBS'))
+        self.assertIn('_GATES = 4', self.said(t, t.cmd_list, 'VARS'))
+        self.assertIn('No arrays', self.said(t, t.cmd_list, 'ARRAYS'))
+        self.assertIn('NO SUBROUTINES DEFINED', self.said(t, t.cmd_defs))
+        self.assertIn('NO REGISTERS DEFINED', self.said(t, t.cmd_regs))
+        self.assertIn('_GATES = 4', self.said(t, t.cmd_vars))
+        before = dict(t.program)
+        self.assertIn('AUTO 500, 10', self.said(t, t.cmd_auto, '500, 10'))      # '.' ends AUTO at once
+        self.assertEqual(t.program, before)
+        self.assertIn('UPDATED 10', self.said(t, t.cmd_edit, '10'))
+        self.assertEqual(t.program[10], 'REM edited')
+        self.assertNotEqual(self.said(t, t.cmd_checksum), checksum)
+
+    def test_debugging_commands(self):
+        import re
+
+        import numpy as np
+        t = self._ready()
+        self.said(t, t.cmd_profile, 'ON')
+        t.cmd_run()
+        profile = self.said(t, t.cmd_profile, 'SHOW')
+        rows = re.findall(r'^\s+(\d+)\s+[\d.]+\s+[\d.]+\s+(\d+)\s+(\d+)\s+(.+)$', profile, re.M)
+        self.assertEqual(rows, [('10', '1', '1', 'H 0'), ('20', '1', '1', 'CX 0,1')])
+        self.said(t, t.cmd_profile, 'OFF')
+        self.assertFalse(t._profile_mode)
+        self.said(t, t.cmd_watch, 'x')
+        self.assertEqual(t._watches, ['x'])
+        self.said(t, t.cmd_watch, 'CLEAR')
+        self.assertEqual(t._watches, [])
+        self.said(t, t.cmd_breakpoint, '20')
+        self.assertEqual(t._breakpoints, {20})
+        self.assertIn('20: CX 0,1', self.said(t, t.cmd_breakpoint, 'LIST'))
+        self.said(t, t.cmd_breakpoint, '10-30')
+        self.assertEqual(t._breakpoints, set())
+        self.said(t, t.cmd_tron)
+        self.assertTrue(t._trace_mode)
+        self.said(t, t.cmd_troff)
+        self.assertFalse(t._trace_mode)
+        self.assertIn('Collected 3 runs', self.said(t, t.cmd_stats, '3'))
+        self.assertEqual(len(t._stats_runs), 3)
+        self.assertIn('Statistics over 3 runs (20 shots/run)', self.said(t, t.cmd_stats, 'SHOW'))
+        self.said(t, t.cmd_stats, 'CLEAR')
+        self.assertEqual(t._stats_runs, [])
+        t._sv_checkpoints = [(10, np.array([1, 0, 0, 0], dtype=complex)),
+                             (20, np.array([1, 0, 0, 1], dtype=complex) / np.sqrt(2))]
+        t._tt_position = 1
+        self.assertIn('[1] line 20 <<', self.said(t, t.cmd_history))
+        self.assertIn('+1.000|00⟩', self.said(t, t.cmd_rewind, '1'))
+        self.assertEqual(t._tt_position, 0)
+        self.assertIn('+0.707|00⟩ +0.707|11⟩', self.said(t, t.cmd_forward, '1'))
+        self.assertEqual(t._tt_position, 1)
+
+    def test_screen_and_machine_commands(self):
+        from qubasic_core import __version__
+        t = self._ready(answers=['Q'])
+        for mode, name in enumerate(('text', 'histogram', 'statevector', 'Bloch', 'density', 'circuit')):
+            self.assertIn(f'DISPLAY {name}', self.said(t, t.cmd_display, str(mode)))
+            self.assertEqual(t._screen_mode, mode)
+        self.said(t, t.cmd_display, '1')
+        self.said(t, t.cmd_color, 'red, blue')
+        self.assertEqual((t._color_fg, t._color_bg), ('red', 'blue'))
+        self.said(t, t.cmd_prompt, '"> "')
+        self.assertEqual(t._prompt, '> ')
+        self.assertIn('$D000 = 2.0', self.said(t, t.cmd_peek, '$D000'))
+        self.said(t, t.cmd_poke, '$D001, 64')
+        self.assertEqual(t.shots, 64)
+        self.assertRegex(self.said(t, t.cmd_map), r'\$D001 shots\s+= 64\.0')
+        dumped = self.said(t, t.cmd_dump, '0 31')
+        self.assertEqual([v for line in dumped.splitlines() if ':' in line for v in line.split(':')[1].split()],
+                         ['00'] * 32)
+        self.assertRegex(self.said(t, t.cmd_catalog), r'\$E000\s+BELL')
+        self.assertIn('LOADED: Bell State', self.said(t, t.cmd_sys, '$E000'))
+        self.assertLessEqual(set(t.last_counts), {'00', '11'})
+        self.assertIn('MONITOR OFF', self.said(t, t.cmd_monitor))
+        self.assertIn(f'QUBASIC {__version__}', self.said(t, t.cmd_version))
+        self.assertIn('H: gate — 0 parameter(s), 1 qubit(s)', self.said(t, t.cmd_help, 'H'))
+        self.assertIn('LOCC: LOCC [JOINT|SPLIT]', self.said(t, t.cmd_help, 'LOCC'))
+        self.assertIn('commands registered', self.said(t, t.cmd_help, 'STATUS'))
+        self.assertIn('Circuit: 2 qubits, depth 3, 4 gates', self.said(t, t.cmd_decompose))
+        self.assertIn('METHOD = automatic  DEVICE = CPU', self.said(t, t.cmd_method, ''))
 
     def test_bloch_vector_axes(self):
         """_bloch_vector and the $0100 By field carry the right sign on every
@@ -2653,94 +2753,6 @@ class TestCommandSurfaceCoverage(unittest.TestCase):
         t.num_qubits = 1
         t.last_sv = np.array([r2, 1j * r2], dtype=complex)
         self.assertAlmostEqual(t._peek(0x0102), +1.0, places=6)
-
-    def test_program_and_io_surface(self):
-        import builtins
-        t = self._ready()
-        for fn, arg in [
-            (t.cmd_copy, '10-20 TO 100'), (t.cmd_move, '100-110 TO 200'),
-            (t.cmd_find, '"H"'), (t.cmd_replace, '"H 0" WITH "X 0"'),
-            (t.cmd_checksum, None), (t.cmd_list, 'SUBS'), (t.cmd_list, 'VARS'),
-            (t.cmd_list, 'ARRAYS'), (t.cmd_defs, None), (t.cmd_regs, None),
-            (t.cmd_vars, None),
-        ]:
-            if arg is None:
-                capture(fn)
-            else:
-                capture(fn, arg)
-        orig = builtins.input
-        builtins.input = lambda p='': '.'
-        try:
-            capture(t.cmd_auto, '500, 10')
-        finally:
-            builtins.input = orig
-        builtins.input = lambda p='': 'REM edited'
-        try:
-            capture(t.cmd_edit, '10')
-        finally:
-            builtins.input = orig
-
-    def test_debug_screen_memory_surface(self):
-        import builtins
-
-        import numpy as np
-        t = self._ready()
-        capture(t.cmd_profile, 'ON')
-        capture(t.cmd_run)
-        capture(t.cmd_profile, 'SHOW')
-        capture(t.cmd_profile, 'OFF')
-        for a in ('x', '', 'CLEAR'):
-            capture(t.cmd_watch, a)
-        for a in ('20', '', 'LIST', '10-30', 'CLEAR'):
-            capture(t.cmd_breakpoint, a)
-        capture(t.cmd_tron)
-        capture(t.cmd_troff)
-        capture(t.cmd_stats, '3')
-        capture(t.cmd_stats, 'SHOW')
-        capture(t.cmd_stats, 'CLEAR')
-        t._sv_checkpoints = [(10, np.array([1, 0, 0, 0], dtype=complex)),
-                             (20, np.array([0.7071, 0, 0, 0.7071], dtype=complex))]
-        t._tt_position = 1
-        capture(t.cmd_history)
-        capture(t.cmd_rewind, '1')
-        capture(t.cmd_forward, '1')
-        for m in range(6):
-            capture(t.cmd_display, str(m))
-        capture(t.cmd_color, 'green')
-        capture(t.cmd_color, 'red, blue')
-        capture(t.cmd_cls)
-        capture(t.cmd_locate, '2, 3')
-        capture(t.cmd_play, '1')
-        capture(t.cmd_prompt, '"> "')
-        capture(t.cmd_map)
-        capture(t.cmd_catalog)
-        capture(t.cmd_dump, '0 31')
-        capture(t.cmd_peek, '$D000')
-        capture(t.cmd_poke, '$D001, 64')
-        capture(t.cmd_sys, '$E000')
-        orig = builtins.input
-        builtins.input = lambda p='': 'Q'
-        try:
-            capture(t.cmd_monitor)
-        finally:
-            builtins.input = orig
-        capture(t.cmd_version)
-        capture(t.cmd_help)
-        capture(t.cmd_help, 'STATUS')
-        capture(t.cmd_help, 'LOCC')
-        capture(t.cmd_help, 'H')
-        capture(t.cmd_decompose)
-        capture(t.cmd_method, '')
-
-    def test_string_surface(self):
-        t = QBasicTerminal()
-        t.num_qubits = 1
-        t.process('10 LET name$ = "hello"', track_undo=False)
-        t.process('20 PRINT LEFT$(name$, 3)', track_undo=False)
-        capture(t.cmd_run)
-        self.assertEqual(t._eval_string_expr('"abc"'), 'abc')
-        capture(t.cmd_let_str, 'g$', '"hi"')
-        self.assertEqual(t.variables['g$'], 'hi')
 
 
 # =====================================================================

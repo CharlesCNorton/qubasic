@@ -41,7 +41,7 @@ program lines, and most can be typed at the prompt as well.
 | CHAIN | `CHAIN "file"` | Load and run a program, preserving variables. |
 | INCLUDE | `INCLUDE file.qb` | Merge another program's lines into current. |
 | IMPORT | `IMPORT "file.qb"` | Load subroutine definitions with namespace prefix. |
-| DIR | `DIR [path]` | List the .qb files in a directory. |
+| DIR | `DIR [path]` | List the .qb and .bas programs in a directory. |
 | FILES | `FILES [spec]` | List the files matching spec (* and ? wildcards). |
 | OPEN | `OPEN file FOR INPUT\|OUTPUT\|APPEND\|RANDOM\|BINARY AS #n [LEN = n]` | Open a file. |
 | CLOSE | `CLOSE [#n[, #m ...]]` | Close files (every file with no number). |
@@ -103,7 +103,7 @@ program lines, and most can be typed at the prompt as well.
 | DEVICE | `DEVICE <topology> [n] [T1us] [T2us]` | Load a calibrated offline device model. |
 | OPTIMIZE | `OPTIMIZE [level]` | Transpile the program and report the reduction. |
 | RAM | `RAM` | Memory now available, what the current configuration costs, and the widest statevector that fits at each precision. |
-| BENCH | `BENCH [n1 n2 ...]` | Benchmark simulation at various qubit counts. |
+| BENCH | `BENCH [n1 n2 ...]` | Time a statevector run (H, a CX chain and T on every qubit, 100 shots) at each qubit count with its memory; a count that does not fit in available memory is skipped. |
 
 ### Noise and mitigation
 
@@ -236,7 +236,7 @@ program lines, and most can be typed at the prompt as well.
 | BOSONIC | `BOSONIC <modes> <cutoff>` | Initialize modes in vacuum. |
 | DISPLACE | `DISPLACE <mode> <re> [im]` | Displacement D(alpha) = exp(alpha a^dag - alpha* a). |
 | SQUEEZE | `SQUEEZE <mode> <r>` | Single-mode squeezing S(r) = exp(r/2 (a^2 - a^dag^2)). |
-| CAT | `CAT <mode> <re> [im]` | Prepare an even cat state (\|alpha> + \|-alpha>)/N. |
+| CAT | `CAT <mode> <re> [im]` | Put a mode in an even cat state (\|alpha> + \|-alpha>)/N, keeping the other modes; a mode entangled with them is refused. |
 | BS | `BS <m1> <m2> <theta>` | Beamsplitter exp(theta (a^dag b - a b^dag)). |
 | BSTATE | `BSTATE [mode]` | Show <n> and the photon-number distribution. |
 

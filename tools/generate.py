@@ -1,12 +1,14 @@
-"""Regenerate the files written from the code: HostState's method and
-property stubs (qubasic_core/host.py) and docs/reference.md.
+"""Regenerate the files written from the code: the layer hosts in
+qubasic_core/host.py and docs/reference.md.
 
-HostState declares everything QBasicTerminal's classes share. Its attribute
-section is written by hand; the method and property sections are rewritten
-here, one stub per method copied from the class that defines it first in
-QBasicTerminal's MRO (decorators that change the signature kept, default
-values written as ...), and names the stubs need that host.py does not
-import are added to its TYPE_CHECKING block.
+host.py declares what QBasicTerminal's classes share, one host class per
+layer. Each attribute's annotation and each hook (a method declared with a
+docstring) are written by hand and kept; this script moves every attribute
+to the host of the lowest layer whose classes use it, and writes one stub per
+method or property into the host of the layer whose class defines it first
+in QBasicTerminal's MRO (decorators that change the signature kept, default
+values written as ...). Names the stubs need that host.py does not import
+are added to its TYPE_CHECKING block.
 
 The reference lists every command (from the command tables and the syntax
 line that opens each command's docstring), every statement and function
@@ -26,6 +28,7 @@ import copy
 import importlib
 import os
 import sys
+from typing import Any
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -33,17 +36,33 @@ HOST = os.path.join(ROOT, 'qubasic_core', 'host.py')
 REFERENCE = os.path.join(ROOT, 'docs', 'reference.md')
 NL = '\n'
 IND = ' ' * 8
-METHODS = IND + '# Methods, defined across the mixins and resolved through the MRO'
-PROPERTIES = IND + '# Properties'
 KEEP_DECORATORS = {'staticmethod', 'classmethod', 'contextmanager'}
 TRANSPARENT = {'functools.lru_cache', 'lru_cache', 'functools.cache', 'cache'}
 
 
-# ── HostState stubs ──────────────────────────────────────────────────────
+# ── Layer hosts ──────────────────────────────────────────────────────────
+
+HOSTS = ('CoreHost', 'LanguageHost', 'SimulationHost', 'ApplicationsHost', 'PresentationHost',
+         'HostState')
+ATTRIBUTES = IND + '# Attributes'
+HOOKS = IND + '# Hooks: declared for this layer and those above, implemented by a higher layer'
+METHODS = IND + '# Methods'
+PROPERTIES = IND + '# Properties'
+
+
+def ranks() -> dict[str, int]:
+    """Each module's layer, by its position in host.LAYERS."""
+    from qubasic_core.host import LAYERS
+    return {module: rank for rank, (_, modules) in enumerate(LAYERS) for module in modules}
+
+
+def rank_of(cls: type) -> int:
+    return ranks()[cls.__module__.rsplit('.', 1)[-1]]
+
 
 def classes() -> list[type]:
     from qubasic_core.terminal import QBasicTerminal
-    return [c for c in QBasicTerminal.__mro__ if c is not object and c.__name__ != 'HostState']
+    return [c for c in QBasicTerminal.__mro__ if c is not object and c.__name__ not in HOSTS]
 
 
 _trees: dict[str, ast.Module] = {}
@@ -141,9 +160,11 @@ def host_imports(text: str) -> set[str]:
     return names
 
 
-def stubs() -> tuple[list[str], list[str], dict[str, str], list[str]]:
-    method_lines: list[str] = []
-    prop_lines: list[str] = []
+def stubs(hooks: set[str]) -> tuple[list[list[str]], list[list[str]], dict[str, str], list[str]]:
+    """Method and property stubs for each layer's host, the import lines their
+    annotations need, and what could not be written."""
+    methods: list[list[str]] = [[] for _ in HOSTS]
+    props: list[list[str]] = [[] for _ in HOSTS]
     needed: dict[str, str] = {}
     problems: list[str] = []
     seen: set[str] = set()
@@ -161,9 +182,11 @@ def stubs() -> tuple[list[str], list[str], dict[str, str], list[str]]:
             seen.add(name)
             entries.append((name, cls, defs))
     for name, cls, defs in sorted(entries, key=lambda e: e[0]):
+        if name in hooks:
+            continue                     # declared by hand at the layer that calls it
         is_prop = any('property' in d or d.endswith('.setter') for fn in defs
                       for d in decorator_names(fn))
-        target = prop_lines if is_prop else method_lines
+        target = (props if is_prop else methods)[rank_of(cls)]
         for fn in defs:
             decos = decorator_names(fn)
             if is_prop:
@@ -183,17 +206,88 @@ def stubs() -> tuple[list[str], list[str], dict[str, str], list[str]]:
                     continue
                 if needed.setdefault(n, table[n]) != table[n]:
                     problems.append(f"{n!r} bound two ways: {needed[n]} / {table[n]}")
-    return method_lines, prop_lines, needed, problems
+    return methods, props, needed, problems
+
+
+def attribute_ranks(names: set[str]) -> tuple[dict[str, int], list[str]]:
+    """Each declared attribute -> the lowest layer whose classes read or write it,
+    and the attributes no class uses."""
+    found: dict[str, int] = {}
+    for cls in classes():
+        rank = rank_of(cls)
+        for node in ast.walk(class_node(cls)):
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id == 'self' and node.attr in names):
+                found[node.attr] = min(found.get(node.attr, rank), rank)
+    unused = sorted(names - set(found))
+    return {name: found.get(name, len(HOSTS) - 1) for name in names}, unused
+
+
+def host_parts(text: str) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, str], list[str]]:
+    """host.py's lines before the first host class, what each host class keeps by
+    hand (its docstring and hooks, a hook being a method with a docstring), every
+    attribute's annotation, and the lines from `else:` on."""
+    lines = text.split(NL)
+    first = next(i for i, ln in enumerate(lines) if ln.startswith('    class '))
+    end = lines.index('else:')
+    block = next(n for n in ast.parse(text).body
+                 if isinstance(n, ast.If) and ast.unparse(n.test) == 'TYPE_CHECKING')
+    hand: dict[str, dict[str, Any]] = {}
+    annotations: dict[str, str] = {}
+    for cls in block.body:
+        if not (isinstance(cls, ast.ClassDef) and cls.name in HOSTS):
+            continue
+        entry: dict[str, Any] = {'doc': [], 'hooks': []}
+        first_item = cls.body[0] if cls.body else None
+        if (isinstance(first_item, ast.Expr) and isinstance(first_item.value, ast.Constant)
+                and isinstance(first_item.value.value, str)):
+            entry['doc'] = lines[first_item.lineno - 1:first_item.end_lineno]
+        for item in cls.body:
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                segment = ast.get_source_segment(text, item.annotation)
+                assert segment is not None
+                annotations[item.target.id] = segment
+            elif isinstance(item, ast.FunctionDef) and ast.get_docstring(item) is not None:
+                start = min([item.lineno] + [d.lineno for d in item.decorator_list])
+                assert item.end_lineno is not None
+                entry['hooks'].append((item.name, lines[start - 1:item.end_lineno]))
+        hand[cls.name] = entry
+    return lines[:first], hand, annotations, lines[end:]
 
 
 def host_text() -> tuple[str, str]:
     """(current host.py, regenerated host.py)."""
     text = open(HOST, encoding='utf-8').read()
-    lines = text.split(NL)
-    m0 = lines.index(METHODS) + 1
-    end = lines.index('else:')
-    methods, props, needed, problems = stubs()
-    new_lines = lines[:m0] + methods + [''] + [PROPERTIES] + props + lines[end:]
+    head, hand, annotations, foot = host_parts(text)
+    hooks = {name for entry in hand.values() for name, _ in entry['hooks']}
+    methods, props, needed, problems = stubs(hooks)
+    placed, unused = attribute_ranks(set(annotations))
+    problems += [f"{name}: declared, but no class uses it" for name in unused]
+    body: list[str] = []
+    for rank, host in enumerate(HOSTS):
+        entry = hand.get(host, {'doc': [], 'hooks': []})
+        body.append(f"    class {host}({HOSTS[rank - 1]}):" if rank else f"    class {host}:")
+        parts: list[list[str]] = []
+        if entry['doc']:
+            parts.append(entry['doc'])
+        mine = sorted(name for name in annotations if placed[name] == rank)
+        if mine:
+            parts.append([ATTRIBUTES] + [f"{IND}{name}: {annotations[name]}" for name in mine])
+        if entry['hooks']:
+            hook_lines = [HOOKS]
+            for i, (_, src) in enumerate(entry['hooks']):
+                hook_lines += ([''] if i else []) + src
+            parts.append(hook_lines)
+        if methods[rank]:
+            parts.append([METHODS] + methods[rank])
+        if props[rank]:
+            parts.append([PROPERTIES] + props[rank])
+        for i, part in enumerate(parts):
+            body += ([''] if i else []) + part
+        if not parts:
+            body.append(IND + 'pass')
+        body.append('')
+    new_lines = head + body + foot
     have = host_imports(text)
     missing = sorted({line for name, line in needed.items() if name not in have})
     if missing:

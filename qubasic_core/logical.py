@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
 
 from qubasic_core import qec as S
-from qubasic_core.host import HostState
+from qubasic_core.host import ApplicationsHost
 
 if TYPE_CHECKING:
     from qiskit import ClassicalRegister, QuantumCircuit
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 # and every check outcome flips with probability p; the final readout of the
 # two patches is noisy too. Detectors compare consecutive rounds (the new
 # checks have no value before the merge), and the space-time syndrome is
-# decoded by exact minimum-weight matching (dem.py). A failure is a wrong merge
+# decoded by exact minimum-weight matching (qec.py). A failure is a wrong merge
 # outcome or a logical error on either patch.
 # ---------------------------------------------------------------------------
 
@@ -95,7 +95,7 @@ def _bits(word: str, idx: list[int]) -> int:
     return v
 
 
-class LatticeMixin(HostState):
+class LatticeMixin(ApplicationsHost):
     """LATTICE: exact and noisy lattice surgery (see the module docstring)."""
 
     def _lattice_run(self, qc: QuantumCircuit, shots: int) -> list[list[str]]:
@@ -486,7 +486,7 @@ class FrameSimulation:
         return out
 
 
-class EncodedMixin(HostState):
+class EncodedMixin(ApplicationsHost):
     """RUN under LQUBITS with an encoded code (see the module docstring)."""
 
     def _encodable(self, logical: QuantumCircuit, code_name: str) -> str | None:
@@ -622,7 +622,7 @@ class EncodedMixin(HostState):
 # block. The report compares the decoded histogram with the ideal one.
 #
 # CODE SURFACE, REP and SHOR run a program of transversal gates encoded too,
-# by Pauli frames with a decoder after every logical gate (encoded.py). A
+# by Pauli frames with a decoder after every logical gate (EncodedMixin). A
 # program with other gates (T, rotations), and every program under MODEL, runs
 # on the modeled code instead: every operation carries the code's per-op
 # logical error channel (X/Z flips at the code-capacity logical rate for the
@@ -659,13 +659,8 @@ def steane_decode(bits: str) -> int:
     return sum(b) & 1
 
 
-class LogicalMixin(HostState):
-    """LQUBITS logical-qubit mode for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.io, self.variables, self.cmd_qubits,
-    self._noise_model, self.last_circuit, self._qec_code / _logical_error_rate
-    from the code library (codes.py).
-    """
+class LogicalMixin(ApplicationsHost):
+    """LQUBITS logical-qubit mode for QBasicTerminal."""
 
     def _init_logical(self) -> None:
         self._logical_mode: dict | None = None

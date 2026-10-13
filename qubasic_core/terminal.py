@@ -1,20 +1,20 @@
-"""QUBASIC terminal: Engine (the program and session state) and
-QBasicTerminal, the REPL and the command dispatcher.
+"""QUBASIC terminal: Engine, which initializes every layer's state, and
+QBasicTerminal, which composes Engine with every layer's mixins and keeps the
+REPL, the command tables and the merged keyword-statement table.
 
-QBasicTerminal is Engine plus one mixin per subsystem; host.py declares the
-attributes and methods they share, so mypy checks every cross-mixin
-reference. A program runs through one of three execution paths, all driven
-by the statement list parser.py compiles:
+A program runs through one of four execution paths, all driven by the
+statement list parser.compile_program produces:
 
     circuit build   RunPipelineMixin.cmd_run -> ExecutorMixin.build_circuit
                     -> a Qiskit circuit on Aer (dynamic IF on MEAS bits)
     live            LiveMixin: shot by shot on a numpy state, for programs
                     that read measurement results as numbers
     LOCC            LOCCExecutionMixin: numpy registers with SEND and SHARE
+    encoded         EncodedMixin: LQUBITS logical qubits, simulated encoded
+                    or on a modeled logical channel
 
-Control flow, assignments and the keyword statements are shared by all
-three (interpreter.py); only gate application differs. LQUBITS adds the
-encoded paths (logical.py).
+Control flow, assignments and the keyword statements are shared by all four
+(interpreter.py); gate application differs.
 """
 
 from __future__ import annotations
@@ -25,12 +25,10 @@ import warnings as _warnings
 # qiskit's transitive imports emit, so it doesn't precede the banner.
 _warnings.filterwarnings('ignore', message=r".*match a supported version.*")
 
-import os
 import sys
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 from qiskit import transpile
@@ -47,7 +45,7 @@ from qubasic_core.algorithms import (
     QMLMixin,
     VariationalMixin,
 )
-from qubasic_core.analysis import AnalysisMixin, AssistMixin, DemoMixin, ExportMixin, tip_of_the_day
+from qubasic_core.analysis import AnalysisMixin, AssistMixin, ExportMixin, tip_of_the_day
 from qubasic_core.benchmarking import BenchmarkingMixin, ResourceMixin
 from qubasic_core.devices import FileIOMixin, GraphicsMixin, ScreenMixin, SoundMixin
 from qubasic_core.display import BANNER_ART, HELP_TEXT, DisplayMixin, StateDisplayMixin, SweepMixin, VisualizeMixin
@@ -58,8 +56,8 @@ from qubasic_core.engine import (
     MAX_LOOP_ITERATIONS,
     MAX_UNDO_STACK,
     IOPort,
-    NullIO,
     QBasicError,
+    ServicesMixin,
     StdIOPort,
 )
 from qubasic_core.expression import ExpressionMixin, StringMixin, VariableMixin
@@ -70,16 +68,17 @@ from qubasic_core.interpreter import (
     DebugMixin,
     StatementMixin,
     SubroutineMixin,
+    merge_statements,
 )
 from qubasic_core.locc import LOCCMixin
 from qubasic_core.logical import EncodedMixin, LatticeMixin, LogicalMixin
-from qubasic_core.machine import ConfigMixin, MemoryMixin, ProfilerMixin
+from qubasic_core.machine import ConfigMixin, DemoMixin, MemoryMixin, ProfilerMixin
 from qubasic_core.noise import MitigationMixin, NoiseMixin
 from qubasic_core.parser import GATE_ALIASES, GATE_TABLE, RE_LINE_NUM, parse_stmt, strip_comment
 from qubasic_core.physics import BosonicMixin, DynamicsMixin, PauliPropMixin, QuditMixin
 from qubasic_core.qec import CodesMixin, DecodingMixin, RatesMixin
 from qubasic_core.simtools import ram_gb
-from qubasic_core.simulator import ExecutorMixin, LiveMixin, RunPipelineMixin
+from qubasic_core.simulator import ExecutorMixin, LiveMixin, QuantumStatementMixin, RunPipelineMixin, RunStateMixin
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -181,34 +180,6 @@ class Engine(HostState):
         # Timing
         self._start_time: float = time.time()
 
-    @property
-    def last_sv(self) -> Any:
-        """The last run's statevector, computed on first read when the run
-        deferred it (a deferred source runs at most once)."""
-        if self._last_sv is None and self._state_source is not None:
-            source, self._state_source = self._state_source, None
-            self._last_sv = source()
-        return self._last_sv
-
-    @last_sv.setter
-    def last_sv(self, value: Any) -> None:
-        self._last_sv = value
-        self._state_source = None
-
-    def _defer_state(self, source: Any) -> None:
-        """Record a zero-argument callable that produces the state on demand."""
-        self._last_sv = None
-        self._state_source = source
-
-    @contextmanager
-    def _silenced(self) -> Iterator[None]:
-        """Run a block with its output discarded (the inner runs of COMPARE,
-        PLOT, ANIMATE, MINIMIZE, GRADIENT and STATS)."""
-        old, self.io = self.io, NullIO()
-        try:
-            yield
-        finally:
-            self.io = old
 
     def _get_parsed(self, line_num: int) -> Any:
         """Get parsed Stmt for a line, lazily parsing if needed.
@@ -243,42 +214,6 @@ class Engine(HostState):
         self._pending_set_density: Any = None
         self._poke_state_prep = {}
 
-    def _invalidate_run_state(self) -> None:
-        """Drop cached results that describe a now-stale configuration.
-
-        Called when the qubit count changes: last_sv, last_counts,
-        last_circuit, and the transpile cache all assume the previous
-        num_qubits, so reading them afterwards would mislabel (or, for
-        the reshape in _peek_qubit/_bloch_vector, crash) the state.
-        """
-        self.last_counts = None
-        self.last_sv = None
-        self.last_circuit = None
-        self._circuit_cache_key = None
-        self._circuit_cache = None
-
-
-# ---------------------------------------------------------------------------
-# QUBASIC terminal: QBasicTerminal, the REPL and the command dispatcher.
-#
-# QBasicTerminal is Engine (the program and session state, engine_state.py)
-# plus one mixin per subsystem; host.py declares the attributes and methods
-# they share, so mypy checks every cross-mixin reference. A program runs
-# through one of three execution paths, all driven by the statement list
-# program.py compiles:
-#
-#     circuit build   RunPipelineMixin.cmd_run -> ExecutorMixin.build_circuit
-#                     -> a Qiskit circuit on Aer (dynamic IF on MEAS bits)
-#     live            LiveMixin: shot by shot on a numpy state, for programs
-#                     that read measurement results as numbers
-#     LOCC            LOCCExecutionMixin: numpy registers with SEND and SHARE
-#
-# Control flow, assignments and the keyword statements are shared by all
-# three (control_flow.py, classic.py, subs.py, stmt_handlers.py); only gate
-# application differs. LQUBITS adds the encoded paths (logical.py,
-# encoded.py).
-# ---------------------------------------------------------------------------
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # The Terminal
@@ -293,74 +228,35 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
                      PrimitivesMixin, OptimizeMixin, DynamicsMixin, CodesMixin, DecodingMixin, RatesMixin, LogicalMixin,
                      BenchmarkingMixin, EstimationMixin, PhaseMixin, QMLMixin, FactoringMixin, HHLMixin,
                      PauliPropMixin, QuditMixin, BosonicMixin, ResourceMixin, LiveMixin,
-                     VariationalMixin, OracleMixin, LatticeMixin, EncodedMixin):
-    """The QUBASIC session: program, state, REPL and command dispatch.
+                     VariationalMixin, OracleMixin, LatticeMixin, EncodedMixin, RunStateMixin,
+                     QuantumStatementMixin, ServicesMixin):
+    """The QUBASIC session: Engine's state with every layer's mixins.
 
-    Mixins, by subsystem (each module's docstring describes its own):
+    Mixins, by layer (each derives from its layer's host in host.py):
 
-        language     EditingMixin, VariableMixin, ExpressionMixin, StringMixin,
-                     GraphicsMixin, SoundMixin,
-                     ControlFlowMixin, ClassicMixin, SubroutineMixin,
-                     StatementMixin, DebugMixin, ProgramMgmtMixin, FileIOMixin, PersistenceMixin
-        execution    RunPipelineMixin, ExecutorMixin, LiveMixin, LOCCMixin,
-                     NoiseMixin, MitigationMixin, ConfigMixin, MemoryMixin, ProfilerMixin
-        display      DisplayMixin, StateDisplayMixin, ScreenMixin, VisualizeMixin,
-                     AssistMixin, ExportMixin, DemoMixin, AnalysisMixin, SweepMixin
-        quantum      PrimitivesMixin, OptimizeMixin, EstimationMixin, PhaseMixin, QMLMixin,
-                     FactoringMixin, HHLMixin, VariationalMixin, OracleMixin,
-                     DynamicsMixin, PauliPropMixin, BenchmarkingMixin,
-                     ResourceMixin, QuditMixin, BosonicMixin
-        QEC          CodesMixin, DecodingMixin, RatesMixin, LatticeMixin,
-                     LogicalMixin, EncodedMixin
+        core          ServicesMixin
+        language      EditingMixin, ProgramMgmtMixin, PersistenceMixin,
+                      VariableMixin, ExpressionMixin, StringMixin,
+                      ControlFlowMixin, ClassicMixin, SubroutineMixin,
+                      StatementMixin, DebugMixin, FileIOMixin, ScreenMixin,
+                      GraphicsMixin, SoundMixin
+        simulation    RunStateMixin, RunPipelineMixin, ExecutorMixin,
+                      QuantumStatementMixin, LiveMixin, LOCCMixin, NoiseMixin,
+                      MitigationMixin, ConfigMixin, MemoryMixin, ProfilerMixin,
+                      DemoMixin, DynamicsMixin, PauliPropMixin, QuditMixin,
+                      BosonicMixin
+        applications  PrimitivesMixin, OptimizeMixin, EstimationMixin,
+                      PhaseMixin, QMLMixin, OracleMixin, VariationalMixin,
+                      FactoringMixin, HHLMixin, BenchmarkingMixin,
+                      ResourceMixin, CodesMixin, DecodingMixin, RatesMixin,
+                      LogicalMixin, LatticeMixin, EncodedMixin
+        presentation  DisplayMixin, StateDisplayMixin, VisualizeMixin,
+                      SweepMixin, AnalysisMixin, ExportMixin, AssistMixin
 
-    This class keeps the REPL, the command tables, HELP, PROBE and the banner.
+    This class keeps the REPL, the command tables, the merged statement
+    table, the hooks only it can implement, HELP, PROBE and the banner.
     """
 
-    def _gate_info(self, name: str) -> tuple[int, int] | None:
-        """Look up (n_params, n_qubits) for a gate name.
-
-        Checks the global GATE_TABLE first, then instance-local custom gates.
-        Returns None if the gate is unknown.
-        """
-        if name in GATE_TABLE:
-            return GATE_TABLE[name]
-        if name in self._custom_gates:
-            matrix = self._custom_gates[name]
-            n_qubits = int(np.log2(matrix.shape[0]))
-            return (0, n_qubits)
-        return None
-
-    @staticmethod
-    def _sanitize_path(path: str) -> str:
-        """Path sanitization: reject null bytes, control characters, and traversal.
-
-        Blocks directory-traversal sequences (..) and absolute paths that
-        escape the working directory.  For a local REPL the user already has
-        shell access, but this prevents accidental overwrites of system files
-        and hardens INCLUDE chains against path confusion.
-        """
-        if not path or not path.strip():
-            raise ValueError("Empty path")
-        if '\x00' in path:
-            raise ValueError("Path contains null bytes")
-        if any(ord(c) < 32 for c in path):
-            raise ValueError("Path contains control characters")
-        path = path.strip()
-        # Reject traversal sequences — the primary injection vector
-        normalized = os.path.normpath(path)
-        if '..' in normalized.split(os.sep):
-            raise ValueError("Path traversal (..) is not allowed")
-        # Reject absolute paths (Unix / or Windows drive letters)
-        if os.path.isabs(path):
-            raise ValueError("Absolute paths are not allowed")
-        # Catch Windows drive letters on non-Windows hosts (e.g. CI on Linux)
-        import re as _re
-        if _re.match(r'^[A-Za-z]:[/\\]', path):
-            raise ValueError("Absolute paths are not allowed")
-        # Reject UNC paths (\\server\share) and extended-length paths (\\?\)
-        if path.startswith('\\\\'):
-            raise ValueError("UNC/extended paths are not allowed")
-        return path
 
     def __init__(self) -> None:
         """Initialize the QUBASIC terminal with default configuration."""
@@ -394,40 +290,6 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         # Pending mixed-state injection (density matrix) for the next RUN.
         self._pending_set_density = None
 
-    @property
-    def _active_sv(self) -> 'np.ndarray | None':
-        """Return the current authoritative statevector.
-
-        In LOCC JOINT mode, returns the joint statevector.
-        In LOCC SPLIT mode, returns None (use STATE A / STATE B instead,
-        since split registers have independent states).
-        In standard mode, returns last_sv.
-        """
-        if self.locc_mode and self.locc:
-            if self.locc.joint:
-                return np.ascontiguousarray(self.locc.sv).ravel()
-            return None  # split: no single SV; use per-register commands
-        return self.last_sv
-
-    def _active_sv_for_reg(self, reg: str) -> 'tuple[np.ndarray, int] | tuple[None, int]':
-        """Return (statevector, n_qubits) for a specific LOCC register."""
-        if not self.locc:
-            return None, 0
-        if self.locc.joint:
-            return np.ascontiguousarray(self.locc.sv).ravel(), self.locc.n_total
-        sv = self.locc.svs.get(reg)
-        if sv is None:
-            return None, 0
-        return np.ascontiguousarray(sv).ravel(), self.locc.get_size(reg)
-
-    @property
-    def _active_nqubits(self) -> int:
-        """Return the qubit count matching _active_sv."""
-        if self.locc_mode and self.locc:
-            if self.locc.joint:
-                return self.locc.n_total
-            return 0  # split: no single qubit count
-        return self.num_qubits
 
     # ── REPL ──────────────────────────────────────────────────────────
 
@@ -626,6 +488,16 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         'DIFF': 'cmd_diff', 'PLOT': 'cmd_plot', 'THEME': 'cmd_theme',
         'CLIP': 'cmd_clip', 'EXPLAIN': 'cmd_explain', 'DRAW': 'cmd_draw',
     }
+
+    # Every layer's keyword statements, which StatementMixin._try_stmt_handlers
+    # dispatches by first word.
+    _STMT_KEYWORDS = merge_statements(StatementMixin._LANGUAGE_STATEMENTS,
+                                      QuantumStatementMixin._QUANTUM_STATEMENTS,
+                                      PrimitivesMixin._CIRCUIT_STATEMENTS)
+
+    def _is_command(self, word: str) -> bool:
+        """Whether a word names a session command in the command tables."""
+        return word in self._CMD_WITH_ARG or word in self._CMD_NO_ARG
 
     def dispatch(self, line: str) -> None:
         """Parse and execute an immediate command or gate.

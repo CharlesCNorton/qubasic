@@ -25,6 +25,26 @@ from qubasic_core.simtools import _apply_gate_np, _measure_np, _np_gate_matrix, 
 from qubasic_core.terminal import QBasicTerminal
 
 
+def ptm_rows(text):
+    """The Pauli transfer matrix PTOMOGRAPHY prints, as a list of rows."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 5 and parts[0] in ('I', 'X', 'Y', 'Z'):
+            rows.append([float(v) for v in parts[1:]])
+    return rows
+
+
+def matrix_rows(text):
+    """The rows of numbers in a printed matrix."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split()
+        if parts and all(p.replace('.', '', 1).replace('-', '', 1).isdigit() for p in parts):
+            rows.append([float(p) for p in parts])
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # 1. TestExpressions
 # ---------------------------------------------------------------------------
@@ -150,25 +170,19 @@ class TestSecurity(unittest.TestCase):
             self.t._sanitize_path("/etc/passwd")
 
     def test_io_commands_reject_absolute(self):
-        # INCLUDE
-        abs_path = 'C:\\Windows\\system32\\file.qb' if os.name == 'nt' else '/etc/passwd'
-        _, out = capture(self.t.cmd_include, abs_path)
+        windows = os.name == 'nt'
+        _, out = capture(self.t.cmd_include, 'C:\\Windows\\system32\\file.qb' if windows else '/etc/passwd')
         self.assertIn('absolute', out.lower())
-        # SAVE
         self.t.program = {10: 'H 0'}
-        abs_save = 'C:\\tmp\\evil.qb' if os.name == 'nt' else '/tmp/evil.qb'
-        _, out = capture(self.t.cmd_save, abs_save)
+        _, out = capture(self.t.cmd_save, 'C:\\tmp\\evil.qb' if windows else '/tmp/evil.qb')
         self.assertIn('absolute', out.lower())
-        # CSV and EXPORT need results first
         self.t.num_qubits = 1
         self.t.program = {10: 'X 0', 20: 'MEASURE'}
         capture(self.t.cmd_run)
-        abs_csv = 'C:\\tmp\\evil.csv' if os.name == 'nt' else '/tmp/evil.csv'
-        _, out = capture(self.t.cmd_csv, abs_csv)
-        self.assertIn('ERROR', out)
-        abs_qasm = 'C:\\tmp\\evil.qasm' if os.name == 'nt' else '/tmp/evil.qasm'
-        _, out = capture(self.t.cmd_export, abs_qasm)
-        self.assertIn('ERROR', out)
+        _, out = capture(self.t.cmd_csv, 'C:\\tmp\\evil.csv' if windows else '/tmp/evil.csv')
+        self.assertIn('?CSV ERROR: Absolute paths are not allowed', out)
+        _, out = capture(self.t.cmd_export, 'C:\\tmp\\evil.qasm' if windows else '/tmp/evil.qasm')
+        self.assertIn('?EXPORT ERROR: Absolute paths are not allowed', out)
 
 
 # ---------------------------------------------------------------------------
@@ -240,15 +254,20 @@ class TestGates(unittest.TestCase):
             _np_gate_matrix('NONEXISTENT')
 
     def test_dispatch_all_gates(self):
+        """_apply_gate puts every gate of the table into a circuit as the matrix
+        _np_gate_matrix gives, qubit order and global phase aside."""
         from qiskit import QuantumCircuit
+        from qiskit.quantum_info import Operator
         for gate, (n_params, n_qubits) in GATE_TABLE.items():
             if gate in GATE_ALIASES:
                 continue
-            qc = QuantumCircuit(max(n_qubits, 3))
-            try:
-                self.t._apply_gate(qc, gate, [0.5]*n_params, list(range(n_qubits)))
-            except Exception as e:
-                self.fail(f"Gate {gate} failed: {e}")
+            with self.subTest(gate=gate):
+                params = [0.5] * n_params
+                qc = QuantumCircuit(n_qubits)
+                self.t._apply_gate(qc, gate, params, list(range(n_qubits)))
+                want = Operator(_np_gate_matrix(gate, tuple(params)))
+                got = Operator(qc)
+                self.assertTrue(got.equiv(want) or got.reverse_qargs().equiv(want))
 
     def test_custom_gates(self):
         from qiskit import QuantumCircuit
@@ -281,7 +300,7 @@ class TestGates(unittest.TestCase):
         capture(self.t.cmd_locc, '4 4')
         self.t.program = {10: '@A CTRL SWAP 0, 1', 20: 'MEASURE'}
         _, out = capture(self.t.cmd_run)
-        self.assertIn('target', out.lower())
+        self.assertIn('CTRL SWAP needs 0 parameter(s), 1 control and 2 target qubit(s); got 2 argument(s)', out)
 
 
 # ---------------------------------------------------------------------------
@@ -438,11 +457,13 @@ class TestExecution(unittest.TestCase):
         self.t = QBasicTerminal()
 
     def test_bell_state(self):
-        self.t.num_qubits = 2; self.t.shots = 1000
+        self.t.num_qubits = 2; self.t.shots = 1000; self.t._seed = 3
         self.t.program = {10: 'H 0', 20: 'CX 0,1', 30: 'MEASURE'}
         capture(self.t.cmd_run)
-        for s in self.t.last_counts:
-            self.assertIn(s, ['00', '11'])
+        counts = self.t.last_counts
+        self.assertEqual(set(counts), {'00', '11'})
+        self.assertEqual(sum(counts.values()), 1000)
+        self.assertAlmostEqual(counts['00'] / 1000, 0.5, delta=0.06)
 
     def test_x_gate_and_statevector(self):
         self.t.num_qubits = 1; self.t.shots = 100
@@ -1046,15 +1067,20 @@ class TestMeasurement(unittest.TestCase):
         self.t = QBasicTerminal()
 
     def test_basis_measurements(self):
-        for basis, var_prefix, prep in [
-            ('MEASURE_X', 'mx_0', 'H 0'), ('MEASURE_Z', 'mz_0', 'X 0'),
-            ('MEASURE_Y', 'my_0', 'H 0'),
-        ]:
+        """MEASURE_X/Y/Z rotate into the basis and measure into m<basis>_<q>: |+>
+        reads 0 in X, |1> reads 1 in Z, and |+> is random in Y. Printing the bit
+        runs the program live, where it holds each shot's outcome."""
+        for basis, var, prep, want in (('MEASURE_X', 'mx_0', 'H 0', {'0'}),
+                                       ('MEASURE_Z', 'mz_0', 'X 0', {'1'}),
+                                       ('MEASURE_Y', 'my_0', 'H 0', {'0', '1'})):
             with self.subTest(basis=basis):
-                t = QBasicTerminal(); t.num_qubits = 2 if basis == 'MEASURE_X' else 1
+                t = QBasicTerminal(); t.num_qubits = 1; t.shots = 200; t._seed = 3
                 t.program = {10: prep, 20: f'{basis} 0', 30: 'MEASURE'}
                 capture(t.cmd_run)
-                self.assertIn(var_prefix, t.variables)
+                self.assertEqual(set(t.last_counts), want)
+                t.program = {10: prep, 20: f'{basis} 0', 30: f'PRINT {var}', 40: 'MEASURE'}
+                capture(t.cmd_run)
+                self.assertIn(str(int(t.variables[var])), want)
 
     def test_meas(self):
         # MEAS is a real mid-circuit measurement in standard mode (dynamic circuit).
@@ -1076,20 +1102,23 @@ class TestMeasurement(unittest.TestCase):
         self.assertIn('result', t2.variables)
 
     def test_syndrome(self):
-        t = QBasicTerminal(); t.num_qubits = 3
-        t.program = {10: 'H 0', 20: 'CX 0,1', 30: 'SYNDROME ZZ 0 1 -> s0', 40: 'MEASURE'}
-        capture(t.cmd_run)
-        self.assertIn('s0', t.variables)
-        # bad pauli length
+        """SYNDROME measures a stabilizer through an ancilla (the last qubit),
+        leaving the data qubits alone and the ancilla reset."""
+        for prep, pauli, bit in ((['H 0', 'CX 0,1'], 'ZZ', 0),      # a Bell pair has even Z parity
+                                 (['X 0'], 'ZZ', 1),                # |01> has odd Z parity
+                                 (['H 0', 'H 1'], 'XX', 0)):        # |++> is a +1 eigenstate of XX
+            with self.subTest(pauli=pauli, prep=prep):
+                t = QBasicTerminal(); t.num_qubits = 3; t.shots = 40; t._seed = 3
+                lines = prep + [f'SYNDROME {pauli} 0 1 -> s0', 'PRINT s0', 'MEASURE']
+                t.program = {10 * (i + 1): ln for i, ln in enumerate(lines)}
+                _, out = capture(t.cmd_run)
+                self.assertEqual(out.split('RAN ')[0].split(), [str(bit)])
+                self.assertEqual(t.variables['s0'], bit)
+                self.assertTrue(all(key[0] == '0' for key in t.last_counts))     # ancilla reset
         t2 = QBasicTerminal(); t2.num_qubits = 4
         t2.program = {10: 'SYNDROME ZZZ 0 1 -> s', 20: 'MEASURE'}
         _, out = capture(t2.cmd_run)
-        self.assertIn('ERROR', out)
-        # XX stabilizer
-        t3 = QBasicTerminal(); t3.num_qubits = 3
-        t3.program = {10: 'H 0', 20: 'H 1', 30: 'SYNDROME XX 0 1 -> s0', 40: 'MEASURE'}
-        capture(t3.cmd_run)
-        self.assertIn('s0', t3.variables)
+        self.assertIn('Pauli string length (3) must match qubit count (2)', out)
 
     def test_reset(self):
         for prog, expected_state in [
@@ -1236,8 +1265,14 @@ class TestMisc(unittest.TestCase):
             self.assertIn('LOCC', out)
 
     def test_benchmark(self):
-        _, out = capture(self.t.cmd_bench)
-        self.assertIn('Benchmark', out)
+        """BENCH times a statevector run at each qubit count and skips one that
+        cannot fit in memory."""
+        _, out = capture(self.t.cmd_bench, '4 8 60')
+        self.assertIn('statevector', out)
+        rows = [line.split() for line in out.splitlines() if line.strip()[:1].isdigit()]
+        self.assertEqual([r[0] for r in rows], ['4', '8', '60'])
+        self.assertTrue(rows[0][1].endswith('s') and rows[1][1].endswith('s'))
+        self.assertEqual(rows[2][1], 'skipped:')
 
     def test_def_multiline(self):
         import unittest.mock
@@ -1259,7 +1294,14 @@ class TestMisc(unittest.TestCase):
         capture(t.cmd_def, 'LOOP = LOOP')
         t.program = {10: 'LOOP', 20: 'MEASURE'}
         _, out = capture(t.cmd_run)
-        self.assertTrue(any(w in out.lower() for w in ['recursion', 'loop limit', 'depth', 'error']))
+        self.assertIn('RECURSION: LOOP calls itself', out)
+        self.assertIsNone(t.last_counts)
+
+    def test_loop_without_do(self):
+        t = QBasicTerminal(); t.num_qubits = 1
+        t.program = {10: 'LOOP', 20: 'END'}
+        _, out = capture(t.cmd_run)
+        self.assertIn('LINE 10: LOOP without DO', out)
 
     def test_step_mode(self):
         import unittest.mock
@@ -1267,15 +1309,22 @@ class TestMisc(unittest.TestCase):
         with unittest.mock.patch('builtins.input', side_effect=['', '', 'Q']):
             _, out = capture(t.cmd_step)
         self.assertIn('STEP MODE', out)
+        after_h = out.index('+0.707|00\u27e9 +0.707|01\u27e9')
+        after_cx = out.index('+0.707|00\u27e9 +0.707|11\u27e9')
+        self.assertLess(after_h, after_cx)
+        self.assertIn('DONE', out)
         _, out = capture(QBasicTerminal().cmd_step)
         self.assertIn('NOTHING', out)
 
     def test_entropy_comma(self):
+        """ENTROPY a, b takes a partition: a Bell pair on 0, 1 is pure, so it has
+        no entanglement with qubit 2."""
         t = QBasicTerminal(); t.num_qubits = 3
         t.program = {10: 'H 0', 20: 'CX 0,1', 30: 'MEASURE'}
         capture(t.cmd_run)
         _, out = capture(t.cmd_entropy, '0, 1')
-        self.assertIn('entropy', out)
+        self.assertIn('S(A) = 0.000000 bits', out)
+        self.assertIn('Partition A: qubits [0, 1]', out)
 
     def test_package_exports_and_dynamic_meas(self):
         import qubasic_core
@@ -1332,9 +1381,21 @@ class TestAdditionalCoverage(unittest.TestCase):
         self.assertEqual(self.t._on_measure_target, 100)
 
     def test_dir_with_path(self):
-        # DIR with current directory should produce output
-        _, out = capture(self.t.cmd_dir, '.')
-        self.assertTrue(len(out) > 0)
+        """DIR lists the .qb and .bas programs in a directory with their sizes."""
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                os.mkdir('progs')
+                os.mkdir(os.path.join('progs', 'sub'))
+                for name, text in (('a.qb', '10 H 0\n'), ('b.bas', 'PRINT 1\n'), ('c.txt', 'x')):
+                    with open(os.path.join('progs', name), 'w', newline='\n') as f:
+                        f.write(text)
+                _, out = capture(self.t.cmd_dir, 'progs')
+            finally:
+                os.chdir(cwd)
+        rows = [line.split() for line in out.splitlines() if line.strip()]
+        self.assertEqual(rows, [['a.qb', '7', 'bytes'], ['b.bas', '8', 'bytes']])
 
     def test_option_base_stored(self):
         # OPTION BASE 1 in a program should set _option_base to 1
@@ -1373,7 +1434,7 @@ class TestAdditionalCoverage(unittest.TestCase):
 
     def test_named_state_errors(self):
         # |GHZ3> with dim < 8 (fewer than 3 qubits) falls back to |0>
-        from qubasic_core.interpreter import _resolve_named_state
+        from qubasic_core.simulator import _resolve_named_state
         sv = _resolve_named_state('|GHZ3>', 2)  # 2 qubits -> dim=4 < 8
         self.assertAlmostEqual(sv[0], 1.0)  # fallback to |0>
         self.assertAlmostEqual(np.sum(np.abs(sv)**2), 1.0)
@@ -1386,17 +1447,16 @@ class TestAdditionalCoverage(unittest.TestCase):
         self.assertAlmostEqual(sv4[0], 1.0)
 
     def test_stabilizer_fallback(self):
-        # Set stabilizer method, run a circuit with non-Clifford gate (T),
-        # verify fallback message appears
+        """METHOD stabilizer runs a non-Clifford circuit on the statevector, says
+        so, and the summary names the method used."""
         self.t.num_qubits = 1; self.t.shots = 10
         capture(self.t.cmd_method, 'stabilizer')
         self.t.program = {10: 'H 0', 20: 'T 0', 30: 'MEASURE'}
         _, out = capture(self.t.cmd_run)
-        self.assertTrue(
-            'falling back' in out.lower() or self.t.last_counts is not None,
-            "Expected either fallback message or successful execution"
-        )
         capture(self.t.cmd_method, 'automatic')
+        self.assertIn('METHOD stabilizer runs Clifford circuits only', out)
+        self.assertIn('method=statevector', out)
+        self.assertEqual(sum(self.t.last_counts.values()), 10)
 
     def test_multi_line_if(self):
         # Single-line IF/THEN/ELSE verifying the correct branch executes
@@ -1675,17 +1735,16 @@ class TestCharacterization(unittest.TestCase):
         self.assertEqual(set(t2.last_counts), {'0', '1'})
 
     def test_process_tomography(self):
-        # X gate: PTM = diag(1, 1, -1, -1).
-        t = QBasicTerminal(); t.num_qubits = 1
-        t.process('10 X 0', track_undo=False)
-        _, out = capture(t.cmd_ptomography)
-        self.assertIn('Trace-preserving: True', out)
-        self.assertIn('-1.000', out)            # Y and Z rows flip sign
-        # H gate maps Z -> X, so the X column has a +1 off the diagonal.
-        t2 = QBasicTerminal(); t2.num_qubits = 1
-        t2.process('10 H 0', track_undo=False)
-        _, out2 = capture(t2.cmd_ptomography)
-        self.assertIn('Trace-preserving: True', out2)
+        """PTOMOGRAPHY gives the Pauli transfer matrix: X keeps I and X and flips
+        Y and Z; H swaps X and Z and flips Y."""
+        for gate, want in (('X 0', [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, -1, 0], [0, 0, 0, -1]]),
+                           ('H 0', [[1, 0, 0, 0], [0, 0, 0, 1], [0, 0, -1, 0], [0, 1, 0, 0]])):
+            with self.subTest(gate=gate):
+                t = QBasicTerminal(); t.num_qubits = 1
+                t.process(f'10 {gate}', track_undo=False)
+                _, out = capture(t.cmd_ptomography)
+                self.assertIn('Trace-preserving: True', out)
+                np.testing.assert_allclose(ptm_rows(out), want, atol=1e-3)
 
     def test_randomized_benchmarking(self):
         # Noiseless single-qubit RB: perfect recovery, f = 1, error per Clifford = 0.
@@ -1950,13 +2009,25 @@ class TestResources(unittest.TestCase):
         self.assertLessEqual(t2.variables['_OPT_DEPTH'], 1)
 
     def test_crosstalk_noise(self):
-        t = QBasicTerminal(); t.num_qubits = 2; t.shots = 500; t._seed = 1
-        capture(t.cmd_noise, 'crosstalk 0.1')
-        self.assertIsNotNone(t._noise_model)
-        for ln in ['10 H 0', '20 CX 0,1', '30 MEASURE']:
-            t.process(ln, track_undo=False)
-        capture(t.cmd_run)
-        self.assertIsNotNone(t.last_counts)
+        """Crosstalk adds a ZZ error after each two-qubit gate. Between two CZs on
+        |++>, an odd number of errors turns the outcome 00 into 11, which happens
+        with probability 2p(1 - p)."""
+        prog = ['10 H 0', '20 H 1', '30 CZ 0,1', '40 BARRIER', '50 CZ 0,1', '60 H 0', '70 H 1',
+                '80 MEASURE']
+        counts = {}
+        for noise in ('', 'crosstalk 0.1'):
+            t = QBasicTerminal(); t.num_qubits = 2; t.shots = 1000; t._seed = 1
+            if noise:
+                _, out = capture(t.cmd_noise, noise)
+                self.assertIn('NOISE crosstalk (correlated ZZ after 2-qubit gates) p=0.1', out)
+            for ln in prog:
+                t.process(ln, track_undo=False)
+            capture(t.cmd_run)
+            counts[noise] = t.last_counts
+        self.assertEqual(counts[''], {'00': 1000})
+        noisy = counts['crosstalk 0.1']
+        self.assertLessEqual(set(noisy), {'00', '11'})
+        self.assertAlmostEqual(noisy['11'] / 1000, 2 * 0.1 * 0.9, delta=0.04)
 
 
 class TestExpressionsAndStrings(unittest.TestCase):
@@ -2102,7 +2173,7 @@ class TestConventions(unittest.TestCase):
         t.process('DEF BELL = H 0 : CX 0,1', track_undo=False)
         t.program = {10: 'BELL', 20: 'MEASURE'}
         capture(t.cmd_run)
-        self.assertIsNotNone(t.last_counts)  # ran; not blocked as a "command"
+        self.assertEqual(set(t.last_counts), {'00', '11'})
 
 
 class TestProgramState(unittest.TestCase):
@@ -2212,13 +2283,16 @@ class TestRoundingAndBounds(unittest.TestCase):
         self.assertEqual(t.last_counts, {'1': t.shots})
 
     def test_density_after_measure(self):
+        """The maximally mixed state is unchanged by H, so DENSITY after the run
+        shows I/2 with purity 1/2."""
         t = QBasicTerminal(); t.num_qubits = 1
         t.process('SET_DENSITY [[0.5,0],[0,0.5]]', track_undo=False)
         for l in ['10 H 0', '20 MEASURE']:
             t.process(l, track_undo=False)
         capture(t.cmd_run)
         _, dout = capture(t.cmd_density, '')
-        self.assertIn('Density matrix', dout)
+        np.testing.assert_allclose(matrix_rows(dout), [[0.5, 0], [0, 0.5]], atol=1e-3)
+        self.assertIn('Purity: 0.500000', dout)
 
     def test_meas_bit_classical_use(self):
         t = QBasicTerminal(); t.num_qubits = 1

@@ -18,7 +18,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any, Callable, NamedTuple
 
-from qubasic_core.host import HostState
+from qubasic_core.host import LanguageHost
 
 # ---------------------------------------------------------------------------
 # QUBASIC expressions: a QBASIC-precedence parser and a tree evaluator.
@@ -940,11 +940,8 @@ MIXED_FUNCS: dict[str, Any] = {
 }
 
 
-class StringMixin(HostState):
-    """String variable and function support for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.variables, self._safe_eval().
-    """
+class StringMixin(LanguageHost):
+    """String variable and function support for QBasicTerminal."""
 
     def _is_string_var(self, name: str) -> bool:
         return name.endswith('$')
@@ -987,7 +984,7 @@ class Scope(MutableMapping[str, Any]):
 
     A view over the terminal's variable table: reads and writes go straight
     to it, so a SUB or FUNCTION that swaps the table for its own locals (see
-    subs.py) is seen by every statement that holds this view. Deleting a name
+    SubroutineMixin) is seen by every statement that holds this view. Deleting a name
     that is not there does nothing.
     """
 
@@ -1136,7 +1133,7 @@ def letter_ranges(spec: str) -> list[str]:
     return letters
 
 
-class VariableMixin(HostState):
+class VariableMixin(LanguageHost):
     """Typed variables, records, CONST, DIM/REDIM/ERASE and array storage."""
 
     def _init_variables(self) -> None:
@@ -1772,11 +1769,8 @@ def _builtin_table(safe_funcs: dict[str, Any]) -> dict[str, Any]:
     return _BUILTINS
 
 
-class ExpressionMixin(HostState):
-    """Expression evaluation for QBasicTerminal (no eval()).
-
-    Requires: TerminalProtocol — uses self.variables, self.arrays.
-    """
+class ExpressionMixin(LanguageHost):
+    """Expression evaluation for QBasicTerminal (no eval())."""
 
     # Unassigned names are an error while this is set. A running program
     # clears it, so its unassigned variables read as 0 (or ""), as in BASIC;

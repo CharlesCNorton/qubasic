@@ -97,14 +97,34 @@ class TestCommandSurface(unittest.TestCase):
         self.assertNotIn('ERROR', t.io.text)
 
     def test_bosonic_modes(self):
+        """Displacement, squeezing and a beamsplitter give each mode the mean
+        photon number the formulas give; CAT replaces a free mode and refuses
+        one entangled with the others."""
         t = term(seed=3, shots=200)
+
+        def nbar(term_, mode):
+            return float(np.sum(np.arange(term_._bcut) * term_._mode_rdm_diag(mode)))
+
         t.cmd_bosonic('2 12')
-        t.cmd_displace('0 1.0')
-        t.cmd_squeeze('1 0.3')
-        t.cmd_bs('0 1 0.5')
-        t.cmd_bstate('')
+        t.cmd_displace('0 1.0')                      # <n> = |alpha|^2
+        t.cmd_squeeze('1 0.3')                       # <n> = sinh(r)^2
+        n0, n1 = 1.0, np.sinh(0.3) ** 2
+        self.assertAlmostEqual(nbar(t, 0), n0, places=4)
+        self.assertAlmostEqual(nbar(t, 1), n1, places=4)
+        t.cmd_bs('0 1 0.5')                          # mixes by cos^2 and sin^2 of theta
+        c, s = np.cos(0.5) ** 2, np.sin(0.5) ** 2
+        self.assertAlmostEqual(nbar(t, 0), c * n0 + s * n1, places=3)
+        self.assertAlmostEqual(nbar(t, 1), s * n0 + c * n1, places=3)
         t.cmd_cat('0 1.0')
-        self.assertNotIn('ERROR', t.io.text)
+        self.assertIn('?CAT ERROR: mode 0 is entangled with the other modes', t.io.text)
+        t.cmd_bstate('')
+        self.assertIn('Mode 0: <n> = 0.7915', t.io.text)
+        t2 = term(seed=3)
+        t2.cmd_bosonic('2 12')
+        t2.cmd_displace('1 0.5')
+        t2.cmd_cat('0 1.0')                          # even cat: <n> = |alpha|^2 tanh |alpha|^2
+        self.assertAlmostEqual(nbar(t2, 0), np.tanh(1.0), places=3)
+        self.assertAlmostEqual(nbar(t2, 1), 0.25, places=3)
 
     def test_loccinfo_after_send(self):
         t = term(seed=3, shots=200)
@@ -922,7 +942,9 @@ class TestBench(unittest.TestCase):
 
     def test_bench_rows(self):
         out = feed(term(), 'BENCH 2 3')
-        self.assertEqual(sum(1 for line in out.splitlines() if 'automatic' in line), 2)
+        rows = [line.split() for line in out.splitlines() if line.strip()[:1].isdigit()]
+        self.assertEqual([r[0] for r in rows], ['2', '3'])
+        self.assertTrue(all(r[1].endswith('s') for r in rows))
 
 
 if __name__ == '__main__':

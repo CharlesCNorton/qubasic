@@ -1,5 +1,5 @@
-"""The project against itself: package layering and the HostState contract,
-the documentation (tutorial, reference, catalog) and the example programs."""
+"""The project against itself: package layering and the layer hosts, the
+documentation (tutorial, reference, catalog) and the example programs."""
 
 import ast
 import glob
@@ -14,13 +14,13 @@ from qubasic_core import parser
 from qubasic_core.api import CaptureIO
 from qubasic_core.cli import run_script
 from qubasic_core.editing import ProgramMgmtMixin
+from qubasic_core.host import LAYERS as HOST_LAYERS
 from qubasic_core.terminal import QBasicTerminal
 
 # ---------------------------------------------------------------------------
-# Architecture: package layering, the HostState contract, command docstrings.
+# Architecture: package layering, the layer hosts, command docstrings.
 #
-# The package is layered. Each module may import only from its own layer or
-# the layers below it, at module level or inside a function:
+# The package is layered (qubasic_core.host.LAYERS):
 #
 #     core          host, engine
 #     language      parser, expression, interpreter, devices, editing
@@ -29,22 +29,28 @@ from qubasic_core.terminal import QBasicTerminal
 #     presentation  display, analysis
 #     composition   terminal, api, cli, jupyter_kernel
 #
-# host.py may name any layer's types inside its TYPE_CHECKING block, since it
-# declares what the mixins share. Mixins reach one another only through self,
-# so no module outside the composition layer imports a mixin class.
+# Each module imports only from its own layer or the layers below it, at
+# module level or inside a function; host.py may name any layer's types in
+# its TYPE_CHECKING block. Each mixin derives from its layer's host, which
+# declares what that layer and the ones below share, so a call through self
+# reaches no higher layer; a hook, declared at the lowest layer that calls
+# it, is implemented only above it. No module outside the composition layer
+# imports a mixin class.
 # ---------------------------------------------------------------------------
 
 PKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'qubasic_core')
 
-LAYERS = (
-    ('core', {'host', 'engine'}),
-    ('language', {'parser', 'expression', 'interpreter', 'devices', 'editing'}),
-    ('simulation', {'simtools', 'simulator', 'noise', 'locc', 'physics', 'machine'}),
-    ('applications', {'algorithms', 'benchmarking', 'qec', 'logical'}),
-    ('presentation', {'display', 'analysis'}),
-    ('composition', {'terminal', 'api', 'cli', 'jupyter_kernel', '__init__', '__main__'}),
-)
+LAYERS = tuple((name, set(members)) for name, members in HOST_LAYERS)
 COMPOSITION = len(LAYERS) - 1
+HOSTS = ('CoreHost', 'LanguageHost', 'SimulationHost', 'ApplicationsHost', 'PresentationHost', 'HostState')
+
+
+def host_classes():
+    """host.py's layer hosts as parsed classes, lowest layer first."""
+    tree = ast.parse(open(os.path.join(PKG_DIR, 'host.py'), encoding='utf-8').read())
+    block = next(n for n in tree.body if isinstance(n, ast.If) and ast.unparse(n.test) == 'TYPE_CHECKING')
+    found = {n.name: n for n in block.body if isinstance(n, ast.ClassDef)}
+    return [found[name] for name in HOSTS]
 
 
 def modules():
@@ -64,7 +70,7 @@ def layer_of(dotted):
     for rank, (_, members) in enumerate(LAYERS):
         if name in members:
             return rank
-    raise AssertionError(f"{dotted} has no layer; add it to LAYERS in tests/test_project.py")
+    raise AssertionError(f"{dotted} has no layer; add it to LAYERS in qubasic_core/host.py")
 
 
 def internal_imports(tree, dotted):
@@ -178,14 +184,18 @@ class TestHostContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from qubasic_core.terminal import QBasicTerminal
-        cls.mro = [c for c in QBasicTerminal.__mro__ if c is not object and c.__name__ != 'HostState']
-        src = open(os.path.join(PKG_DIR, 'host.py'), encoding='utf-8').read()
-        host_cls = next(n for n in ast.walk(ast.parse(src))
-                        if isinstance(n, ast.ClassDef) and n.name == 'HostState' and len(n.body) > 5)
-        cls.stubs = {}
-        for n in host_cls.body:
-            if isinstance(n, ast.FunctionDef):
-                cls.stubs.setdefault(n.name, []).append(n)
+        cls.mro = [c for c in QBasicTerminal.__mro__ if c is not object and c.__name__ not in HOSTS]
+        cls.stubs, cls.hooks, cls.declared = {}, {}, {}
+        for rank, host in enumerate(host_classes()):
+            for n in host.body:
+                if isinstance(n, ast.FunctionDef):
+                    if ast.get_docstring(n) is None:
+                        cls.stubs.setdefault(n.name, []).append(n)
+                    else:
+                        cls.hooks[n.name] = (rank, n)
+                    cls.declared.setdefault(n.name, rank)
+                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                    cls.declared.setdefault(n.target.id, rank)
 
     def owner(self, name):
         return next((c for c in self.mro if name in c.__dict__), None)
@@ -199,32 +209,91 @@ class TestHostContract(unittest.TestCase):
         ret = ast.unparse(fn.returns) if fn.returns is not None else ''
         return ast.unparse(args) + ' -> ' + ret
 
-    def test_stubs_match_their_definitions(self):
+    def definitions(self, cls, name):
+        src = inspect.getsource(cls)
+        cnode = ast.parse(src.replace('\n    ', '\n') if src.startswith('    ') else src).body[0]
+        return [n for n in cnode.body if isinstance(n, ast.FunctionDef) and n.name == name]
+
+    def test_stubs_and_hooks_match_their_definitions(self):
         mismatches = []
-        for name, stubs in self.stubs.items():
+        declared = {name: stubs for name, stubs in self.stubs.items()}
+        declared.update({name: [node] for name, (_, node) in self.hooks.items()})
+        for name, stubs in declared.items():
             cls = self.owner(name)
-            self.assertIsNotNone(cls, f"HostState declares {name}, which no class defines")
-            src = inspect.getsource(cls)
-            cnode = ast.parse(src.replace('\n    ', '\n') if src.startswith('    ') else src).body[0]
-            defs = [n for n in cnode.body if isinstance(n, ast.FunctionDef) and n.name == name]
+            self.assertIsNotNone(cls, f"host.py declares {name}, which no class defines")
             got = [self.signature_text(s) for s in stubs]
-            want = [self.signature_text(d) for d in defs]
+            want = [self.signature_text(d) for d in self.definitions(cls, name)]
             if got != want:
                 mismatches.append(f"{name}: host {got} vs {cls.__name__} {want}")
         self.assertEqual(mismatches, [], 'run tools/generate.py')
 
     def test_every_shared_method_is_declared(self):
         from qubasic_core.terminal import QBasicTerminal
-        declared = set(self.stubs)
         missing = []
         for cls in self.mro:
             if cls is QBasicTerminal:
                 continue
             for name, val in cls.__dict__.items():
                 if inspect.isfunction(val) or isinstance(val, (staticmethod, classmethod, property)):
-                    if not name.startswith('__') and name not in declared:
+                    if not name.startswith('__') and name not in self.declared:
                         missing.append(f"{cls.__name__}.{name}")
         self.assertEqual(missing, [], 'run tools/generate.py')
+
+    def test_each_mixin_derives_from_its_layers_host(self):
+        wrong = []
+        for dotted, path in modules():
+            rank = layer_of(dotted)
+            for node in ast.parse(open(path, encoding='utf-8').read()).body:
+                if not isinstance(node, ast.ClassDef) or dotted == 'qubasic_core.host':
+                    continue
+                for base in node.bases:
+                    if isinstance(base, ast.Name) and base.id in HOSTS and base.id != HOSTS[rank]:
+                        wrong.append(f"{dotted}.{node.name} derives from {base.id}, not {HOSTS[rank]}")
+        self.assertEqual(wrong, [])
+
+    def test_no_layer_reaches_into_a_layer_above(self):
+        """Each class reaches through self (and through the first argument of
+        the lambdas in its statement tables) only names its own class defines
+        or its layer's host declares."""
+        reaches = []
+        for cls in self.mro:
+            rank = layer_of(cls.__module__)
+            if rank == COMPOSITION:
+                continue
+            node = ast.parse(inspect.getsource(cls).replace('\n    ', '\n')
+                             if inspect.getsource(cls).startswith('    ') else inspect.getsource(cls)).body[0]
+            own = set(cls.__dict__)
+            receivers = {'self'} | {n.args.args[0].arg for n in ast.walk(node)
+                                    if isinstance(n, ast.Lambda) and n.args.args}
+            for n in ast.walk(node):
+                if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                        and n.value.id in receivers and n.attr not in own):
+                    declared = self.declared.get(n.attr)
+                    if declared is not None and declared > rank:
+                        reaches.append(f"{cls.__name__}: {n.attr} is declared in {HOSTS[declared]}")
+        self.assertEqual(sorted(set(reaches)), [])
+
+    def test_hooks_are_implemented_only_above_their_layer(self):
+        wrong = []
+        for name, (rank, _) in self.hooks.items():
+            definers = [c for c in self.mro if name in c.__dict__]
+            if not definers:
+                wrong.append(f"{name}: no class implements it")
+            for c in definers:
+                if layer_of(c.__module__) <= rank:
+                    wrong.append(f"{name}: {c.__name__} implements it in {HOSTS[rank]}'s layer or below")
+        self.assertEqual(wrong, [])
+
+    def test_the_statement_table_merges_every_layer(self):
+        from qubasic_core.algorithms import PrimitivesMixin
+        from qubasic_core.interpreter import StatementMixin
+        from qubasic_core.simulator import QuantumStatementMixin
+        tables = (StatementMixin._LANGUAGE_STATEMENTS, QuantumStatementMixin._QUANTUM_STATEMENTS,
+                  PrimitivesMixin._CIRCUIT_STATEMENTS)
+        merged = QBasicTerminal._STMT_KEYWORDS
+        self.assertEqual(set(merged), set().union(*tables))
+        for word, handlers in merged.items():
+            self.assertEqual(handlers, tuple(h for t in tables for h in t.get(word, ())))
 
 
 class TestCommandDocstrings(unittest.TestCase):

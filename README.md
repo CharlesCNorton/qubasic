@@ -20,7 +20,8 @@ QUBASIC is a BASIC interpreter whose programs build and run quantum circuits.
 The language is QBASIC's: typed variables, records, arrays with bounds,
 SUB and FUNCTION, labels, SELECT CASE, PRINT USING, sequential, random and
 binary files, graphics on QBASIC's SCREEN modes, PLAY and SOUND, timers and
-error trapping, so QBASIC programs run unchanged. Gates are statements
+error trapping, so QBASIC programs run unchanged, with the graphics screen
+drawn in the terminal and sound recorded for `SAVEWAV`. Gates are statements
 (`H 0`, `CX 0, 1`), measurements feed back into the program, and RUN simulates
 the result on Qiskit Aer or on QUBASIC's own engines. Around that sit noise
 models and error mitigation, quantum algorithms, error-correcting codes with
@@ -127,8 +128,14 @@ relatives, and `KILL`, `NAME`, `MKDIR`, `RMDIR`, `CHDIR` and `FILES`.
 Graphics: `SCREEN` 1, 2 and 7 to 13 open QBASIC's graphics modes, with `PSET`,
 `LINE` (boxes, styles), `CIRCLE` (arcs, ellipses), `PAINT`, `DRAW`, `VIEW`,
 `WINDOW`, `PALETTE`, `GET`/`PUT` of images, `POINT` and `PMAP`. The picture is
-drawn in the terminal when the program ends (colour cells on a terminal,
-shading elsewhere), `SHOW` redraws it and `SAVEPNG file.png SCREEN` saves it.
+drawn in the terminal in colour cells, or as shading off a terminal. At a
+terminal it is redrawn in place while the program runs, from the first
+`SLEEP`, `INKEY$`, `GET` or `INPUT` or after half a second, so animations and
+games show as they run; otherwise it appears when the program ends. `SHOW`
+redraws it and `SAVEPNG file.png SCREEN` saves it. At an interactive terminal a
+program runs until it ends or Ctrl+C stops it; off a terminal and in agent mode
+a run stops after 100,000 statements (`POKE $D006` changes the limit), and a
+circuit build stops at a million instructions everywhere.
 
 Sound: `PLAY` takes QBASIC's music macro language and `SOUND` a frequency and
 duration; `SAVEWAV file.wav` writes the result. Events: `ON TIMER(n) GOSUB`
@@ -251,22 +258,26 @@ addresses.
 python -m pytest tests/                     the test suite
 ruff check qubasic_core tests tools         lint
 mypy qubasic_core                           types (strict)
-python tools/generate.py                    regenerate HostState's stubs and docs/reference.md
+python tools/generate.py                    regenerate host.py's stubs and docs/reference.md
 ```
 
 The interpreter is one object, `QBasicTerminal` (`terminal.py`), assembled
-from a state container and 56 mixins, one per concern. Mixins never import one
-another: they share state and call each other through `self`, and `HostState`
-(`host.py`) declares everything they share, the attributes by hand and the
-methods as signature stubs that `tools/generate.py` writes from the
-definitions, so mypy checks every cross-mixin call. Each module imports only
-from its own layer or the layers below it:
+from a state container and 58 mixins, one per concern, in six layers. A module
+imports only from its own layer or the layers below it, and the same holds for
+calls through `self`: each layer has a host class in `host.py` declaring what
+its mixins may use, the attributes and methods of its own layer and the ones
+below, and each mixin derives from its layer's host, so mypy rejects a call
+into a higher layer. The few places where a lower layer must reach up, such as
+RUN printing its histogram or LOAD entering lines as if typed, are hooks: a
+method declared with a docstring at the lowest layer that calls it and
+implemented only above it. `tools/generate.py` writes the method stubs and
+places each attribute at the lowest layer that uses it.
 
 | Layer | Modules |
 |---|---|
-| core | `host` (the shared declarations), `engine` (limits, result codes, errors, the I/O protocol) |
+| core | `host` (the layer table and hosts), `engine` (limits, result codes, errors, the I/O protocol, output and path services) |
 | language | `parser` (statement parser, compiler, catalog), `expression` (expressions, variables, formatting), `interpreter` (control flow, procedures, statements), `devices` (graphics, sound, screen, files), `editing` |
-| simulation | `simtools` (capacity, the numpy statevector engine, backends), `simulator` (RUN, circuit build, live runs), `noise`, `locc`, `physics` (dynamics, chemistry, qudits, bosonic modes), `machine` (settings, memory map, profiler) |
+| simulation | `simtools` (capacity, the numpy statevector engine, backends), `simulator` (RUN, circuit build, quantum statements, live runs), `noise`, `locc`, `physics` (dynamics, chemistry, qudits, bosonic modes), `machine` (settings, memory map, profiler, demos) |
 | applications | `algorithms`, `benchmarking`, `qec` (codes, decoders, circuit-level noise), `logical` (logical qubits, lattice surgery) |
 | presentation | `display`, `analysis` |
 | composition | `terminal`, `api`, `cli` (with the browser REPL), `jupyter_kernel` |
@@ -283,11 +294,14 @@ encoded on logical qubits.
 A command is a method `cmd_<name>(self, rest)` on the mixin of its concern
 whose docstring opens with its syntax, registered in `_CMD_WITH_ARG` or
 `_CMD_NO_ARG` (`terminal.py`) and placed under a topic in `COMMAND_TOPICS`
-(`parser.py`), after which `tools/generate.py` declares it on `HostState` and
-lists it in the reference. A statement is a handler in `_STMT_KEYWORDS`
-(`interpreter.py`) with its line in the catalog's `STATEMENTS`.
-`tests/test_project.py` checks the layering, the stubs, the docstrings, the
-catalog's coverage of every dispatched keyword and the generated reference.
+(`parser.py`), after which `tools/generate.py` declares it in its layer's host
+and lists it in the reference. A statement is a handler in its layer's table
+(`_LANGUAGE_STATEMENTS` in `interpreter.py`, `_QUANTUM_STATEMENTS` in
+`simulator.py`, `_CIRCUIT_STATEMENTS` in `algorithms.py`), which the terminal
+merges into `_STMT_KEYWORDS`, with its line in the catalog's `STATEMENTS`.
+`tests/test_project.py` checks the layering of imports and of calls, the
+hooks, the stubs, the docstrings, the catalog's coverage of every dispatched
+keyword and the generated reference.
 Continuous integration runs the suite on Python 3.10 to 3.13 across Linux,
 Windows and macOS with coverage, the lint and type checks,
 `tools/generate.py --check`, and a build of the wheel that installs it and

@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from qubasic_core.host import HostState
+from qubasic_core.host import ApplicationsHost
 
 # ---------------------------------------------------------------------------
 # Linear algebra over GF(2) and CSS codes from their check matrices.
@@ -211,7 +211,7 @@ def make_patch(rows: int, cols: int, offset: int = 0,
 
 
 def code_dict(p: Patch, name: str = '') -> dict:
-    """The patch as a string-stabilizer code for the decoders in decoding.py (qubits
+    """The patch as a string-stabilizer code for the decoders below (qubits
     renumbered 0..n-1 in patch order)."""
     order = {q: k for k, q in enumerate(p.qubits)}
     n = len(order)
@@ -350,7 +350,7 @@ def _weight(p: str) -> int:
     return sum(1 for c in p if c != 'I')
 
 
-class CodesMixin(HostState):
+class CodesMixin(ApplicationsHost):
     """Named stabilizer codes, their parameters and encoding demonstrations."""
 
     def _qec_code(self, name: str, distance: int = 3) -> dict:
@@ -640,7 +640,7 @@ def _osd0(H: np.ndarray, syndrome: np.ndarray, Lq: np.ndarray) -> np.ndarray:
     return e
 
 
-class DecodingMixin(HostState):
+class DecodingMixin(ApplicationsHost):
     """Decoder choice and syndrome decoding for code-capacity experiments."""
 
     # Lookup tables are built while the reachable syndrome space is at most
@@ -1365,7 +1365,7 @@ def memory_circuit(code: str, d: int, rounds: int) -> MemoryCircuit:
 # circuit-level memory experiments, and THRESHOLD.
 # ---------------------------------------------------------------------------
 
-class RatesMixin(HostState):
+class RatesMixin(ApplicationsHost):
     """LOGICAL_ERROR_RATE and THRESHOLD."""
 
     def _logical_error_rate(self, code: dict, p: float, trials: int, rng: np.random.Generator,
@@ -1405,7 +1405,7 @@ class RatesMixin(HostState):
         allows it and to exact minimum-weight matching (blossom) beyond;
         MATCH (alias UF) forces matching, MWPM uses pymatching when installed,
         BP the internal BP+OSD. CIRCUIT switches to circuit-level noise: a
-        memory experiment of d rounds of syndrome extraction (circuit_noise.py),
+        memory experiment of d rounds of syndrome extraction (MemoryCircuit),
         its detector error model found by propagating every fault through the
         circuit, decoded by space-time matching (the trailing counts are shots,
         default 5000, and rounds); CIRCUIT STIM runs stim's generated circuits

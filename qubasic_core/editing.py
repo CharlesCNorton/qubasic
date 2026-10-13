@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from qubasic_core.engine import MAX_INCLUDE_DEPTH
 from qubasic_core.expression import Record
-from qubasic_core.host import HostState
+from qubasic_core.host import LanguageHost
 from qubasic_core.parser import GATE_TABLE, RE_CHAIN, RE_DEF_BEGIN, RE_DEF_SINGLE, RE_MERGE, parse_stmt
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def renumber_refs(text: str, line_map: dict[int, int]) -> str:
     return '"'.join(pieces)
 
 
-class EditingMixin(HostState):
+class EditingMixin(LanguageHost):
     """Program editing and definition commands for QBasicTerminal."""
 
     def cmd_list(self, rest: str = '') -> None:
@@ -252,19 +252,6 @@ class EditingMixin(HostState):
         self.subroutines[name] = {'body': body, 'params': []}
         self.io.writeln(f"CIRCUIT {name} = lines {start}-{end} ({len(body)} gates)")
 
-    def cmd_apply_circuit(self, rest: str) -> None:
-        """APPLY_CIRCUIT name [@offset] — apply a circuit macro."""
-        m = re.match(r'(\w+)(?:\s+@(\d+))?', rest)
-        if not m:
-            self.io.writeln("?USAGE: APPLY_CIRCUIT <name> [@offset]")
-            return
-        name = m.group(1).upper()
-        offset = int(m.group(2)) if m.group(2) else 0
-        if name not in self.subroutines:
-            self.io.writeln(f"?UNDEFINED CIRCUIT: {name}")
-            return
-        call_str = f"{name} @{offset}" if offset else name
-        self.run_immediate(call_str)
 
     def cmd_reg(self, rest: str) -> None:
         """REG <name> <size> — allocate a named qubit register."""
@@ -314,18 +301,68 @@ class EditingMixin(HostState):
         """UNDO — undo the last program edit, showing what changes."""
         return self.cmd_undo_preview()
 
+    def cmd_list_colored(self) -> None:
+        """LIST with syntax highlighting."""
+        if not self.program:
+            self.io.writeln("EMPTY PROGRAM")
+            return
+        t = self._theme
+        from qubasic_core.parser import GATE_ALIASES, GATE_TABLE
+        gate_names = set(GATE_TABLE.keys()) | set(GATE_ALIASES.keys())
+        flow_kw = {'FOR', 'NEXT', 'WHILE', 'WEND', 'IF', 'THEN', 'ELSE',
+                    'GOTO', 'GOSUB', 'RETURN', 'END', 'DO', 'LOOP', 'EXIT',
+                    'SUB', 'FUNCTION', 'CALL', 'SELECT', 'CASE'}
+        for num in sorted(self.program.keys()):
+            raw = self.program[num]
+            upper = raw.strip().upper()
+            if upper.startswith('REM') or upper.startswith("'"):
+                colored = f"{t['comment']}{raw}{t['reset']}"
+            else:
+                words = raw.split()
+                parts = []
+                for w in words:
+                    wu = w.upper().rstrip(',').rstrip(':')
+                    if wu in gate_names:
+                        parts.append(f"{t['gate']}{w}{t['reset']}")
+                    elif wu in flow_kw:
+                        parts.append(f"{t['flow']}{w}{t['reset']}")
+                    elif w.startswith('"') or w.startswith("'"):
+                        parts.append(f"{t['string']}{w}{t['reset']}")
+                    else:
+                        parts.append(w)
+                colored = ' '.join(parts)
+            self.io.writeln(f"  {num:5d}  {colored}")
+
+    def cmd_undo_preview(self) -> None:
+        """UNDO — show what will change and restore."""
+        if not self._undo_stack:
+            self.io.writeln("?NOTHING TO UNDO")
+            return
+        prev = self._undo_stack[-1]
+        # Show diff
+        added = set(self.program.keys()) - set(prev.keys())
+        removed = set(prev.keys()) - set(self.program.keys())
+        changed = {k for k in set(self.program.keys()) & set(prev.keys())
+                    if self.program[k] != prev[k]}
+        if added:
+            self.io.writeln(f"  Undo will remove: {sorted(added)}")
+        if removed:
+            self.io.writeln(f"  Undo will restore: {sorted(removed)}")
+        if changed:
+            for k in sorted(changed):
+                self.io.writeln(f"  Undo will revert {k}: {self.program[k]} -> {prev[k]}")
+        # Apply
+        self.program = self._undo_stack.pop()
+        self._parsed.clear()
+        self.io.writeln(f"UNDO ({len(self.program)} lines)")
+
 
 # ---------------------------------------------------------------------------
 # QUBASIC program management — AUTO, EDIT, COPY, MOVE, FIND, REPLACE, slots, CHECKSUM, CHAIN, MERGE, LIST+.
 # ---------------------------------------------------------------------------
 
-class ProgramMgmtMixin(HostState):
-    """Program management commands for QBasicTerminal.
-
-    Requires: TerminalProtocol — uses self.program, self.variables,
-    self.num_qubits, self.shots, self.process(), self.cmd_new(),
-    self._sanitize_path().
-    """
+class ProgramMgmtMixin(LanguageHost):
+    """Program management commands for QBasicTerminal."""
 
     def _init_program_mgmt(self) -> None:
         self._program_slots: dict[int, dict[int, str]] = {}
@@ -757,7 +794,7 @@ def number_source(lines: list[str]) -> list[tuple[int, str]]:
     return out
 
 
-class PersistenceMixin(HostState):
+class PersistenceMixin(LanguageHost):
     """Programs and session settings on disk."""
 
     def cmd_save(self, rest: str) -> None:
@@ -1063,19 +1100,19 @@ class PersistenceMixin(HostState):
         self.io.writeln(f"IMPORTED {mod_name} ({import_count} definitions from {path})")
 
     def cmd_dir(self, rest: str = '') -> None:
-        """DIR [path] — list the .qb files in a directory."""
+        """DIR [path] — list the .qb and .bas programs in a directory."""
         if rest.strip():
             path = self._sanitize_path(rest)
         else:
             path = '.'
         try:
-            files = [f for f in os.listdir(path) if f.endswith('.qb')]
+            files = [f for f in os.listdir(path) if f.lower().endswith(('.qb', '.bas'))]
             if files:
                 for f in sorted(files):
                     size = os.path.getsize(os.path.join(path, f))
                     self.io.writeln(f"  {f:<30} {size:>6} bytes")
             else:
-                self.io.writeln("  No .qb files found")
+                self.io.writeln("  No .qb or .bas files found")
         except Exception as e:
             self.io.writeln(f"?DIR ERROR: {e}")
 

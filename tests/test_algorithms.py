@@ -286,12 +286,13 @@ class TestPhaseEstimation(unittest.TestCase):
         self.assertIn('?QPE ERROR', t.io.text)
 
     def test_qpe_statement_form_runs_at_the_prompt(self):
-        t = term(4, seed=7)
-        t.num_qubits = 4
-        t.dispatch('UNITARY PH = [[1, 0], [0, -1]]')
-        t.dispatch('X 3')
-        t.dispatch('QPE 0-2 3 PH')
-        self.assertNotIn('?', t.io.text)
+        """QPE at the prompt writes the eigenphase into the counting qubits, the
+        first one listed holding the most significant bit."""
+        for matrix, state in (('[[1, 0], [0, -1]]', '|1001\u27e9'),      # phase 1/2
+                              ('[[1, 0], [0, 1j]]', '|1010\u27e9')):     # phase 1/4
+            t = term(4, seed=7)
+            out = feed(t, f'UNITARY PH = {matrix}', 'X 3 : QPE 0-2 3 PH')
+            self.assertIn(f'+1.000{state}', out)
 
     def test_counting(self):
         t = term(4, seed=7)
