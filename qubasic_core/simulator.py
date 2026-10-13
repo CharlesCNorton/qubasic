@@ -736,7 +736,8 @@ class RunPipelineMixin(SimulationHost):
                     transpile(q2, sv_backend, optimization_level=self._transpile_opt_level),
                     **kw).result()
                 self.last_sv = np.asarray(sv_result.data()['qb_state'].data)
-                self._extract_save_results(sv_result)
+                ensemble = self._ensemble_saves(qc_sv, prec)
+                self._extract_save_results(ensemble if ensemble is not None else sv_result)
             except (RuntimeError, ValueError, TypeError, KeyError):
                 self.last_sv = None
         self.last_counts = None
@@ -757,6 +758,31 @@ class RunPipelineMixin(SimulationHost):
                             f"{cap.fmt_gb(cap.available_bytes())} available{hint})")
         else:
             self.io.writeln("(no MEASURE — use STATE, PROBS, or BLOCH to inspect)")
+
+    def _ensemble_saves(self, qc: QuantumCircuit, precision: str) -> Result | None:
+        """Under noise, the SAVE_* values of a measure-free circuit over the
+        ensemble rather than one trajectory: exactly on the density matrix
+        when it fits, otherwise averaged over SHOTS trajectories. None when
+        the run is noiseless, saves nothing, or the ensemble run fails."""
+        from qubasic_core import simtools as cap
+        if not (self.noise.model or self.noise.per_qubit):
+            return None
+        if not any(inst.operation.name.startswith('save_') for inst in qc.data):
+            return None
+        n = qc.num_qubits
+        if cap.fits(cap.aer_peak_bytes(n, 'density_matrix', precision)):
+            method, shots = 'density_matrix', 1
+        else:
+            method, shots = 'statevector', self.shots
+        backend = self._make_backend(method, include_noise=True, precision=precision)
+        kw: dict = {'shots': shots}
+        if self._seed is not None:
+            kw['seed_simulator'] = self._seed
+        try:
+            return backend.run(transpile(qc, backend, optimization_level=self._transpile_opt_level),
+                               **kw).result()
+        except Exception:
+            return None
 
     def _add_final_measurement(self, qc: QuantumCircuit) -> None:
         """Append the program's final measurement: its MEASURE subset into a

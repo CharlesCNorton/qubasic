@@ -284,6 +284,44 @@ Depolarizing noise shrinks ⟨ZZ⟩ by the same factor at every fold, so the
 exponential fit recovers the noiseless value exactly here; other noise and
 other fits leave a residual error, which ZNE prints beside the estimate.
 
+A qubit also loses coherence to qubits the program itself couples it to, with
+no noise model at all. Entangled with eight others, its ⟨X⟩ falls to a few
+percent: the phase has moved into the environment. Because the environment is
+part of the program, the loss can be undone, as a Hahn echo undoes it on real
+hardware: flipping the qubit halfway through reverses the coupling and the
+coherence returns in full. A `NOISE` channel describes the same loss as a
+fixed rate, and no pulse brings it back.
+
+```qubasic
+NEW
+QUBITS 9
+10 H 0
+20 FOR k = 1 TO 8: H k: RZZ 0.4 + 0.1 * k, 0, k: NEXT k
+30 SAVE_EXPECT X 0 -> plain
+RUN
+PRINT USING "without echo #.###"; plain
+```
+
+```output
+without echo 0.021
+```
+
+```qubasic
+NEW
+QUBITS 9
+10 H 0
+20 FOR k = 1 TO 8: H k: RZZ (0.4 + 0.1 * k) / 2, 0, k: NEXT k
+30 X 0
+40 FOR k = 1 TO 8: RZZ (0.4 + 0.1 * k) / 2, 0, k: NEXT k
+50 SAVE_EXPECT X 0 -> echoed
+RUN
+PRINT USING "with echo #.###"; echoed
+```
+
+```output
+with echo 1.000
+```
+
 ## Algorithms
 
 Each algorithm command builds and runs its circuits and prints the result next

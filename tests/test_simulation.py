@@ -736,6 +736,11 @@ class TestAerGatesAndNoise(unittest.TestCase):
         from qiskit.quantum_info import Statevector
         self.assertAlmostEqual(abs(np.vdot(Statevector(qc).data, t3.last_sv)), 1.0, places=9)
 
+    def test_noisy_measure_free_saves_are_ensemble_values(self):
+        t = term(1, seed=1)
+        feed(t, 'NOISE phase_flip 0.3', '10 H 0', '20 ID 0', '30 SAVE_EXPECT X 0 -> a', 'RUN')
+        self.assertAlmostEqual(t.variables['a'], 0.7, places=9)       # sqrt(0.7) after each of H and ID
+
     def test_pauli_lindblad_noise(self):
         flip = (1 - math.exp(-2 * 0.1)) / 2                  # an X generator at rate r flips (1 - e^-2r)/2
         t = term(1, seed=4, shots=6000)
