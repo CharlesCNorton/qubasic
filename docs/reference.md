@@ -101,7 +101,8 @@ program lines, and most can be typed at the prompt as well.
 | VERSION | `VERSION` | Print build ID, simulator versions, and feature flags. |
 | COUPLING | `COUPLING linear\|ring\|heavyhex\|full\|OFF\|<edges>` | Constrain 2-qubit connectivity. |
 | BASIS | `BASIS <gate list>\|OFF` | Restrict transpilation to a native gate set. |
-| DEVICE | `DEVICE <topology> [n] [T1us] [T2us]` | Load a calibrated offline device model. |
+| DEVICE | `DEVICE <topology> [n] [T1us] [T2us] \| DEVICE IBM <device> \| DEVICE OFF` | Load a device model. |
+| QPU | `QPU LIST \| QPU <device> [SHOTS n] \| QPU JOB <id>` | Run the program on IBM quantum hardware. |
 | OPTIMIZE | `OPTIMIZE [level]` | Transpile the program and report the reduction. |
 | RAM | `RAM` | Memory now available, what the current configuration costs, and the widest statevector that fits at each precision. |
 | BENCH | `BENCH [n1 n2 ...]` | Time a statevector run (H, a CX chain and T on every qubit, 100 shots) at each qubit count with its memory; a count that does not fit in available memory is skipped. |
@@ -464,6 +465,7 @@ program lines, and most can be typed at the prompt as well.
 | `FEATUREMAP x0 x1 ...` | ZZ feature-map encoding. |
 | `EVOLVE H, time, steps` | Trotterized exp(-iHt) of a HAMILTONIAN. |
 | `APPLYCHANNEL name q...` | Apply a CHANNEL (Kraus operators). |
+| `DELAY q[, q ...], microseconds` | Leave qubits idle; a device noise model or a QPU run decoheres them. |
 | `SAVE_EXPECT obs q... -> var \| SAVE_EXPECT H -> var` | Record an expectation value after RUN. |
 | `SAVE_PROBS q... -> array` | Record probabilities after RUN. |
 | `SAVE_AMPS i, j, ... -> array` | Record amplitudes after RUN. |

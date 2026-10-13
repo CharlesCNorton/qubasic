@@ -515,6 +515,9 @@ class RunPipelineMixin(SimulationHost):
     def _transpile_kwargs(self) -> dict:
         """coupling_map / basis_gates kwargs for transpile() (device model)."""
         kw: dict = {}
+        if self._device_target is not None:
+            kw['target'] = self._device_target            # DEVICE IBM: the real device's target
+            return kw
         if self._coupling_map:
             kw['coupling_map'] = self._coupling_map
         if self._basis_gates:
@@ -524,11 +527,13 @@ class RunPipelineMixin(SimulationHost):
     def _transpile_routed(self, qc: QuantumCircuit, backend: AerSimulator, level: int | None = None) -> QuantumCircuit:
         """transpile() honoring the device model. Passing coupling_map or
         basis_gates alongside a backend is exactly how the offline device
-        model works, so qiskit's advisory warning about it is silenced."""
+        model works, so qiskit's advisory warning about it is silenced, as is
+        its note that a DELAY was rounded to the device's clock cycle."""
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 'ignore', message=r'Providing `coupling_map`', category=UserWarning)
+            warnings.filterwarnings('ignore', message=r'Duration is rounded', category=UserWarning)
             return transpile(
                 qc, backend,
                 optimization_level=self._transpile_opt_level if level is None else level,
@@ -593,7 +598,7 @@ class RunPipelineMixin(SimulationHost):
         that cannot fit."""
         from qubasic_core import simtools as cap
         n = self.num_qubits
-        if method in ('automatic', 'statevector') and not self._coupling_map:
+        if method in ('automatic', 'statevector') and not self._coupling_map and self._device_target is None:
             if cap.fits(cap.aer_peak_bytes(n, 'statevector', precision, 'mid')):
                 return 'mid'
         if cap.fits(cap.aer_peak_bytes(n, 'statevector', precision, 'end')):
@@ -1050,14 +1055,14 @@ class RunPipelineMixin(SimulationHost):
             _noise_tag = f"noise=depol({m['noise_depol_p']})" if m['noise_depol_p'] > 0 else "noise=on"
             _meta_parts.append(_noise_tag)
         _meta = ', '.join(_meta_parts)
-        _throughput = f", {m['gates']/m['time_s']:.0f} gates/s" if m['time_s'] > 0.001 and m['gates'] > 0 else ""
+        _throughput = f", {m['gates']/m['time_s']:.0f} gates/s" if m['time_s'] > 0.001 and m['gates'] >= 1000 else ""
         _complexity = self._circuit_complexity()
         _cx_str = f", {_complexity}" if _complexity else ""
         self.io.writeln(f"\nRAN {len(self.program)} lines, {self.num_qubits} qubits, "
                         f"{self.shots} shots in {m['time_s']:.2f}s  "
                         f"[depth={m['depth']}, gates={m['gates']}{_throughput}, {_meta}{_cx_str}]")
         qt = getattr(self, '_last_transpiled', None)
-        if (self._coupling_map or self._basis_gates) and qt is not None:
+        if (self._coupling_map or self._basis_gates or self._device_target is not None) and qt is not None:
             swaps = qt.count_ops().get('swap', 0)
             _basis = f", basis={'+'.join(self._basis_gates)}" if self._basis_gates else ""
             _topo = f", swaps={swaps}" if self._coupling_map else ""
@@ -1275,7 +1280,7 @@ class RunPipelineMixin(SimulationHost):
         back to statevector sim, which always works).
         """
         clifford_gates = {'h', 'x', 'y', 'z', 's', 'sdg', 'cx', 'cz', 'cy', 'ecr',
-                          'swap', 'id', 'sx', 'sxdg', 'barrier', 'measure', 'reset'}
+                          'swap', 'id', 'sx', 'sxdg', 'barrier', 'delay', 'measure', 'reset'}
         for inst in qc.data:
             name = inst.operation.name.lower()
             if name == 'rz':

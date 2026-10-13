@@ -951,5 +951,120 @@ class TestBench(unittest.TestCase):
         self.assertTrue(all(r[1].endswith('s') for r in rows))
 
 
+
+class _FakeBackend:
+    """A five-qubit stand-in for an IBM device: GenericBackendV2's target and
+    calibration, with a status like the real ones."""
+
+    def __init__(self):
+        from qiskit.providers.fake_provider import GenericBackendV2
+        self._real = GenericBackendV2(5, seed=3)
+        self.name = 'fake_five'
+        self.num_qubits = 5
+        self.target = self._real.target
+
+    def __getattr__(self, attr):
+        return getattr(self._real, attr)
+
+    def status(self):
+        return types.SimpleNamespace(operational=True, pending_jobs=4)
+
+
+class _FakeJob:
+    def __init__(self, result, backend):
+        self._result, self._backend = result, backend
+
+    def job_id(self):
+        return 'job-123'
+
+    def result(self):
+        return self._result
+
+    def backend(self):
+        return self._backend
+
+    def usage(self):
+        return 2.0
+
+
+class _FakeRuntime:
+    """qiskit_ibm_runtime as QPU and DEVICE IBM use it, with Aer behind it."""
+
+    def __init__(self):
+        backend = _FakeBackend()
+        jobs = {}
+
+        class Service:
+            def backends(self):
+                return [backend]
+
+            def backend(self, name):
+                return backend
+
+            def job(self, job_id):
+                return jobs[job_id]
+
+        class Sampler:
+            def __init__(self, mode):
+                self.mode = mode
+
+            def run(self, pubs, shots):
+                from qiskit_aer.primitives import SamplerV2
+                job = _FakeJob(SamplerV2(seed=7).run(pubs, shots=shots).result(), self.mode)
+                jobs[job.job_id()] = job
+                return job
+
+        self.QiskitRuntimeService = Service
+        self.SamplerV2 = Sampler
+
+
+class TestIBMHardware(unittest.TestCase):
+    """QPU and DEVICE IBM against a stand-in for Qiskit Runtime."""
+
+    def setUp(self):
+        from qubasic_core import benchmarking
+        patcher = mock.patch.object(benchmarking, '_runtime', return_value=_FakeRuntime())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_qpu_lists_runs_and_collects(self):
+        t = term(2, seed=1)
+        self.assertIn('fake_five', feed(t, 'QPU LIST'))
+        out = feed(t, '10 H 0', '20 CX 0, 1', '30 MEASURE', 'QPU fake_five SHOTS 400')
+        self.assertIn('job job-123 queued, 400 shots', out)
+        self.assertIn('2.0 s of QPU time', out)
+        self.assertEqual(set(t.last_counts), {'00', '11'})
+        self.assertEqual(sum(t.last_counts.values()), 400)
+        t.last_counts = None
+        feed(t, 'QPU JOB job-123')
+        self.assertEqual(sum(t.last_counts.values()), 400)
+
+    def test_qpu_refuses_what_a_device_cannot_run(self):
+        t = term(1, seed=1)
+        self.assertIn('no MEASURE', feed(t, '10 H 0', 'QPU fake_five'))
+        out = feed(t, '20 MEAS 0 -> m', '30 PRINT m', '40 MEASURE', 'QPU fake_five')
+        self.assertIn('runs shot by shot', out)
+        self.assertIn('?USAGE: QPU', feed(t, 'QPU'))
+
+    def test_device_ibm_simulates_the_calibrated_device(self):
+        t = term(2, seed=1, shots=2000)
+        out = feed(t, 'DEVICE IBM fake_five', '10 H 0', '20 CX 0, 1', '30 MEASURE', 'RUN')
+        self.assertIn('DEVICE IBM fake_five: 5 qubits', out)
+        self.assertIn('routed onto device', out)
+        wrong = (t.last_counts.get('01', 0) + t.last_counts.get('10', 0)) / 2000
+        self.assertGreater(wrong, 0.0)                               # the calibration's errors show
+        self.assertLess(wrong, 0.2)
+        feed(t, 'DEVICE OFF')
+        self.assertIsNone(t._device_target)
+
+    def test_delay_decoheres_only_under_a_device_model(self):
+        t = term(1, seed=1, shots=2000)
+        feed(t, '10 H 0', '20 DELAY 0, 300', '30 H 0', '40 MEASURE', 'RUN')
+        self.assertEqual(t.last_counts, {'0': 2000})                 # ideal: idling changes nothing
+        feed(t, 'DEVICE IBM fake_five', 'RUN')
+        self.assertGreater(t.last_counts.get('1', 0), 200)           # T1 and T2 over 300 us
+        self.assertIn('negative', feed(term(1), '10 DELAY 0, -1', 'RUN'))
+
+
 if __name__ == '__main__':
     unittest.main()

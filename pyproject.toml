@@ -44,6 +44,7 @@ charts = ["plotille>=5.0"]
 readline = ["pyreadline3>=3.4; sys_platform == 'win32'"]
 qasm3 = ["qiskit-qasm3-import>=0.4"]
 qec = ["stim>=1.12", "pymatching>=2.1"]
+ibm = ["qiskit-ibm-runtime>=0.40"]
 jupyter = ["ipykernel>=6.0", "jupyter-client>=7.0"]
 
 [project.scripts]

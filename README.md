@@ -46,7 +46,8 @@ Requires Python 3.10 or newer; Qiskit, Qiskit Aer, NumPy, SciPy and rustworkx
 come with it. Optional extras: `qubasic[qec]` (stim and pymatching, for the
 `STIM` and `MWPM` paths of the error-correction commands), `qubasic[jupyter]`
 (the notebook kernel), `qubasic[qasm3]` (OpenQASM 3 import) and
-`qubasic[charts]` (sweep charts). For development, `pip install -e ".[charts]"`.
+`qubasic[charts]` (sweep charts) and `qubasic[ibm]` (Qiskit Runtime, for IBM
+quantum hardware). For development, `pip install -e ".[charts]"`.
 
 ## Running it
 
@@ -201,9 +202,10 @@ passed.
 ## Simulation
 
 `METHOD automatic` (the default) runs noiseless Clifford circuits (ECR, SXDG
-and RZ at multiples of π/2 included) on the stabilizer simulator at any width, other circuits on a statevector while one
-fits in the memory available (at double precision, then single), and wider
-ones as matrix product states; the summary line names the method used.
+and RZ at multiples of π/2 included) on the stabilizer simulator at any
+width, other circuits on a statevector while one fits in the memory available
+(at double precision, then single), and wider ones as matrix product states;
+the summary line names the method used.
 `METHOD` also selects `statevector`, `density_matrix`, `stabilizer`,
 `matrix_product_state`, `extended_stabilizer`, `unitary` or `superop`, and
 `PRECISION SINGLE` halves statevector memory. Each run is sized against the
@@ -239,6 +241,26 @@ following histogram with them inverted. `ZNE` measures an observable with the
 gate noise amplified by folding and extrapolates to zero noise with a linear,
 quadratic, Richardson or exponential fit, printing the noiseless value beside
 it.
+
+## IBM quantum hardware
+
+```
+pip install "qubasic[ibm]"
+QPU LIST                                              devices, queues and status
+DEVICE IBM ibm_fez                                    simulate that device as calibrated now
+QPU ibm_fez SHOTS 4000                                run the program on the device
+QPU JOB <id>                                          collect a job after an interrupted wait
+```
+
+`QPU` and `DEVICE IBM` use the account that `qiskit-ibm-runtime` saved with
+`QiskitRuntimeService.save_account`. `DEVICE IBM` builds Aer's noise model
+from the device's current calibration (gate and readout errors, and T1 and T2
+relaxation during gates and idle time) and routes every run onto its coupling
+map and native gates. `QPU` compiles the program the same way, runs it through
+the Sampler primitive and shows the histogram with the QPU time it spent. A
+program that reads measured bits as numbers runs shot by shot and stays on the
+simulator. `DELAY q, microseconds` leaves qubits idle: an ideal simulation
+ignores it, while a device model or a QPU run decoheres them.
 
 ## Algorithms
 
@@ -302,7 +324,7 @@ python tools/generate.py                    regenerate host.py's stubs and docs/
 ```
 
 The interpreter is one object, `QBasicTerminal` (`terminal.py`), assembled
-from a state container and 59 mixins, one per concern, in six layers. Its state
+from a state container and 60 mixins, one per concern, in six layers. Its state
 is the program, its variables and the run settings, plus one state object per
 concern, each a dataclass beside the mixin that owns it: `files`, `screen`
 (the text screen), `graphics`, `sound`, `events` (event traps), `errors`
@@ -327,7 +349,7 @@ lowest layer that uses it.
 | core | `host` (the layer table and hosts), `engine` (limits, result codes, errors, the I/O protocol, output and path services) |
 | language | `parser` (statement parser, compiler, catalog), `expression` (expressions, variables, formatting), `interpreter` (control flow, procedures, statements), `devices` (graphics, sound, screen, files), `editing` |
 | simulation | `simtools` (capacity, the numpy statevector and stabilizer engines, backends), `circuits` (circuit build, quantum statements), `simulator` (results and how they print, RUN, live runs), `noise`, `locc`, `physics` (dynamics, chemistry, qudits, bosonic modes), `machine` (settings, memory map, profiler, demos) |
-| applications | `algorithms`, `benchmarking`, `qec` (codes, decoders, circuit-level noise), `logical` (logical qubits, lattice surgery) |
+| applications | `algorithms`, `benchmarking` (benchmarks, resources, IBM hardware), `qec` (codes, decoders, circuit-level noise), `logical` (logical qubits, lattice surgery) |
 | presentation | `display`, `analysis` |
 | composition | `terminal`, `api`, `cli` (with the browser REPL), `jupyter_kernel` |
 

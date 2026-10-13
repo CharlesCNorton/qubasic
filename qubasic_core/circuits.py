@@ -1068,6 +1068,24 @@ class QuantumStatementMixin(SimulationHost):
         self.variables[var] = 0
         return True
 
+    def _try_exec_delay(self, stmt: str, qc: QuantumCircuit, run_vars: MutableMapping[str, Any]) -> bool:
+        """DELAY q[, q ...], microseconds: leave qubits idle. An ideal run is
+        unchanged; DEVICE IBM's noise model and a QPU run decohere them."""
+        m = re.match(r'DELAY\s+(.+)$', stmt, re.IGNORECASE)
+        if not m:
+            return False
+        parts = [p.strip() for p in m.group(1).split(',')]
+        if len(parts) < 2:
+            raise ValueError("DELAY q[, q ...], microseconds")
+        us = float(self._eval_with_vars(parts[-1], run_vars))
+        if us < 0:
+            raise ValueError(f"DELAY of {us:g} us is negative")
+        qubits = [self._resolve_qubit(p) for p in parts[:-1]]
+        if self._live is None:
+            for q in qubits:
+                qc.delay(us, q, unit='us')
+        return True
+
     def _try_exec_apply_circuit(self, stmt: str, qc: QuantumCircuit, *, backend: CircuitBackend | None = None) -> bool:
         """Handle APPLY_CIRCUIT name [@offset] inside program execution."""
         m = re.match(r'APPLY_CIRCUIT\s+(\w+)(?:\s+@(\d+))?', stmt, re.IGNORECASE)
@@ -1297,6 +1315,7 @@ class QuantumStatementMixin(SimulationHost):
         'SAVE_AMPS': (lambda s, st, qc, rv, b: s._try_exec_save_amps(st, qc, rv),),
         'SET_STATE': (lambda s, st, qc, rv, b: s._try_exec_set_state(st, qc),),
         'APPLY_CIRCUIT': (lambda s, st, qc, rv, b: s._try_exec_apply_circuit(st, qc, backend=b),),
+        'DELAY': (lambda s, st, qc, rv, b: s._try_exec_delay(st, qc, rv),),
     }
 
     _NAMED_STATES = ('|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>', '|GHZ3>', '|GHZ4>', '|W>', '|W3>')

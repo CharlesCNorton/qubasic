@@ -47,7 +47,7 @@ from qubasic_core.algorithms import (
     VariationalMixin,
 )
 from qubasic_core.analysis import AnalysisMixin, AssistMixin, ExportMixin, tip_of_the_day
-from qubasic_core.benchmarking import BenchmarkingMixin, ResourceMixin
+from qubasic_core.benchmarking import BenchmarkingMixin, HardwareMixin, ResourceMixin
 from qubasic_core.circuits import ExecutorMixin, QuantumStatementMixin
 from qubasic_core.devices import FileIOMixin, GraphicsMixin, ScreenMixin, SoundMixin
 from qubasic_core.display import (
@@ -125,6 +125,7 @@ class Engine(HostState):
         self.sim_precision: str = 'double'
         self.noise = NoiseState()
         self._device_spec: str | None = None
+        self._device_target: Any = None                   # DEVICE IBM: the real device's target
         self._seed: int | None = None
         self._max_iterations: int = MAX_LOOP_ITERATIONS
 
@@ -221,7 +222,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
                      BenchmarkingMixin, EstimationMixin, PhaseMixin, QMLMixin, FactoringMixin, HHLMixin,
                      PauliPropMixin, QuditMixin, BosonicMixin, ResourceMixin, LiveMixin,
                      VariationalMixin, OracleMixin, LatticeMixin, EncodedMixin, RunStateMixin,
-                     QuantumStatementMixin, ServicesMixin, RunCommandMixin):
+                     QuantumStatementMixin, ServicesMixin, RunCommandMixin, HardwareMixin):
     """The QUBASIC session: Engine's state with every layer's mixins.
 
     Mixins, by layer (each derives from its layer's host in host.py):
@@ -241,7 +242,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
                       PhaseMixin, QMLMixin, OracleMixin, VariationalMixin,
                       FactoringMixin, HHLMixin, BenchmarkingMixin,
                       ResourceMixin, CodesMixin, DecodingMixin, RatesMixin,
-                      LogicalMixin, LatticeMixin, EncodedMixin
+                      LogicalMixin, LatticeMixin, EncodedMixin, HardwareMixin
         presentation  RunCommandMixin, DisplayMixin, StateDisplayMixin,
                       VisualizeMixin, SweepMixin, AnalysisMixin, ExportMixin,
                       AssistMixin
@@ -270,6 +271,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         self._init_bosonic()
         self._init_logical()
         self._init_live()
+        self._init_hardware()
         # Device model for transpilation (None = unconstrained, all-to-all).
         self._coupling_map: list[list[int]] | None = None
         self._basis_gates: list[str] | None = None
@@ -466,7 +468,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         'QSUM': 'cmd_qsum', 'QMEASURE': 'cmd_qmeasure',
         'BOSONIC': 'cmd_bosonic', 'DISPLACE': 'cmd_displace', 'SQUEEZE': 'cmd_squeeze',
         'CAT': 'cmd_cat', 'BS': 'cmd_bs', 'BSTATE': 'cmd_bstate',
-        'RESOURCES': 'cmd_resources', 'DEVICE': 'cmd_device', 'OPTIMIZE': 'cmd_optimize',
+        'RESOURCES': 'cmd_resources', 'DEVICE': 'cmd_device', 'QPU': 'cmd_qpu', 'OPTIMIZE': 'cmd_optimize',
         'SET_STATE': 'cmd_set_state', 'SET_DENSITY': 'cmd_set_density',
         # Circuit macros
         'CIRCUIT_DEF': 'cmd_circuit_def', 'APPLY_CIRCUIT': 'cmd_apply_circuit',
