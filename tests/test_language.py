@@ -19,10 +19,12 @@ from qubasic_core.devices import (
     MODES,
     Canvas,
     PlayState,
+    glyph,
     note_frequency,
     parse_play,
     parse_png,
     png_bytes,
+    split_keys,
     synthesize,
     wav_bytes,
 )
@@ -1511,7 +1513,7 @@ class TestPrintersAndFileSystem(InTempDir):
         self.assertIn('42', t.io.text)
         t._lprint_path = 'printer.log'
         t.process('RUN')
-        self.assertEqual(open('printer.log').read().split('\n')[:2], ['to the printer', '42.0'])
+        self.assertEqual(open('printer.log').read().split('\n')[:2], ['to the printer', ' 42 '])
 
     def test_file_system(self):
         out, errors = run_basic('MKDIR "sub"\nCHDIR "sub"\nOPEN "in.txt" FOR OUTPUT AS #1\nCLOSE\n'
@@ -1788,6 +1790,64 @@ PSET (0, 0), 3
         self.assertEqual(rgb.shape, (480, 640, 3))
         self.assertEqual(tuple(rgb[240, 420]), (255, 85, 85))
 
+
+class TestGraphicsText(unittest.TestCase):
+    """PRINT, LOCATE, COLOR, CLS and INPUT on a graphics screen draw text in
+    QBASIC's character cells."""
+
+    @staticmethod
+    def cell(canvas, col, row):
+        """The on/off pattern of text cell (col, row), counted from 0."""
+        _, _, h = canvas.text_grid()
+        block = canvas.pixels[row * h:(row + 1) * h, col * 8:col * 8 + 8]
+        return block != canvas.bg
+
+    @staticmethod
+    def pattern(ch, height):
+        rows = glyph(ch)
+        return np.array([[(rows[r * 8 // height] >> (7 - c)) & 1 for c in range(8)]
+                         for r in range(height)], dtype=bool)
+
+    def test_print_draws_characters_from_the_top_left(self):
+        t, _, _ = run('SCREEN 13\nCOLOR 4\nPRINT "Hi"')
+        c = t._canvas
+        self.assertEqual(c.text_grid(), (40, 25, 8))
+        np.testing.assert_array_equal(self.cell(c, 0, 0), self.pattern('H', 8))
+        np.testing.assert_array_equal(self.cell(c, 1, 0), self.pattern('i', 8))
+        self.assertEqual(set(np.unique(c.pixels[0:8, 0:16])), {0, 4})
+
+    def test_locate_places_the_text_and_tall_cells_stretch_the_font(self):
+        t, _, _ = run('SCREEN 12\nLOCATE 3, 5\nPRINT "A"')
+        c = t._canvas
+        self.assertEqual(c.text_grid(), (80, 30, 16))
+        np.testing.assert_array_equal(self.cell(c, 4, 2), self.pattern('A', 16))
+        self.assertFalse(self.cell(c, 0, 0).any())
+
+    def test_text_wraps_and_the_screen_scrolls(self):
+        t, _, _ = run('SCREEN 13\nFOR i = 1 TO 26: PRINT CHR$(64 + i): NEXT i')
+        c = t._canvas
+        # 26 lines and their line feeds on 25 rows scroll twice: C on top, Z above the cursor
+        np.testing.assert_array_equal(self.cell(c, 0, 0), self.pattern('C', 8))
+        np.testing.assert_array_equal(self.cell(c, 0, 23), self.pattern('Z', 8))
+        t, _, _ = run('SCREEN 13\nPRINT STRING$(41, "x")')
+        np.testing.assert_array_equal(self.cell(t._canvas, 0, 1), self.pattern('x', 8))
+
+    def test_cls_homes_the_cursor_and_input_echoes_on_the_screen(self):
+        t, _, _ = run('SCREEN 13\nPRINT "ab"\nCLS\nINPUT "n"; n', answers=['7'])
+        c = t._canvas
+        for col, ch in enumerate('n? 7'):
+            np.testing.assert_array_equal(self.cell(c, col, 0), self.pattern(ch, 8))
+        self.assertEqual(t.variables['n'], 7)
+
+    def test_locate_outside_the_screen_is_an_error(self):
+        t, out, _ = run('ON ERROR GOTO 90\nSCREEN 13\nLOCATE 26, 1\nEND\n90 PRINT ERR')
+        self.assertEqual(out.split()[0], '5')
+        self.assertEqual(t._gfx_row, 2)                  # ERR printed on the screen, row 1
+
+    def test_characters_outside_ascii_print_as_a_box(self):
+        self.assertEqual(glyph(chr(200)), bytes.fromhex('7e42424242427e00'))
+        self.assertEqual(glyph(' '), bytes(8))
+
 class TestTerminalRuns(unittest.TestCase):
     """What an interactive terminal changes: no statement limit, and the
     graphics screen drawn in place while a program runs."""
@@ -1833,6 +1893,205 @@ class TestTerminalRuns(unittest.TestCase):
         out = feed(term(1), '10 SCREEN 13', '20 PSET (1, 1), 4', '30 SLEEP 0', 'RUN')
         self.assertNotIn('\x1b7', out)
         self.assertEqual(out.count('SCREEN 13 (320x200, 256 colours):'), 1)
+
+
+class TestEventsAndAudio(unittest.TestCase):
+    """Key and music traps, INKEY$'s key codes, and sound through the speaker
+    at a terminal, with the keyboard, the clock and the speaker replaced."""
+
+    @staticmethod
+    def keys(*batches):
+        """A keyboard that yields each batch of keys on one read, then none."""
+        it = iter(batches)
+        return lambda wait=False: list(next(it, []))
+
+    def test_split_keys_reads_escape_sequences_as_scan_codes(self):
+        self.assertEqual(split_keys('a\x1b[A\x1bOP\x1b[24~\x1b'),
+                         ['a', '\x00H', '\x00;', '\x00\x86', '\x1b'])
+
+    def test_inkey_gives_chr0_and_the_scan_code_for_special_keys(self):
+        t = term(1)
+        t._read_keys = self.keys(['\x00H'], ['x'])
+        out = feed(t, '10 k$ = INKEY$', '20 PRINT LEN(k$); ASC(MID$(k$, 2))', '30 k$ = INKEY$',
+                   '40 PRINT k$', 'RUN')
+        self.assertEqual(out.split('RAN ')[0].split(), ['2', '72', 'x'])
+
+    def test_on_key_calls_its_handler_once_per_press(self):
+        t = term(1)
+        t._read_keys = self.keys([], [], ['\x00H'], ['\x00H'])
+        prog = ('10 ON KEY(11) GOSUB 100', '20 KEY(11) ON', '30 FOR i = 1 TO 20: NEXT i',
+                '40 PRINT hits; deepest', '50 END', '100 lvl = lvl + 1',
+                '110 IF lvl > deepest THEN deepest = lvl', '120 hits = hits + 1', '130 lvl = lvl - 1',
+                '140 RETURN')
+        out = feed(t, *prog, 'RUN')
+        # the second press comes while the handler runs and waits for its RETURN
+        self.assertEqual(out.split('RAN ')[0].split(), ['2', '1'])
+
+    def test_key_stop_holds_the_event_and_key_off_leaves_the_key_to_inkey(self):
+        t = term(1)
+        t._read_keys = self.keys(['\x00;'])
+        prog = ('10 ON KEY(1) GOSUB 100', '20 KEY(1) STOP', '30 FOR i = 1 TO 5: NEXT i',
+                '40 PRINT "held"; hits', '50 KEY(1) ON', '60 PRINT "after"; hits', '70 END',
+                '100 hits = hits + 1', '110 RETURN')
+        self.assertEqual(feed(t, *prog, 'RUN').split('RAN ')[0].split(), ['held', '0', 'after', '1'])
+        t = term(1)
+        t._read_keys = self.keys(['\x00;'])
+        prog = ('10 ON KEY(1) GOSUB 100', '20 KEY(1) OFF', '30 k$ = INKEY$',
+                '40 PRINT hits; ASC(MID$(k$, 2))', '50 END', '100 hits = hits + 1', '110 RETURN')
+        self.assertEqual(feed(t, *prog, 'RUN').split('RAN ')[0].split(), ['0', '59'])
+
+    def test_a_defined_key_traps_its_character(self):
+        t = term(1)
+        t._read_keys = self.keys([], ['a'])
+        prog = ('10 KEY 15, CHR$(0) + CHR$(30)', '20 ON KEY(15) GOSUB Pressed', '30 KEY(15) ON',
+                '40 FOR i = 1 TO 5: NEXT i', '50 PRINT hits', '60 END', '65 Pressed:', '70 hits = hits + 1',
+                '80 RETURN')
+        self.assertEqual(feed(t, *prog, 'RUN').split('RAN ')[0].split(), ['1'])
+
+    def test_on_play_fires_when_the_background_queue_runs_low(self):
+        t = term(1)
+        now = [0.0]
+
+        def clock():
+            now[0] += 0.05
+            return now[0]
+        t._clock = clock
+        prog = ('10 ON PLAY(2) GOSUB 100', '20 PLAY ON', '30 PLAY "MB L4 CDEF"',
+                '40 FOR i = 1 TO 60: NEXT i', '50 PRINT n', '60 END', '100 n = n + 1', '110 RETURN')
+        # four quarter notes at tempo 120 take 2 s; the queue drops below 2
+        # notes once, so the handler runs once
+        self.assertEqual(feed(t, *prog, 'RUN').split('RAN ')[0].split(), ['1'])
+
+    def test_traps_do_not_carry_into_the_next_run(self):
+        t = term(1)
+        feed(t, '10 ON TIMER(5) GOSUB 100', '20 TIMER ON', '30 END', '100 RETURN', 'RUN')
+        feed(t, 'NEW', '10 PRINT 1', 'RUN')
+        self.assertFalse(t._events_armed())
+
+    def test_sound_plays_through_the_speaker_at_a_terminal(self):
+        played = []
+
+        class Fake:
+            def available(self):
+                return True
+
+            def play(self, samples, *, wait):
+                played.append((len(samples), wait))
+                return True
+
+            def stop(self):
+                pass
+        t = term(1)
+        t._on_terminal = lambda: True
+        t._speaker = Fake()
+        out = feed(t, '10 PLAY "T120 L8 CDE"', '20 PLAY "MB L4 C"', '30 SOUND 440, 18.2', '40 BEEP', 'RUN')
+        rate = 22050
+        self.assertEqual([w for _, w in played], [True, False, False, True])
+        self.assertAlmostEqual(played[0][0] / rate, 0.75, delta=0.01)    # three eighths at 120
+        self.assertNotIn('\a', out)                                       # the speaker beeps
+        played.clear()
+        feed(t, 'AUDIO OFF')
+        out = feed(t, 'RUN')
+        self.assertEqual(played, [])
+        self.assertIn('\a', out)
+        self.assertIn('AUDIO OFF', feed(t, 'AUDIO'))
+        feed(t, 'AUDIO ON')
+        t.agent_mode = True
+        feed(t, 'RUN')
+        self.assertEqual(played, [])
+
+
+class TestPCCompatibility(InTempDir):
+    """The PC underneath QBASIC programs: video memory through DEF SEG, the VGA
+    palette and retrace ports, the text screen, BSAVE and BLOAD, and the
+    statements and functions that go with them."""
+
+    def test_screen13_pixels_through_def_seg(self):
+        t, out, _ = run('SCREEN 13\nDEF SEG = &HA000\nPOKE 320 * 100 + 200, 14\nPRINT PEEK(320 * 100 + 200)\n'
+                        'DEF SEG\nPRINT PEEK(&HD000)')
+        self.assertEqual(int(t._canvas.pixels[100, 200]), 14)
+        self.assertEqual(out.split()[:2], ['14', '1'])           # DEF SEG alone: the memory map again
+
+    def test_bsave_and_bload_round_trip_the_screen(self):
+        run('SCREEN 13\nLINE (0, 0)-(319, 199), 9, BF\nDEF SEG = &HA000\nBSAVE "pic.bsv", 0, 64000')
+        with open('pic.bsv', 'rb') as fh:
+            data = fh.read()
+        self.assertEqual(data[:7], bytes([0xFD, 0x00, 0xA0, 0, 0, 0x00, 0xFA]))
+        self.assertEqual(len(data), 7 + 64000)
+        t, _, _ = run('SCREEN 13\nDEF SEG = &HA000\nBLOAD "pic.bsv"')
+        self.assertTrue((t._canvas.pixels == 9).all())
+
+    def test_vga_palette_ports(self):
+        t, out, _ = run('SCREEN 13\nOUT &H3C8, 5\nOUT &H3C9, 63\nOUT &H3C9, 0\nOUT &H3C9, 31\n'
+                        'OUT &H3C7, 5\nPRINT INP(&H3C9); INP(&H3C9); INP(&H3C9)')
+        self.assertEqual(t._canvas.palette[5], (255, 0, 125))   # 6-bit levels to 8-bit
+        self.assertEqual(out.split()[:3], ['63', '0', '31'])
+
+    def test_retrace_wait_and_the_bios_clock(self):
+        _, out, _ = run('WAIT &H3DA, 8\nDEF SEG = 0\nt = PEEK(&H46C)\nPRINT t >= 0 AND t <= 255')
+        self.assertEqual(out.split(), ['-1'])
+
+    def test_text_screen_cursor_and_contents(self):
+        _, out, _ = run('PRINT "Hello"\nr = CSRLIN\nLOCATE 5, 10\nPRINT "X";\nPRINT r; SCREEN(1, 1); '
+                        'SCREEN(5, 10); CSRLIN\nDEF SEG = &HB800\nPRINT PEEK(0); PEEK(1)')
+        self.assertEqual(out.split()[-6:], ['2', '72', '88', '5', '72', '7'])
+
+    def test_view_print_scrolls_only_its_rows(self):
+        t, _, _ = run('PRINT "top"\nVIEW PRINT 2 TO 4\nFOR i = 1 TO 10: PRINT i: NEXT i')
+        self.assertEqual(''.join(t._text_screen[0]).strip(), 'top')
+        self.assertEqual([''.join(r).strip() for r in t._text_screen[1:4]], ['9', '10', ''])
+
+    def test_run_starts_again_with_variables_cleared(self):
+        _, out, _ = run('n = n + 1\nPRINT "pass"; n\nIF k = 0 THEN k = 1: x = 5: RUN Again\nEND\n'
+                        'Again:\nPRINT "x ="; x')
+        self.assertEqual(out.split(), ['pass', '1', 'x', '=', '0'])
+        t = term(1)
+        t.shots = 50
+        feed(t, '10 X 0', '20 IF k = 0 THEN k = 1: RUN 40', '30 END', '40 MEASURE', 'RUN')
+        self.assertEqual(t.last_counts, {'0': 50})                # RUN removed the X
+
+    def test_clear_reset_lock_and_fileattr(self):
+        t, out, _ = run('x = 3\nDIM a(2)\nCLEAR\nPRINT x')
+        self.assertEqual(out.split(), ['0'])
+        self.assertNotIn('a', t.arrays)
+        _, out, _ = run('OPEN "f.txt" FOR OUTPUT AS #1\nOPEN "g.dat" FOR RANDOM AS #2 LEN = 4\n'
+                        'PRINT FILEATTR(1, 1); FILEATTR(2, 1)\nLOCK #2\nUNLOCK #2\nRESET\n'
+                        'ON ERROR GOTO 90\nLOCK #1\nEND\n90 PRINT ERR')
+        self.assertEqual(out.split(), ['2', '4', '52'])
+
+    def test_lprint_formats_like_print(self):
+        t = term(1)
+        t._lprint_path = 'printer.txt'
+        feed(t, '10 LPRINT "a"; 1, "b"', '20 LPRINT USING "##.#"; 3.14159', '30 LPRINT "pos";',
+             '40 p = LPOS(0)', '50 LPRINT p', 'RUN')
+        with open('printer.txt') as fh:
+            self.assertEqual(fh.read(), 'a 1           b\n 3.1\npos 4 \n')
+
+    def test_mbf_conversions(self):
+        _, out, _ = run('s$ = MKSMBF$(1.5)\nPRINT ASC(MID$(s$, 3)); ASC(MID$(s$, 4)); CVSMBF(s$); '
+                        'CVDMBF(MKDMBF$(-2.25)); CVSMBF(MKSMBF$(0))')
+        self.assertEqual(out.split(), ['64', '129', '1.5', '-2.25', '0'])
+
+    def test_environment_and_shell_outside_agent_mode(self):
+        t = term(1)
+        try:
+            out = feed(t, '10 ENVIRON "QUBASIC_TEST_VAR=hello"', '20 PRINT ENVIRON$("QUBASIC_TEST_VAR")',
+                       '30 SHELL "echo shelled"', 'RUN')
+        finally:
+            os.environ.pop('QUBASIC_TEST_VAR', None)
+        self.assertIn('hello', out)
+        self.assertIn('shelled', out)
+        t.agent_mode = True
+        self.assertIn('PERMISSION DENIED: ENVIRON', feed(t, 'RUN'))
+        self.assertIn('PERMISSION DENIED: SHELL', feed(t, 'NEW', '10 SHELL "echo x"', 'RUN'))
+
+    def test_unsupported_hardware_says_so(self):
+        _, out, _ = run('ON ERROR GOTO 90\nCALL ABSOLUTE(0)\nEND\n90 PRINT ERR')
+        self.assertEqual(out.split(), ['5'])
+        errors = api.run('x = 1\nPRINT VARPTR(x)', basic=True)['errors']
+        self.assertIn('no memory address', errors[0])
+        _, out, _ = run('PRINT STICK(0); STRIG(0); PEN(0); ERDEV; PLAY(0)')
+        self.assertEqual(out.split(), ['0', '0', '0', '0', '0'])
 
 
 # ---------------------------------------------------------------------------

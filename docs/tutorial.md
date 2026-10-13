@@ -217,6 +217,30 @@ RUN
 
 The summary line of that run reads `method=live`, and every shot ends in `1`.
 
+A live run holds a statevector per shot while one fits in memory. Past that,
+or under `METHOD stabilizer`, each shot holds a stabilizer tableau, so a
+Clifford program that branches on its measurements runs at widths no
+statevector reaches. This one entangles 100 qubits, reads both ends in every
+shot and checks one against the other.
+
+```qubasic
+NEW
+QUBITS 100
+SHOTS 50
+10 H 0
+20 FOR i = 0 TO 98: CX i, i + 1: NEXT i
+30 MEAS 0 -> first
+40 MEAS 99 -> last
+50 IF first <> last THEN PRINT "the ends disagree"
+60 MEASURE 0, 99
+RUN
+BLOCH 50
+```
+
+The summary reads `method=live, stabilizer tableau`, the histogram holds only
+`00` and `11`, and `BLOCH 50` shows qubit 50 on a pole, collapsed with the
+rest by the first measurement. `STATE` lists the stabilizer generators.
+
 ## Noise and error mitigation
 
 `NOISE` attaches a noise model to every run. Channels combine with `;`, and
@@ -294,6 +318,22 @@ next levels by deflation. QAOA solves MaxCut on a graph:
 ```qubasic
 VQE H2 LAYERS 1
 QAOA RING 4 P 2
+```
+
+`MOLECULE` builds other small molecules the same way, from STO-3G integrals
+and a Hartree-Fock calculation done in QUBASIC: H2, HEH+, LIH, BEH2, H2O, NH3,
+N2 and H4 by name, or any geometry of atoms from H to Ne in quotes. `FREEZE`
+drops the core orbitals, and `ANSATZ UCCSD` runs unitary coupled cluster from
+the Hartree-Fock state, which is exact for two active electrons.
+
+```qubasic
+HAMILTONIAN LIH = MOLECULE LIH FREEZE
+VQE LIH ANSATZ UCCSD
+PRINT USING "UCCSD ##.###### Ha, exact ##.###### Ha"; _VQE_ENERGY; _VQE_EXACT
+```
+
+```output
+UCCSD -7.882176 Ha, exact -7.882176 Ha
 ```
 
 Other commands in the same family: `SIMON`, `DJ`, `BV`, `QCOUNT`, `IQPE`,

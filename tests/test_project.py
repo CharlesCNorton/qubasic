@@ -403,7 +403,7 @@ class TestCatalog(unittest.TestCase):
         from qubasic_core.expression import _ZERO_ARG, ExpressionMixin, _builtin_table
         names = set(_builtin_table(ExpressionMixin._SAFE_FUNCS)) | set(_ZERO_ARG)
         names |= {'PEEK', 'USR', 'EOF', 'LOF', 'POINT', 'SEEK', 'LOC', 'INPUT$', 'PMAP', 'POS', 'FRE',
-                  'LBOUND', 'UBOUND'}
+                  'LBOUND', 'UBOUND', 'SCREEN', 'PLAY', 'ENVIRON$', 'FILEATTR', 'LPOS', 'INP'}
         self.assertEqual(sorted(n for n in names if not parser.functions_for(n)), [])
 
     def test_every_command_has_one_topic(self):

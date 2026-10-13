@@ -921,6 +921,59 @@ def _cv(fmt: str, name: str) -> Any:
     return cv
 
 
+def _mksmbf(x: float) -> str:
+    """MKSMBF$: a number as Microsoft Binary Format single precision."""
+    if float(x) == 0:
+        return '\x00' * 4
+    b = struct.pack('<f', float(x))
+    exp = (((b[3] & 0x7F) << 1) | (b[2] >> 7)) + 2
+    if exp > 255:
+        raise ValueError(f"OVERFLOW: MKSMBF$({x})")
+    return bytes([b[0], b[1], (b[2] & 0x7F) | (b[3] & 0x80), exp]).decode('latin-1')
+
+
+def _cvsmbf(s: str) -> float:
+    """CVSMBF: the number a Microsoft Binary Format single holds."""
+    if not isinstance(s, str) or len(s) < 4:
+        raise ValueError("ILLEGAL FUNCTION CALL: CVSMBF needs 4 characters")
+    m = s[:4].encode('latin-1', errors='replace')
+    if m[3] == 0:
+        return 0.0
+    exp = m[3] - 2
+    return float(struct.unpack('<f', bytes([m[0], m[1], ((exp << 7) & 0x80) | (m[2] & 0x7F),
+                                            (m[2] & 0x80) | (exp >> 1)]))[0])
+
+
+def _mkdmbf(x: float) -> str:
+    """MKDMBF$: a number as Microsoft Binary Format double precision."""
+    if float(x) == 0:
+        return '\x00' * 8
+    bits = struct.unpack('<Q', struct.pack('<d', float(x)))[0]
+    exp = ((bits >> 52) & 0x7FF) - 894
+    if not 0 < exp < 256:
+        raise ValueError(f"OVERFLOW: MKDMBF$({x})")
+    body = ((bits & ((1 << 52) - 1)) << 3) | ((bits >> 63) << 55)
+    return (body.to_bytes(7, 'little') + bytes([exp])).decode('latin-1')
+
+
+def _cvdmbf(s: str) -> float:
+    """CVDMBF: the number a Microsoft Binary Format double holds."""
+    if not isinstance(s, str) or len(s) < 8:
+        raise ValueError("ILLEGAL FUNCTION CALL: CVDMBF needs 8 characters")
+    raw = s[:8].encode('latin-1', errors='replace')
+    if raw[7] == 0:
+        return 0.0
+    body = int.from_bytes(raw[:7], 'little')
+    bits = (((body >> 55) & 1) << 63) | ((raw[7] + 894) << 52) | ((body & ((1 << 55) - 1)) >> 3)
+    return float(struct.unpack('<d', struct.pack('<Q', bits))[0])
+
+
+def _no_address(name: str) -> Any:
+    def fn(*_: Any) -> float:
+        raise ValueError(f"ILLEGAL FUNCTION CALL: {name} (QUBASIC variables have no memory address)")
+    return fn
+
+
 # Functions that return strings (names ending in $)
 STRING_FUNCS: dict[str, Any] = {
     'LEFT$': _left, 'RIGHT$': _right, 'MID$': _mid,
@@ -929,14 +982,18 @@ STRING_FUNCS: dict[str, Any] = {
     'LTRIM$': lambda s: s.lstrip(' '), 'RTRIM$': lambda s: s.rstrip(' '),
     'SPACE$': _space, 'STRING$': _string_fn,
     'MKI$': _mk('<h', 'MKI$'), 'MKL$': _mk('<i', 'MKL$'), 'MKS$': _mk('<f', 'MKS$'),
-    'MKD$': _mk('<d', 'MKD$'),
+    'MKD$': _mk('<d', 'MKD$'), 'MKSMBF$': _mksmbf, 'MKDMBF$': _mkdmbf,
 }
 
 # Functions that take/return mixed types
 MIXED_FUNCS: dict[str, Any] = {
     'ASC': _asc, 'VAL': _val_fn, 'INSTR': _instr, 'LEN': _len_fn,
     'CVI': _cv('<h', 'CVI'), 'CVL': _cv('<i', 'CVL'), 'CVS': _cv('<f', 'CVS'),
-    'CVD': _cv('<d', 'CVD'),
+    'CVD': _cv('<d', 'CVD'), 'CVSMBF': _cvsmbf, 'CVDMBF': _cvdmbf,
+    'VARPTR': _no_address('VARPTR'), 'VARSEG': _no_address('VARSEG'), 'SADD': _no_address('SADD'),
+    'VARPTR$': _no_address('VARPTR$'),
+    # No joystick, light pen or device-control channel is attached.
+    'STICK': lambda n=0: 0, 'STRIG': lambda n=0: 0, 'PEN': lambda n=0: 0, 'IOCTL$': lambda n=0: '',
 }
 
 
@@ -1734,7 +1791,8 @@ class _Names:
 # Names that read as a value with no argument list (and also accept "()").
 _ZERO_ARG = {
     'TIMER': '_run_timer', 'RND': '_rnd', 'DATE$': '_date_str', 'TIME$': '_time_str',
-    'INKEY$': '_inkey', 'FREEFILE': '_freefile',
+    'INKEY$': '_inkey', 'FREEFILE': '_freefile', 'CSRLIN': '_csrlin', 'ERDEV': '_erdev',
+    'ERDEV$': '_erdev_str',
 }
 
 
@@ -1835,6 +1893,18 @@ class ExpressionMixin(LanguageHost):
             return self._input_chars
         if up == 'PMAP':
             return self._gfx_pmap
+        if up == 'SCREEN':
+            return self._screen_fn
+        if up == 'PLAY':
+            return lambda n=0: self._bg_remaining()
+        if up == 'ENVIRON$':
+            return self._environ_fn
+        if up == 'FILEATTR':
+            return self._fileattr
+        if up == 'LPOS':
+            return lambda n=0: self._lprint_col + 1
+        if up == 'INP':
+            return self._inp
         if up in _ZERO_ARG:
             method = getattr(self, _ZERO_ARG[up])
             return method if up == 'RND' else (lambda *a: method())

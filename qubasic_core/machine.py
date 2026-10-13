@@ -498,6 +498,8 @@ class MemoryMixin(SimulationHost):
     # ── PEEK ───────────────────────────────────────────────────────────
 
     def _peek(self, addr: float) -> float:
+        if self._def_seg is not None:
+            return float(self._segment_read(int(addr)))
         a = int(addr)
         if 0x0000 <= a <= 0x003F:
             return self._zero_page[a]
@@ -582,6 +584,9 @@ class MemoryMixin(SimulationHost):
     # ── POKE ───────────────────────────────────────────────────────────
 
     def _poke(self, addr: float, value: float) -> None:
+        if self._def_seg is not None:
+            self._segment_write(int(addr), int(value))
+            return
         a, v = int(addr), float(value)
         if 0x0000 <= a <= 0x003F:
             if not isinstance(value, (int, float)):
@@ -891,6 +896,23 @@ class MemoryMixin(SimulationHost):
                 except Exception as e:
                     self.io.writeln(f"?{e}")
         self.io.writeln("MONITOR OFF")
+
+    def _try_exec_wait(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """WAIT in a program: on an I/O port (the VGA ports &H3C0-&H3DF, the
+        keyboard &H60) QBASIC's WAIT port, mask[, xor]; on an address of the
+        memory map the WAIT command."""
+        m = re.match(r'WAIT\s+(.+)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        parts = self._split_arg_list(m.group(1))
+        port = int(self._eval_with_vars(parts[0], run_vars))
+        if 0x3C0 <= port <= 0x3DF or port in (0x60, 0x61):
+            mask = int(self._eval_with_vars(parts[1], run_vars)) if len(parts) > 1 else 0xFF
+            xor = int(self._eval_with_vars(parts[2], run_vars)) if len(parts) > 2 else 0
+            self._port_wait(port, mask, xor)
+            return True
+        self.cmd_wait(m.group(1))
+        return True
 
     def _try_exec_poke(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
         m = RE_POKE.match(stmt)

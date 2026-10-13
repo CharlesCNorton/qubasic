@@ -49,6 +49,23 @@ if sys.stdin and hasattr(sys.stdin, 'reconfigure'):
         pass
 
 
+# The command line, as --help prints it and docs/reference.md lists it.
+USAGE = (
+    ('qubasic', 'Interactive REPL'),
+    ('qubasic script.qb', 'Run a script file (a .bas file is numbered and RUN)'),
+    ('qubasic --quiet script', 'Suppress banner and progress (also -q)'),
+    ('qubasic --json script', 'Output results as JSON'),
+    ('qubasic --agent script', 'Confine file writes to the working dir'),
+    ('qubasic --seed N script', 'Set random seed for reproducibility'),
+    ('qubasic --spec', 'Print the commands, gates, functions and conventions as JSON'),
+    ('qubasic --web [port]', 'Serve a browser REPL (localhost, token-gated)'),
+    ('qubasic --install-kernel', 'Install the Jupyter kernelspec'),
+    ('qubasic --version', 'Show version (also -v)'),
+    ('qubasic --help', 'Show this help (also -h)'),
+    ('python -m qubasic_core', 'Run without the installed console script'),
+)
+
+
 def run_script(path: str, terminal: 'QBasicTerminal') -> None:
     """Run a .qb script file (multi-line DEF blocks included), or a QBASIC
     source file (.bas), which is numbered and RUN.
@@ -112,17 +129,8 @@ def main() -> None:
         print(f"QUBASIC {__version__} — Quantum BASIC Interactive Terminal")
         print()
         print("Usage:")
-        print("  qubasic                  Interactive REPL")
-        print("  qubasic script.qb        Run a script file")
-        print("  qubasic --quiet script    Suppress banner and progress (also -q)")
-        print("  qubasic --json script     Output results as JSON")
-        print("  qubasic --agent script    Confine file writes to the working dir")
-        print("  qubasic --seed N script   Set random seed for reproducibility")
-        print("  qubasic --web [port]      Serve a browser REPL (localhost, token-gated)")
-        print("  qubasic --install-kernel  Install the Jupyter kernelspec")
-        print("  qubasic --version         Show version (also -v)")
-        print("  qubasic --help            Show this help (also -h)")
-        print("  python -m qubasic_core    Run without the installed console script")
+        for invocation, effect in USAGE:
+            print(f"  {invocation:<26}{effect}")
         print()
         print("Type HELP inside the REPL for full command reference.")
         sys.exit(0)

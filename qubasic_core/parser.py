@@ -231,6 +231,11 @@ class EndFunctionStmt(Stmt):
 class StopStmt(Stmt):
     pass
 
+@dataclass(frozen=True, slots=True)
+class RunStmt(Stmt):
+    target: int | str | None = None    # RUN <line|label> starts there
+    file: str | None = None            # RUN "file" (not inside a program)
+
 
 # ── Control flow ───────────────────────────────────────────────────────
 
@@ -1222,6 +1227,12 @@ def parse_stmt(raw: str) -> Stmt:
         return EndSelectStmt(raw=raw)
     if upper == 'STOP':
         return StopStmt(raw=raw)
+    m_run = re.match(r'RUN(?:\s+(.+))?$', text, re.IGNORECASE)
+    if m_run:
+        arg = (m_run.group(1) or '').strip()
+        if arg.startswith('"'):
+            return RunStmt(raw=raw, file=arg.strip('"'))
+        return RunStmt(raw=raw, target=_target(arg) if arg else None)
     if upper == 'PRINT':
         return PrintStmt(raw=raw, expr='')       # a blank line
 
@@ -1458,7 +1469,7 @@ def _resolve_labels(prog: CompiledProgram) -> None:
         return line
 
     for ip, st in enumerate(prog.stmts):
-        if isinstance(st, (GotoStmt, GosubStmt, OnErrorStmt, OnTimerStmt)) and isinstance(st.target, str):
+        if isinstance(st, (GotoStmt, GosubStmt, OnErrorStmt, OnTimerStmt, RunStmt)) and isinstance(st.target, str):
             prog.patch(ip, target=line_of(ip, st.target))
         elif isinstance(st, (ReturnStmt, RestoreStmt)) and isinstance(st.target, str):
             prog.patch(ip, target=line_of(ip, st.target))
@@ -1726,7 +1737,7 @@ COMMAND_TOPICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('Configuration', ('QUBITS', 'SHOTS', 'METHOD', 'PRECISION', 'STATUS', 'VERSION', 'COUPLING', 'BASIS',
                        'DEVICE', 'OPTIMIZE', 'RAM', 'BENCH')),
     ('Noise and mitigation', ('NOISE', 'MITIGATE', 'ZNE')),
-    ('Screen and sound', ('SCREEN', 'DISPLAY', 'SHOW', 'CLS', 'COLOR', 'LOCATE', 'PLAY', 'PROMPT', 'THEME')),
+    ('Screen and sound', ('SCREEN', 'DISPLAY', 'SHOW', 'CLS', 'COLOR', 'LOCATE', 'PLAY', 'AUDIO', 'PROMPT', 'THEME')),
     ('Results and state', ('HIST', 'PROBS', 'STATE', 'BLOCH', 'DRAW', 'CIRCUIT', 'DECOMPOSE', 'DENSITY',
                            'HEATMAP', 'PLOT', 'ANIMATE', 'SWEEP', 'COMPARE')),
     ('Analysis', ('EXPECT', 'ENTROPY', 'FIDELITY', 'CONCURRENCE', 'NEGATIVITY', 'CONSISTENCY', 'TOMOGRAPHY',
@@ -1820,6 +1831,9 @@ STATEMENTS: tuple[tuple[str, str, str, str], ...] = (
     ('Files', 'KILL', 'KILL f$ | NAME old$ AS new$', 'delete or rename a file'),
     ('Files', 'MKDIR', 'MKDIR d$ | RMDIR d$ | CHDIR d$', 'make, remove or enter a directory'),
     ('Files', 'FILES', 'FILES [pattern$]', 'list files'),
+    ('Files', 'RESET', 'RESET', 'close every file (RESET q resets a qubit)'),
+    ('Files', 'LOCK', 'LOCK | UNLOCK [#]n[, record | [start] TO end]', 'accepted for an open file'),
+    ('Files', 'BSAVE', 'BSAVE file$, offset, length | BLOAD file$[, offset]', 'save or load bytes of the DEF SEG segment (SCREEN 13 pixels at &HA000, the text screen at &HB800)'),
     # ── Graphics ─────────────────────────────────────────────────────────
     ('Graphics', 'SCREEN', 'SCREEN mode', '0 text; 1, 2, 7-13 graphics; 3-5 the quantum display modes'),
     ('Graphics', 'PSET', 'PSET [STEP] (x, y) [, colour] | PRESET ...', 'plot a point (PRESET in the background colour)'),
@@ -1834,14 +1848,26 @@ STATEMENTS: tuple[tuple[str, str, str, str], ...] = (
     ('Graphics', 'PUT', 'PUT [STEP] (x, y), a [, PSET | PRESET | AND | OR | XOR]', 'draw a block saved by GET'),
     ('Graphics', 'PCOPY', 'PCOPY source, destination', 'copy a video page'),
     # ── Sound ────────────────────────────────────────────────────────────
-    ('Sound', 'PLAY', 'PLAY commands$', 'music macro language: notes, O, L, T, P, N, MN/ML/MS'),
+    ('Sound', 'PLAY', 'PLAY commands$', 'music macro language: notes, O, L, T, P, N, MN/ML/MS and MF/MB (foreground or background music)'),
     ('Sound', 'SOUND', 'SOUND frequency, ticks', 'a tone for ticks / 18.2 seconds'),
     # ── Events ───────────────────────────────────────────────────────────
     ('Events', 'ON TIMER', 'ON TIMER(seconds) GOSUB line | label', 'call a handler every interval while TIMER ON is in force'),
     ('Events', 'TIMER', 'TIMER ON | OFF | STOP', 'enable, disable or hold timer events'),
+    ('Program', 'RUN', 'RUN [line | label]', 'start the program again with its variables, arrays, files and traps cleared'),
+    ('Program', 'CLEAR', 'CLEAR [, , stack]', 'clear every variable and array, close the files and empty the GOSUB stack'),
+    ('Program', 'SHELL', 'SHELL command$', 'run a command in the system shell and print its output (off in agent mode)'),
+    ('Program', 'ENVIRON', 'ENVIRON "NAME=value"', 'set an environment variable (off in agent mode)'),
+    ('Memory', 'DEF SEG', 'DEF SEG [= segment]', 'the segment PEEK, POKE, BSAVE and BLOAD address (&HA000 SCREEN 13 pixels, &HB800 the text screen, 0 the BIOS clock)'),
+    ('Memory', 'OUT', 'OUT port, value', 'the VGA palette ports: &H3C8 picks an entry, three &H3C9 writes set its red, green, blue (0-63)'),
+    ('Memory', 'WAIT', 'WAIT port, mask [, xor]', 'hold until (INP(port) XOR xor) AND mask is not 0; &H3DA bit 8 is the vertical retrace, 70 times a second'),
+    ('Screen', 'VIEW PRINT', 'VIEW PRINT [top TO bottom]', 'the text rows that scroll'),
     ('Events', 'ON MEASURE', 'ON MEASURE GOSUB line', "call a handler when the run's first MEASURE executes"),
-    ('Events', 'ON KEY', 'ON KEY(n) | PLAY(n) | COM(n) | PEN | STRIG(n) GOSUB target', 'accepted; those devices raise no events here'),
-    ('Events', 'KEY', 'KEY ON | OFF | LIST | KEY n, text$ | KEY(n) ON | OFF | STOP', 'accepted for QBASIC compatibility'),
+    ('Events', 'ON KEY', 'ON KEY(n) GOSUB line | label', 'call a handler when key n is pressed under KEY(n) ON: F1-F10 (1-10), the arrows (11-14), F11 and F12 (30, 31), or a key KEY 15-25 defines'),
+    ('Events', 'ON PLAY', 'ON PLAY(n) GOSUB line | label', 'call a handler when the background music queue drops below n notes, under PLAY ON'),
+    ('Events', 'PLAY ON', 'PLAY ON | OFF | STOP', 'arm, disarm or hold the ON PLAY trap'),
+    ('Events', 'ON COM', 'ON COM(n) | PEN | STRIG(n) | UEVENT GOSUB target', 'accepted; those devices raise no events here'),
+    ('Events', 'UEVENT', 'UEVENT ON | OFF | STOP', 'accepted; no user event source is attached'),
+    ('Events', 'KEY', 'KEY(n) ON | OFF | STOP | KEY n, keys$ | KEY ON | OFF | LIST', 'arm, disarm or hold key trap n (0 for all); define key 15-25 from CHR$(shift flags) + CHR$(scan code); KEY ON, OFF and LIST are accepted'),
     ('Events', 'PEN', 'PEN | STRIG(n) | COM(n) ON | OFF | STOP', 'accepted for QBASIC compatibility'),
     # ── Errors ───────────────────────────────────────────────────────────
     ('Errors', 'ON ERROR', 'ON ERROR GOTO line | label | 0', 'trap runtime errors (0 turns trapping off)'),
@@ -1928,6 +1954,18 @@ FUNCTIONS: tuple[tuple[str, str, str, str], ...] = (
     ('System', 'POS', 'POS(n)', 'text cursor column'),
     ('System', 'ERR', 'ERR | ERL', 'code and line of the trapped error'),
     ('System', 'FN', 'FNname(args)', 'call a DEF FN function'),
+    ('System', 'CSRLIN', 'CSRLIN', 'text cursor row'),
+    ('System', 'SCREEN', 'SCREEN(row, column [, 1])', 'the character code at a text position, or with 1 its colour'),
+    ('System', 'PLAY', 'PLAY(n)', 'notes left in the background music queue'),
+    ('System', 'ENVIRON$', 'ENVIRON$(name$ | n)', 'an environment variable, or the nth NAME=value entry ("" in agent mode)'),
+    ('System', 'FILEATTR', 'FILEATTR(n, 1 | 2)', "file n's mode (1 INPUT, 2 OUTPUT, 4 RANDOM, 8 APPEND, 32 BINARY) or handle"),
+    ('System', 'LPOS', 'LPOS(n)', 'printer column'),
+    ('System', 'INP', 'INP(port)', 'the VGA status (&H3DA) and palette data (&H3C9) ports, the keyboard port (&H60); other ports read 0'),
+    ('System', 'ERDEV', 'ERDEV | ERDEV$', 'the last device error and its device (none occur)'),
+    ('System', 'STICK', 'STICK(n) | STRIG(n) | PEN(n) | IOCTL$(n)', '0 or "": no joystick, light pen or device channel is attached'),
+    ('System', 'VARPTR', 'VARPTR(v) | VARSEG(v) | SADD(s$) | VARPTR$(v)', 'an error: variables have no memory address'),
+    ('Conversion', 'MKSMBF$', 'MKSMBF$(x) | MKDMBF$(x)', 'a number in Microsoft Binary Format, 4 or 8 characters'),
+    ('Conversion', 'CVSMBF', 'CVSMBF(s$) | CVDMBF(s$)', 'the number a Microsoft Binary Format string holds'),
 )
 
 

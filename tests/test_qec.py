@@ -5,7 +5,7 @@ import itertools
 import unittest
 
 import numpy as np
-from conftest import ScriptIO, term
+from conftest import ScriptIO, feed, term
 
 from qubasic_core import qec
 from qubasic_core.logical import STEANE_CHECKS, steane_decode
@@ -131,6 +131,53 @@ class TestDetectorModel(unittest.TestCase):
         det, obs = model.sample(100, np.random.default_rng(0))
         self.assertEqual(det.shape, (100, 2))
         self.assertEqual(obs.shape, (100, 2))
+
+
+class TestUnionFind(unittest.TestCase):
+    """The union-find decoder: every error below half the distance corrected,
+    and logical error rates that track matching's."""
+
+    def test_corrects_every_error_below_half_the_distance(self):
+        t = term(4, seed=1)
+        for d in (3, 5):
+            code = t._qec_code('SURFACE', d)
+            b = t._qec_binary(code)
+            n = code['n']
+            (lxx, lxz), (lzx, lzz) = b['LX'], b['LZ']
+            for w in range(1, (d - 1) // 2 + 1):
+                for support in itertools.combinations(range(n), w):
+                    for kind in 'XZ':
+                        err = np.zeros((1, n), np.uint8)
+                        err[0, list(support)] = 1
+                        ex, ez = (err, 0 * err) if kind == 'X' else (0 * err, err)
+                        rx, rz = t._uf_recovery(code, t._syndromes(code, ex, ez)[0])
+                        res_x, res_z = (ex[0] ^ rx).astype(int), (ez[0] ^ rz).astype(int)
+                        self.assertFalse(t._syndromes(code, res_x[None], res_z[None]).any())
+                        self.assertEqual(((res_x @ lxz + res_z @ lxx) % 2, (res_x @ lzz + res_z @ lzx) % 2),
+                                         (0, 0), (d, support, kind))
+
+    def test_rates_track_matching(self):
+        t = term(4, seed=3)
+        code = t._qec_code('SURFACE', 5)
+        uf = t._logical_error_rate(code, 0.06, 4000, np.random.default_rng(5), decoder='uf')
+        match = t._logical_error_rate(code, 0.06, 4000, np.random.default_rng(5), decoder='match')
+        self.assertLess(match, uf + 0.01)
+        self.assertLess(uf, 1.5 * match + 0.01)
+        model = t._phenomenological_model(code, 0.02, 5)
+        r_uf, _ = model.logical_failure_rate(3000, np.random.default_rng(5), 'uf')
+        r_match, _ = model.logical_failure_rate(3000, np.random.default_rng(5), 'match')
+        self.assertLess(r_uf, 2 * r_match + 0.01)
+        rep = DetectorModel(4, 1)
+        for q in range(5):
+            rep.add(0.05, [k for k in (q - 1, q) if 0 <= k < 4], 1 if q == 0 else 0)
+        self.assertLess(rep.logical_failure_rate(20000, np.random.default_rng(1), 'uf')[0], 0.01)
+        self.assertIn('union-find decoder', feed(t, 'LOGICAL_ERROR_RATE SURFACE 5 0.05 2000 UF'))
+        self.assertIn('space-time union-find', feed(t, 'LOGICAL_ERROR_RATE SURFACE 3 0.002 CIRCUIT UF 1000'))
+        self.assertIn('space-time union-find', feed(t, 'LOGICAL_ERROR_RATE SURFACE 3 0.02 PHENOM UF 1000'))
+
+    def test_isolated_odd_cluster_is_refused(self):
+        with self.assertRaises(ValueError):
+            qec.union_find(3, [(0, 1)], [2], [2])
 
 
 class TestPhenomenologicalMemory(unittest.TestCase):

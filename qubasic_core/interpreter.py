@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 import numpy as np
 from qiskit import QuantumCircuit
 
+from qubasic_core.devices import KEY_TRAP_KEYS, defined_keys, read_terminal_keys
 from qubasic_core.engine import ExecContext, ExecOutcome, ExecResult
 from qubasic_core.expression import (
     ArrayRef,
@@ -73,6 +74,7 @@ from qubasic_core.parser import (
     RemStmt,
     ResumeStmt,
     ReturnStmt,
+    RunStmt,
     SelectCaseStmt,
     SharedStmt,
     StaticStmt,
@@ -319,12 +321,17 @@ class ControlFlowMixin(LanguageHost):
     def _emit_text(self, text: str, newline: bool) -> None:
         """Write program output, keeping the cursor column that POS reads and
         TAB and the print zones count from."""
+        start = self._print_col
         if newline:
             self.io.writeln(text)
             self._print_col = 0
         else:
             self.io.write(text)
             self._print_col = next_column(self._print_col, text)
+        if self._canvas is not None:
+            self._gfx_print(text, newline)
+        else:
+            self._text_put(text, newline, start)
 
     def _cf_print(self, stmt: str, run_vars: MutableMapping[str, Any],
                   parsed: PrintStmt) -> tuple[bool, ExecOutcome]:
@@ -538,6 +545,7 @@ class ControlFlowMixin(LanguageHost):
         ErrorStmt:       lambda s, st, p, ls, sl, ip, rv, ef: s._cf_error(st, parsed=p),
         AssertStmt:      lambda s, st, p, ls, sl, ip, rv, ef: s._cf_assert(st, rv, parsed=p),
         StopStmt:        lambda s, st, p, ls, sl, ip, rv, ef: s._cf_stop(st, sl, ip, parsed=p),
+        RunStmt:         lambda s, st, p, ls, sl, ip, rv, ef: s._cf_run(sl, ls, parsed=p),
         OnMeasureStmt:   lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_measure(st, parsed=p),
         OnTimerStmt:     lambda s, st, p, ls, sl, ip, rv, ef: s._cf_on_timer(st, parsed=p),
         # Compiled control transfers (parser.py)
@@ -1188,6 +1196,9 @@ class SubroutineMixin(LanguageHost):
                  sorted_lines: Sequence[int], ip: int, *, parsed: CallStmt) -> tuple[bool, ExecOutcome]:
         name, arg_str = parsed.name, parsed.args
         if name not in self._sub_defs:
+            if name in ('ABSOLUTE', 'INTERRUPT', 'INTERRUPTX'):
+                raise RuntimeError(f"ILLEGAL FUNCTION CALL: CALL {name} runs machine code, "
+                                   f"which QUBASIC does not execute")
             raise RuntimeError(f"SUBPROGRAM NOT DEFINED: {name}")
         sub = self._sub_defs[name]
         arg_texts = self._split_arg_list(arg_str) if arg_str.strip() else []
@@ -1406,6 +1417,21 @@ class DebugMixin(LanguageHost):
         self._on_timer_last: float = 0.0
         self._timer_state = 'OFF'             # TIMER ON | OFF | STOP
         self._timer_pending = False           # an event held by TIMER STOP
+        # Key and music traps: ON KEY(n) / ON PLAY(n) handlers, their ON | OFF |
+        # STOP states, events held by STOP, and keys KEY 15-25 define.
+        self._key_traps: dict[int, int] = {}
+        self._key_state: dict[int, str] = {}
+        self._key_pending: set[int] = set()
+        self._user_keys: dict[int, set[str]] = {}
+        self._play_trap: tuple[int, int] | None = None
+        self._play_trap_state = 'OFF'
+        self._play_pending = False
+        self._play_last_count = 0
+        # An event's handler runs with the event held: kind -> GOSUB depth.
+        self._event_depth: dict[str, int] = {}
+        # Keys read from the terminal that INKEY$ and GET have yet to take.
+        self._key_buffer: list[str] = []
+        self._read_keys: Callable[..., list[str]] = read_terminal_keys
         # Time-travel: statevector checkpoints indexed by gate count
         self._sv_checkpoints: list[tuple[int, Any]] = []  # [(line_num, sv_copy)]
         self._tt_position: int = -1  # current position in checkpoint list
@@ -1514,6 +1540,32 @@ class DebugMixin(LanguageHost):
             self.io.write(f"[{line_num}]" + ' ')
 
     # ── STOP / CONT ────────────────────────────────────────────────────
+
+    def _cf_run(self, sorted_lines: Sequence[int], loop_stack: list[dict[str, Any]], *,
+                parsed: RunStmt) -> tuple[bool, ExecOutcome]:
+        """RUN [line | label] inside a program: start again from the top or
+        that line, with its variables, arrays, files, DATA and traps cleared
+        and any gates it applied removed."""
+        if parsed.file is not None:
+            raise ValueError("RUN file$ inside a program: use CHAIN file$")
+        if self._live is not None:
+            raise ValueError("RUN inside a program that runs shot by shot")
+        self._clear_program_state()
+        loop_stack.clear()
+        self._data_ptr = 0
+        self._reset_events()
+        if self._build_qc is not None:
+            self._build_qc.clear()
+        self._classical_bits.clear()
+        if parsed.target is None:
+            return True, 0
+        if isinstance(parsed.target, str):
+            raise ValueError(f"LABEL {parsed.target} NOT FOUND")
+        from qubasic_core.parser import line_index
+        target = line_index(sorted_lines, parsed.target)
+        if target is None:
+            raise ValueError(f"LINE {parsed.target} NOT FOUND")
+        return True, target
 
     def _cf_stop(self, stmt: str, sorted_lines: Sequence[int], ip: int, *, parsed: StopStmt) -> tuple[bool, ExecOutcome]:
         # CONT sets _cont_skip_stop_ip to replay past this STOP
@@ -1653,11 +1705,49 @@ class DebugMixin(LanguageHost):
             self._timer_pending = False
         return True
 
-    @staticmethod
-    def _stmt_on_event(stmt: str) -> bool:
-        """ON KEY(n), ON PLAY(n), ON COM(n), ON PEN and ON STRIG(n) GOSUB: accepted;
-        those devices raise no events here."""
-        return bool(re.match(r'ON\s+(KEY|PLAY|COM|PEN|STRIG)\b.*\bGOSUB\b', stmt.strip(), re.IGNORECASE))
+    def _stmt_on_event(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """ON KEY(n) GOSUB target and ON PLAY(n) GOSUB target arm a key or a
+        background-music trap (GOSUB 0 disarms it); ON COM(n), ON PEN and ON
+        STRIG(n) are accepted, and those devices raise no events here."""
+        m = re.match(r'ON\s+(KEY|PLAY|COM|PEN|STRIG|UEVENT)\b\s*(?:\((.*?)\))?\s*GOSUB\s+(\S+)\s*$',
+                     stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        device = m.group(1).upper()
+        if device in ('COM', 'PEN', 'STRIG', 'UEVENT'):
+            return True
+        if m.group(2) is None:
+            raise ValueError(f"SYNTAX ERROR: ON {device}(n) GOSUB line")
+        n = int(self._eval_with_vars(m.group(2), run_vars))
+        target = self._event_target(m.group(3))
+        if device == 'KEY':
+            if n not in KEY_TRAP_KEYS and not 15 <= n <= 25:
+                raise ValueError(f"ILLEGAL FUNCTION CALL: KEY({n})")
+            if target is None:
+                self._key_traps.pop(n, None)
+            else:
+                self._key_traps[n] = target
+        else:
+            if not 1 <= n <= 32:
+                raise ValueError(f"ILLEGAL FUNCTION CALL: PLAY({n})")
+            self._play_trap = None if target is None else (n, target)
+            self._play_last_count = self._bg_remaining()
+        return True
+
+    def _event_target(self, text: str) -> int | None:
+        """A trap's handler line, from a line number or a label; 0 disarms."""
+        if text.isdigit():
+            return int(text) or None
+        line = self._compiled().labels.get(text.upper())
+        if line is None:
+            raise ValueError(f"LABEL {text} NOT FOUND")
+        return line
+
+    def _set_play_trap(self, state: str) -> None:
+        """PLAY ON | OFF | STOP: arm, disarm or hold the ON PLAY trap."""
+        self._play_trap_state = state
+        if state == 'OFF':
+            self._play_pending = False
 
     @staticmethod
     def _stmt_device_events(stmt: str) -> bool:
@@ -1665,11 +1755,107 @@ class DebugMixin(LanguageHost):
         return bool(re.match(r'(PEN|STRIG|COM)\b\s*(?:\(\s*\d+\s*\))?\s*(ON|OFF|STOP)\s*$',
                              stmt.strip(), re.IGNORECASE))
 
-    @staticmethod
-    def _stmt_key(stmt: str) -> bool:
-        """KEY ON | OFF | LIST, KEY n, text$ and KEY(n) ON | OFF | STOP: accepted;
-        function-key labels and key events are not part of this terminal."""
-        return bool(re.match(r'KEY\b\s*(?:\(|ON\b|OFF\b|LIST\b|\d)', stmt.strip(), re.IGNORECASE))
+    def _stmt_key(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """KEY(n) ON | OFF | STOP arms, disarms or holds key trap n (KEY(0) every
+        trap); KEY n, keys$ defines key 15-25 from shift flags and a scan code,
+        or labels function key n; KEY ON | OFF | LIST are accepted."""
+        s = stmt.strip()
+        m = re.match(r'KEY\s*\((.+?)\)\s*(ON|OFF|STOP)\s*$', s, re.IGNORECASE)
+        if m:
+            n = int(self._eval_with_vars(m.group(1), run_vars))
+            state = m.group(2).upper()
+            for k in ([*KEY_TRAP_KEYS, *range(15, 26)] if n == 0 else [n]):
+                self._key_state[k] = state
+                if state == 'OFF':
+                    self._key_pending.discard(k)
+            return True
+        m = re.match(r'KEY\s+(\d+)\s*,\s*(.+)$', s, re.IGNORECASE)
+        if m:
+            n = int(m.group(1))
+            text = self._safe_eval(m.group(2), extra_ns=run_vars)
+            if not isinstance(text, str):
+                raise ValueError("TYPE MISMATCH: KEY n takes a string")
+            if 15 <= n <= 25:
+                self._user_keys[n] = defined_keys(text)
+            elif not (1 <= n <= 10 or n in (30, 31)):
+                raise ValueError(f"ILLEGAL FUNCTION CALL: KEY {n}")
+            return True
+        return bool(re.match(r'KEY\s+(ON|OFF|LIST)\s*$', s, re.IGNORECASE))
+
+    def _events_armed(self) -> bool:
+        """Whether a timer, key or music trap is armed this run."""
+        return self._on_timer_target is not None or bool(self._key_traps) or self._play_trap is not None
+
+    def _poll_keys(self) -> None:
+        """Move the keys waiting at the terminal into the keyboard buffer."""
+        if not getattr(self.io, 'replay', False):
+            self._key_buffer.extend(self._read_keys())
+
+    def _trapped_key(self, key: str) -> int | None:
+        for n, k in KEY_TRAP_KEYS.items():
+            if key == k and n in self._key_traps:
+                return n
+        for n, keys in self._user_keys.items():
+            if key in keys and n in self._key_traps:
+                return n
+        return None
+
+    def _check_events(self, sorted_lines: Sequence[int], ip: int) -> int | None:
+        """The ip of the handler an event calls before the statement at ip
+        runs, ip pushed for its RETURN, or None. An event waits while its own
+        handler runs, as QBASIC holds it until RETURN."""
+        depth = len(self._gosub_stack)
+        self._event_depth = {k: d for k, d in self._event_depth.items() if d <= depth}
+        if self._on_timer_target is not None and 'timer' not in self._event_depth:
+            target = self._check_timer_callback(sorted_lines, ip)
+            if target is not None:
+                self._event_depth['timer'] = len(self._gosub_stack)
+                return target
+        if self._key_traps:
+            self._poll_keys()
+            for key in list(self._key_buffer):
+                n = self._trapped_key(key)
+                if n is not None and self._key_state.get(n, 'OFF') != 'OFF':
+                    self._key_buffer.remove(key)
+                    self._key_pending.add(n)
+            for n in sorted(self._key_pending):
+                if self._key_state.get(n) == 'ON' and 'key' not in self._event_depth:
+                    self._key_pending.discard(n)
+                    return self._fire_event('key', self._key_traps[n], sorted_lines, ip)
+        if self._play_trap is not None:
+            n, line = self._play_trap
+            count = self._bg_remaining()
+            if count < n <= self._play_last_count and self._play_trap_state != 'OFF':
+                self._play_pending = True
+            self._play_last_count = count
+            if self._play_pending and self._play_trap_state == 'ON' and 'play' not in self._event_depth:
+                self._play_pending = False
+                return self._fire_event('play', line, sorted_lines, ip)
+        return None
+
+    def _fire_event(self, kind: str, line: int, sorted_lines: Sequence[int], ip: int) -> int:
+        from qubasic_core.parser import line_index
+        target = line_index(sorted_lines, line)
+        if target is None:
+            raise ValueError(f"LINE {line} NOT FOUND")
+        self._gosub_stack.append(ip)
+        self._event_depth[kind] = len(self._gosub_stack)
+        return target
+
+    def _reset_events(self) -> None:
+        """A run's traps arm only when its own statements arm them."""
+        self._on_timer_target = None
+        self._timer_state = 'OFF'
+        self._timer_pending = False
+        self._key_traps.clear()
+        self._key_state.clear()
+        self._key_pending.clear()
+        self._user_keys.clear()
+        self._play_trap = None
+        self._play_trap_state = 'OFF'
+        self._play_pending = False
+        self._play_last_count = 0
+        self._event_depth.clear()
 
     def _check_timer_callback(self, sorted_lines: Sequence[int], ip: int) -> int | None:
         """The ip of the ON TIMER handler when its interval has passed and
@@ -1800,21 +1986,12 @@ class StatementMixin(LanguageHost):
         self._gfx_frame(start=True, force=True)
         try:
             if getattr(self.io, 'replay', False):
-                ch = self.io.read_line('')[:1]      # a later live shot replays
-            elif sys.stdin.isatty():
-                if sys.platform == 'win32':
-                    import msvcrt
-                    ch = msvcrt.getwch()
-                else:
-                    import termios
-                    import tty
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-                    try:
-                        tty.setraw(fd)
-                        ch = sys.stdin.read(1)
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                ch = self.io.read_line('')          # a later live shot replays
+            elif self._key_buffer or sys.stdin.isatty():
+                self._poll_keys()
+                if not self._key_buffer:
+                    self._key_buffer.extend(self._read_keys(True))
+                ch = self._key_buffer.pop(0) if self._key_buffer else ''
                 if hasattr(self.io, 'record'):
                     self.io.record(ch)               # replayed by later shots
             else:
@@ -1826,7 +2003,7 @@ class StatementMixin(LanguageHost):
             run_vars[var] = ch
             self.variables[var] = ch
         else:
-            run_vars[var] = float(ord(ch)) if ch else 0.0
+            run_vars[var] = float(ord(ch[0])) if ch else 0.0
             self.variables[var] = run_vars[var]
         return True
 
@@ -1858,6 +2035,8 @@ class StatementMixin(LanguageHost):
                     self._write_lvalue(lv, value, run_vars)
                 # INPUT ; keeps the cursor after the typed text, else a new line
                 self._print_col = len(prompt) + len(line) if m.group(1) else 0
+                if self._canvas is not None:
+                    self._gfx_print(prompt + line, newline=not m.group(1))
                 return True
             self.io.writeln("?Redo from start")
         for lv in targets:
@@ -1932,9 +2111,19 @@ class StatementMixin(LanguageHost):
         **dict.fromkeys(('KILL', 'NAME', 'MKDIR', 'RMDIR', 'CHDIR', 'FILES'), (
             lambda s, st, qc, rv, b: s._stmt_filesystem(st, rv),)),
         'COMMON': (lambda s, st, qc, rv, b: s._stmt_common(st),),
+        'OUT': (lambda s, st, qc, rv, b: s._stmt_out(st, rv),),
+        'DEF': (lambda s, st, qc, rv, b: s._stmt_def_seg(st, rv),),
+        'BSAVE': (lambda s, st, qc, rv, b: s._stmt_bsave(st, rv),),
+        'BLOAD': (lambda s, st, qc, rv, b: s._stmt_bload(st, rv),),
+        'CLEAR': (lambda s, st, qc, rv, b: s._stmt_clear(st),),
+        'RESET': (lambda s, st, qc, rv, b: s._stmt_reset_files(st),),
+        **dict.fromkeys(('LOCK', 'UNLOCK'), (lambda s, st, qc, rv, b: s._stmt_lock(st, rv),)),
+        'UEVENT': (lambda s, st, qc, rv, b: bool(re.match(r'UEVENT\s+(ON|OFF|STOP)\s*$', st.strip(), re.I)),),
+        'SHELL': (lambda s, st, qc, rv, b: s._stmt_shell(st, rv),),
+        'ENVIRON': (lambda s, st, qc, rv, b: s._stmt_environ(st, rv),),
         'TIMER': (lambda s, st, qc, rv, b: s._stmt_timer(st),),
-        'KEY': (lambda s, st, qc, rv, b: s._stmt_key(st),),
-        'ON': (lambda s, st, qc, rv, b: s._stmt_on_event(st),),
+        'KEY': (lambda s, st, qc, rv, b: s._stmt_key(st, rv),),
+        'ON': (lambda s, st, qc, rv, b: s._stmt_on_event(st, rv),),
         **dict.fromkeys(('PEN', 'STRIG', 'COM'), (lambda s, st, qc, rv, b: s._stmt_device_events(st),)),
         'PRINT': (lambda s, st, qc, rv, b: s._exec_print_file(st, rv),),
         'LPRINT': (lambda s, st, qc, rv, b: s._exec_lprint(st, rv),),
@@ -1971,6 +2160,8 @@ class StatementMixin(LanguageHost):
             val = ''
         self._write_lvalue(lv, val, run_vars)
         self._print_col = len(m.group(2) or '') + len(val) if m.group(1) else 0
+        if self._canvas is not None:
+            self._gfx_print((m.group(2) or '') + val, newline=not m.group(1))
         return True
 
     def _try_exec_let_str(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
@@ -2017,7 +2208,9 @@ class StatementMixin(LanguageHost):
         self._print_col = 0
         if self._canvas is not None:
             self._canvas.cls()
+            self._gfx_row = self._gfx_col = 1
             return True
+        self._text_clear()
         if self._on_terminal() and not getattr(self.io, 'replay', False):
             self.io.write('\033[2J\033[H')
         return True
@@ -2060,7 +2253,8 @@ class StatementMixin(LanguageHost):
         return True
 
     def _stmt_locate(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
-        """LOCATE [row][, col] — move the cursor (on a terminal)."""
+        """LOCATE [row][, col] — move the cursor: on a graphics screen its text
+        cursor, else the terminal's."""
         m = re.match(r'LOCATE\b\s*(.*)$', stmt.strip(), re.IGNORECASE)
         if not m:
             return False
@@ -2069,11 +2263,35 @@ class StatementMixin(LanguageHost):
                 for a in args[:2]]
         if len(nums) > 1 and nums[1]:
             self._print_col = nums[1] - 1
+        if self._canvas is not None:
+            self._gfx_locate(nums[0] if nums else None, nums[1] if len(nums) > 1 else None)
+            return True
+        if nums and nums[0] is not None:
+            if not 1 <= nums[0] <= 25:
+                raise ValueError(f"ILLEGAL FUNCTION CALL: LOCATE row {nums[0]} (1-25)")
+            self._print_row = nums[0]
         if self._on_terminal() and not getattr(self.io, 'replay', False) and nums:
             row = nums[0] or 1
             col = (nums[1] if len(nums) > 1 else None) or 1
             self.io.write(f'\033[{row};{col}H')
         return True
+
+    def _stmt_clear(self, stmt: str) -> bool:
+        """CLEAR [, , stack] in a program: every variable and array cleared,
+        the files closed and the GOSUB stack emptied, as in QBASIC."""
+        if not re.match(r'CLEAR\s*(,.*)?$', stmt.strip(), re.IGNORECASE):
+            return False
+        self._clear_program_state()
+        return True
+
+    def _clear_program_state(self) -> None:
+        self.variables.clear()
+        self.arrays.clear()
+        self._array_dims.clear()
+        self._dimmed_arrays.clear()
+        for handle in list(self._file_handles):
+            self._close_file(handle)
+        self._gosub_stack.clear()
 
     def _stmt_common(self, stmt: str) -> bool:
         """COMMON [SHARED] [/block/] var, ...: CHAIN keeps every variable here;
@@ -2092,7 +2310,8 @@ class StatementMixin(LanguageHost):
         if stmt.strip().upper() != 'BEEP':
             return False
         if not getattr(self.io, 'replay', False):
-            self.io.write('\a')
+            if not self._audio_on():
+                self.io.write('\a')
             self._sound_beep()
         return True
 
@@ -2135,35 +2354,17 @@ class StatementMixin(LanguageHost):
         return bool(re.match(rf'{word}\b', stmt.strip(), re.IGNORECASE))
 
     def _inkey(self) -> str:
-        """INKEY$: a key already pressed, or "" (never waits)."""
+        """INKEY$: a key already pressed, or "" (never waits); a key without a
+        character reads as CHR$(0) and its scan code."""
         self._gfx_frame(start=True)
         io = self.io
         if getattr(io, 'replay', False):
             try:
-                return io.read_line('')[:1]
+                return io.read_line('')
             except EOFError:
                 return ''
-        ch = ''
-        try:
-            if sys.stdin and sys.stdin.isatty():
-                if sys.platform == 'win32':
-                    import msvcrt
-                    if msvcrt.kbhit():
-                        ch = msvcrt.getwch()
-                else:
-                    import select
-                    import termios
-                    import tty
-                    fd = sys.stdin.fileno()
-                    old = termios.tcgetattr(fd)
-                    try:
-                        tty.setcbreak(fd)
-                        if select.select([sys.stdin], [], [], 0)[0]:
-                            ch = sys.stdin.read(1)
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        except (OSError, ValueError):
-            ch = ''
+        self._poll_keys()
+        ch = self._key_buffer.pop(0) if self._key_buffer else ''
         if hasattr(io, 'record'):
             io.record(ch)
         return ch

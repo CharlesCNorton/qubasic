@@ -560,6 +560,344 @@ def _sample_one_np(sv: np.ndarray, n_qubits: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# QUBASIC stabilizer tableau: Clifford circuits at widths no statevector
+# reaches.
+#
+# A stabilizer state on n qubits is held as Aaronson and Gottesman's tableau
+# (Phys. Rev. A 70, 052328): n destabilizer and n stabilizer generators, each
+# a Hermitian Pauli with a sign. The generators' x and z bits are packed 64 to
+# a word along the generator axis, word-major, so a gate rewrites a few
+# contiguous rows of words and a measurement multiplies generators a word at
+# a time. A gate outside the named fast paths goes through its table of how
+# it conjugates each Pauli on its qubits, computed once per matrix, which is
+# also what decides whether a matrix is a Clifford at all.
+# ---------------------------------------------------------------------------
+
+_ONE = np.uint64(1)
+_POPCOUNT8 = np.array([bin(i).count('1') for i in range(256)], dtype=np.int64)
+_PAULI_MATS = (_MAT_ID, _MAT_X, _MAT_Z, _MAT_Y)          # by code x + 2z
+_CLIFFORD_TABLES: dict[bytes, tuple[np.ndarray, np.ndarray] | None] = {}
+
+
+def _popcount(words: np.ndarray) -> np.ndarray:
+    """Set bits in each element of a uint64 array."""
+    if hasattr(np, 'bitwise_count'):
+        return np.bitwise_count(words).astype(np.int64)
+    w = np.ascontiguousarray(words)
+    return _POPCOUNT8[w.view(np.uint8)].reshape(w.shape + (8,)).sum(axis=-1)
+
+
+def tableau_bytes(n: int) -> int:
+    """Peak memory of a live run on an n-qubit tableau: the state, the start
+    snapshot, the first shot's copy and a measurement's scratch generators."""
+    return 6 * (2 * ((n + 63) >> 6) * 2 * n * 8) + 64 * n
+
+
+def pauli_code_matrix(code: int, k: int) -> np.ndarray:
+    """The k-qubit Pauli whose bits 2j and 2j+1 are qubit j's x and z, in
+    Qiskit order (qubit 0 least significant)."""
+    m = np.ones((1, 1), dtype=complex)
+    for j in range(k):
+        m = np.kron(_PAULI_MATS[(code >> (2 * j)) & 3], m)
+    return m
+
+
+def clifford_table(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """How a unitary on k <= 4 qubits (Qiskit order) conjugates each Pauli on
+    its qubits: image codes and sign bits indexed by Pauli code, or None when
+    the unitary is not a Clifford."""
+    u = np.ascontiguousarray(matrix, dtype=complex)
+    key = u.tobytes()
+    if key in _CLIFFORD_TABLES:
+        return _CLIFFORD_TABLES[key]
+    d = u.shape[0]
+    k = d.bit_length() - 1
+    table = None
+    if 1 <= k <= 4 and d == 1 << k and u.shape == (d, d):
+        paulis = np.array([pauli_code_matrix(c, k) for c in range(4 ** k)])
+        images = u @ paulis @ u.conj().T
+        coeff = np.einsum('qij,pji->pq', paulis, images) / d
+        image = np.argmax(np.abs(coeff), axis=1)
+        value = coeff[np.arange(image.size), image]
+        if np.allclose(value, np.sign(value.real), atol=1e-6):
+            table = (image.astype(np.int64), (value.real < 0).astype(np.uint64))
+    if len(_CLIFFORD_TABLES) < 4096:
+        _CLIFFORD_TABLES[key] = table
+    return table
+
+
+def pauli_mixture(ops: Sequence[np.ndarray]) -> tuple[np.ndarray, np.ndarray] | None:
+    """A channel given by Kraus operators on k <= 3 qubits as a mixture of
+    Paulis, (cumulative probabilities, Pauli codes), when its chi matrix in
+    the Pauli basis is diagonal; None for any other channel."""
+    k = ops[0].shape[0].bit_length() - 1
+    if k > 3:
+        return None
+    paulis = np.array([pauli_code_matrix(c, k) for c in range(4 ** k)])
+    coeff = np.einsum('aij,kji->ka', paulis, np.asarray(ops, dtype=complex)) / (1 << k)
+    chi = coeff.T @ coeff.conj()
+    probs = np.real(np.diag(chi)).copy()
+    if not np.allclose(chi - np.diag(np.diag(chi)), 0.0, atol=1e-9):
+        return None
+    codes = np.flatnonzero(probs > 1e-15)
+    weights = probs[codes] / probs[codes].sum()
+    return np.cumsum(weights), codes
+
+
+class Tableau:
+    """A stabilizer state on n qubits. Generator rows 0..n-1 are the
+    destabilizers and n..2n-1 the stabilizers; x and z are (words, 2n) uint64
+    arrays holding qubit q at bit q & 63 of word q >> 6, and r the signs. A
+    generator is (-1)^r times the tensor product of I, X, Z or Y (x = z = 1)
+    on each qubit."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.words = (n + 63) >> 6
+        self.x = np.zeros((self.words, 2 * n), dtype=np.uint64)
+        self.z = np.zeros((self.words, 2 * n), dtype=np.uint64)
+        self.r = np.zeros(2 * n, dtype=np.uint64)
+        q = np.arange(n)
+        bits = np.left_shift(_ONE, (q & 63).astype(np.uint64))
+        self.x[q >> 6, q] = bits
+        self.z[q >> 6, q + n] = bits
+
+    def copy(self) -> 'Tableau':
+        t = Tableau.__new__(Tableau)
+        t.n, t.words = self.n, self.words
+        t.x, t.z, t.r = self.x.copy(), self.z.copy(), self.r.copy()
+        return t
+
+    def assign(self, other: 'Tableau') -> None:
+        np.copyto(self.x, other.x)
+        np.copyto(self.z, other.z)
+        np.copyto(self.r, other.r)
+
+    def _bits(self, a: int) -> tuple[np.ndarray, np.ndarray, np.uint64, np.ndarray, np.ndarray]:
+        """Qubit a's word rows (views) and shift, and its x and z bits over
+        every generator (copies)."""
+        xw, zw = self.x[a >> 6], self.z[a >> 6]
+        s = np.uint64(a & 63)
+        return xw, zw, s, (xw >> s) & _ONE, (zw >> s) & _ONE
+
+    # Gates: each conjugates every generator.
+
+    def h(self, a: int) -> None:
+        xw, zw, s, xa, za = self._bits(a)
+        self.r ^= xa & za
+        xa ^= za
+        xa <<= s
+        xw ^= xa
+        zw ^= xa
+
+    def s(self, a: int) -> None:
+        xw, zw, s, xa, za = self._bits(a)
+        self.r ^= xa & za
+        xa <<= s
+        zw ^= xa
+
+    def sdg(self, a: int) -> None:
+        xw, zw, s, xa, za = self._bits(a)
+        za ^= _ONE
+        self.r ^= xa & za
+        xa <<= s
+        zw ^= xa
+
+    def pauli_x(self, a: int) -> None:
+        self.r ^= (self.z[a >> 6] >> np.uint64(a & 63)) & _ONE
+
+    def pauli_z(self, a: int) -> None:
+        self.r ^= (self.x[a >> 6] >> np.uint64(a & 63)) & _ONE
+
+    def pauli_y(self, a: int) -> None:
+        w, s = a >> 6, np.uint64(a & 63)
+        self.r ^= ((self.x[w] ^ self.z[w]) >> s) & _ONE
+
+    def cx(self, a: int, b: int) -> None:
+        _, zwa, sa, xa, za = self._bits(a)
+        xwb, _, sb, xb, zb = self._bits(b)
+        t = xb ^ za
+        t ^= _ONE
+        t &= xa
+        t &= zb
+        self.r ^= t
+        xa <<= sb
+        xwb ^= xa
+        zb <<= sa
+        zwa ^= zb
+
+    def cz(self, a: int, b: int) -> None:
+        _, zwa, sa, xa, za = self._bits(a)
+        _, zwb, sb, xb, zb = self._bits(b)
+        t = za ^ zb
+        t &= xa
+        t &= xb
+        self.r ^= t
+        zwa ^= xb << sa
+        zwb ^= xa << sb
+
+    def swap(self, a: int, b: int) -> None:
+        xwa, zwa, sa, xa, za = self._bits(a)
+        xwb, zwb, sb, xb, zb = self._bits(b)
+        xa ^= xb
+        za ^= zb
+        xwa ^= xa << sa
+        xwb ^= xa << sb
+        zwa ^= za << sa
+        zwb ^= za << sb
+
+    def apply_table(self, table: tuple[np.ndarray, np.ndarray], qubits: Sequence[int]) -> None:
+        """A Clifford given by clifford_table, its qubit j acting on qubits[j]."""
+        image, sign = table
+        cols = [self._bits(q) for q in qubits]
+        code = np.zeros(2 * self.n, dtype=np.int64)
+        for j, (_, _, _, xq, zq) in enumerate(cols):
+            code |= (xq.astype(np.int64) << (2 * j)) | (zq.astype(np.int64) << (2 * j + 1))
+        new = image[code].astype(np.uint64)
+        self.r ^= sign[code]
+        for j, (xw, zw, s, xq, zq) in enumerate(cols):
+            xw ^= (xq ^ ((new >> np.uint64(2 * j)) & _ONE)) << s
+            zw ^= (zq ^ ((new >> np.uint64(2 * j + 1)) & _ONE)) << s
+
+    def apply_pauli(self, code: int, qubits: Sequence[int]) -> None:
+        """The Pauli with this code (as in clifford_table) on `qubits`."""
+        for j, q in enumerate(qubits):
+            c = (code >> (2 * j)) & 3
+            if c == 1:
+                self.pauli_x(q)
+            elif c == 2:
+                self.pauli_z(q)
+            elif c == 3:
+                self.pauli_y(q)
+
+    # Generator products. A product of Hermitian Paulis P1 P2 picks up i to
+    # the power |x1&z1| + |x2&z2| + 2|z1&x2| - |x3&z3|, where x3 and z3 are
+    # the product's bits; commuting factors keep it real.
+
+    def _left_multiply(self, rows: np.ndarray, p: int) -> None:
+        """Generator p times each of `rows`, into those rows."""
+        xp, zp = self.x[:, p:p + 1], self.z[:, p:p + 1]
+        xh, zh = self.x[:, rows], self.z[:, rows]
+        nx, nz = xh ^ xp, zh ^ zp
+        e = (int(_popcount(xp & zp).sum()) + _popcount(xh & zh).sum(axis=0)
+             + 2 * _popcount(xh & zp).sum(axis=0) - _popcount(nx & nz).sum(axis=0)
+             + 2 * int(self.r[p]) + 2 * self.r[rows].astype(np.int64))
+        self.x[:, rows] = nx
+        self.z[:, rows] = nz
+        self.r[rows] = ((e % 4) == 2).astype(np.uint64)
+
+    def _product_sign(self, rows: np.ndarray) -> int:
+        """The sign bit of the product of commuting generators: the phase
+        exponents of the running products telescope, leaving each factor's
+        own count, twice its overlap with the product of the factors before
+        it, and the final product's count."""
+        if rows.size == 0:
+            return 0
+        x, z = self.x[:, rows], self.z[:, rows]
+        acc = np.bitwise_xor.accumulate(x, axis=1)
+        before = np.zeros_like(x)
+        before[:, 1:] = acc[:, :-1]
+        xq, zq = acc[:, -1], np.bitwise_xor.accumulate(z, axis=1)[:, -1]
+        e = (int(_popcount(x & z).sum()) + 2 * int(_popcount(z & before).sum())
+             - int(_popcount(xq & zq).sum()) + 2 * int(np.count_nonzero(self.r[rows])))
+        return int((e % 4) == 2)
+
+    # Measurement
+
+    def is_random(self, a: int) -> bool:
+        """Whether measuring qubit a has a random outcome."""
+        return bool(((self.x[a >> 6, self.n:] >> np.uint64(a & 63)) & _ONE).any())
+
+    def measure(self, a: int, force: int | None = None) -> int:
+        """Measure Z on qubit a and collapse. A random outcome is drawn from
+        numpy's global generator (so SEED reproduces runs), or is `force`."""
+        n = self.n
+        w, s = a >> 6, np.uint64(a & 63)
+        xa = (self.x[w] >> s) & _ONE
+        hits = np.flatnonzero(xa[n:])
+        if hits.size:
+            p = n + int(hits[0])
+            rows = np.flatnonzero(xa)
+            rows = rows[(rows != p) & (rows != p - n)]
+            if rows.size:
+                self._left_multiply(rows, p)
+            self.x[:, p - n] = self.x[:, p]
+            self.z[:, p - n] = self.z[:, p]
+            self.r[p - n] = self.r[p]
+            self.x[:, p] = 0
+            self.z[:, p] = 0
+            self.z[w, p] = _ONE << s
+            bit = int(force) if force is not None else int(np.random.random() < 0.5)
+            self.r[p] = bit
+            return bit
+        return self._product_sign(np.flatnonzero(xa[:n]) + n)
+
+    def reset(self, a: int) -> None:
+        if self.measure(a):
+            self.pauli_x(a)
+
+    # Reading the state
+
+    def _pack(self, bits: np.ndarray) -> np.ndarray:
+        words = np.zeros(self.words, dtype=np.uint64)
+        idx = np.flatnonzero(bits)
+        np.bitwise_or.at(words, idx >> 6, np.left_shift(_ONE, (idx & 63).astype(np.uint64)))
+        return words
+
+    def expectation(self, px: np.ndarray, pz: np.ndarray) -> int:
+        """<P> for the Hermitian Pauli with per-qubit bits px and pz: 0 when
+        it anticommutes with a stabilizer, otherwise the sign with which the
+        stabilizer group contains it."""
+        n = self.n
+        wx, wz = self._pack(px)[:, None], self._pack(pz)[:, None]
+        anti = (_popcount(self.z & wx).sum(axis=0) + _popcount(self.x & wz).sum(axis=0)) & 1
+        if anti[n:].any():
+            return 0
+        return -1 if self._product_sign(np.flatnonzero(anti[:n]) + n) else 1
+
+    def bloch(self, q: int) -> tuple[float, float, float]:
+        """Qubit q's Bloch vector (<X>, <Y>, <Z>), each 0 or +-1."""
+        if not 0 <= q < self.n:
+            raise ValueError(f"QUBIT {q} OUT OF RANGE (0-{self.n - 1})")
+        one = np.zeros(self.n, dtype=bool)
+        one[q] = True
+        none = np.zeros(self.n, dtype=bool)
+        return (float(self.expectation(one, none)), float(self.expectation(one, one)),
+                float(self.expectation(none, one)))
+
+    def probabilities(self, qubits: Sequence[int]) -> np.ndarray:
+        """Outcome probabilities over `qubits` (index bit j for qubits[j]),
+        branching on copies only where an outcome is random."""
+        out = np.zeros(1 << len(qubits))
+
+        def walk(t: Tableau, j: int, index: int, p: float) -> None:
+            if j == len(qubits):
+                out[index] += p
+                return
+            q = qubits[j]
+            if t.is_random(q):
+                other = t.copy()
+                walk(other, j + 1, index | (other.measure(q, force=1) << j), p / 2)
+                walk(t, j + 1, index | (t.measure(q, force=0) << j), p / 2)
+            else:
+                walk(t, j + 1, index | (t.measure(q) << j), p)
+
+        walk(self.copy(), 0, 0, 1.0)
+        return out
+
+    def generators(self) -> list[str]:
+        """The stabilizer generators as signed Pauli strings, qubit 0 first
+        and _ for the identity."""
+        n = self.n
+        q = np.arange(n)
+        shift = (q & 63).astype(np.uint64)[:, None]
+        xb = ((self.x[q >> 6, n:] >> shift) & _ONE).astype(np.int64)
+        zb = ((self.z[q >> 6, n:] >> shift) & _ONE).astype(np.int64)
+        chars = np.array(list('_XZY'))[(xb + 2 * zb).T]
+        return [('-' if self.r[n + g] else '+') + ''.join(chars[g]) for g in range(n)]
+
+
+# ---------------------------------------------------------------------------
 # QUBASIC state analysis on statevectors without dense 2^n x 2^n matrices.
 #
 # Reduced density matrices are accumulated block by block from views of the

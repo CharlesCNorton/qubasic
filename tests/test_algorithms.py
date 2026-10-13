@@ -578,7 +578,8 @@ class TestHamiltoniansAndChannels(unittest.TestCase):
             'HAMILTONIAN A = 1.0 ZZ 0': "needs 2 qubit(s), got 1",
             'HAMILTONIAN A = 1.0': 'has no Pauli operator',
             'HAMILTONIAN A = 1.0 Z 5': 'qubit 5 out of range',
-            'HAMILTONIAN A = MOLECULE LIH': 'MOLECULE supports H2',
+            'HAMILTONIAN A = MOLECULE XE2': 'unknown molecule XE2',
+            'HAMILTONIAN A = MOLECULE "H 0 0 0; H 0 0 0.7; H 0 0 1.4"': '3 electrons',
             'CHANNEL': '?USAGE: CHANNEL',
             'CHANNEL K = [[1, 0], [0, 0.5]]': 'CPTP',
         }

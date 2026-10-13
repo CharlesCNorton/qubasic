@@ -19,9 +19,10 @@ RAN 3 lines, 2 qubits, 1024 shots in 0.02s  [depth=3, gates=4, method=stabilizer
 QUBASIC is a BASIC interpreter whose programs build and run quantum circuits.
 The language is QBASIC's: typed variables, records, arrays with bounds,
 SUB and FUNCTION, labels, SELECT CASE, PRINT USING, sequential, random and
-binary files, graphics on QBASIC's SCREEN modes, PLAY and SOUND, timers and
-error trapping, so QBASIC programs run unchanged, with the graphics screen
-drawn in the terminal and sound recorded for `SAVEWAV`. Gates are statements
+binary files, graphics on QBASIC's SCREEN modes, PLAY and SOUND, timer, key
+and music event traps and error trapping, so QBASIC programs run unchanged,
+with the graphics screen drawn in the terminal and sound played through the
+speaker. Gates are statements
 (`H 0`, `CX 0, 1`), measurements feed back into the program, and RUN simulates
 the result on Qiskit Aer or on QUBASIC's own engines. Around that sit noise
 models and error mitigation, quantum algorithms, error-correcting codes with
@@ -127,8 +128,11 @@ relatives, and `KILL`, `NAME`, `MKDIR`, `RMDIR`, `CHDIR` and `FILES`.
 
 Graphics: `SCREEN` 1, 2 and 7 to 13 open QBASIC's graphics modes, with `PSET`,
 `LINE` (boxes, styles), `CIRCLE` (arcs, ellipses), `PAINT`, `DRAW`, `VIEW`,
-`WINDOW`, `PALETTE`, `GET`/`PUT` of images, `POINT` and `PMAP`. The picture is
-drawn in the terminal in colour cells, or as shading off a terminal. At a
+`WINDOW`, `PALETTE`, `GET`/`PUT` of images, `POINT` and `PMAP`, and `PRINT`,
+`LOCATE`, `COLOR`, `CLS` and `INPUT` put text on the screen in QBASIC's
+character cells (40 or 80 columns, 25 or 30 rows, scrolling at the bottom).
+The picture is drawn in the terminal in colour cells, or as shading off a
+terminal. At a
 terminal it is redrawn in place while the program runs, from the first
 `SLEEP`, `INKEY$`, `GET` or `INPUT` or after half a second, so animations and
 games show as they run; otherwise it appears when the program ends. `SHOW`
@@ -138,8 +142,26 @@ a run stops after 100,000 statements (`POKE $D006` changes the limit), and a
 circuit build stops at a million instructions everywhere.
 
 Sound: `PLAY` takes QBASIC's music macro language and `SOUND` a frequency and
-duration; `SAVEWAV file.wav` writes the result. Events: `ON TIMER(n) GOSUB`
-with `TIMER ON|OFF|STOP`, and `ON MEASURE GOSUB`.
+duration. At an interactive terminal they play through the speaker, foreground
+music holding the program until it ends and `MB` music queueing in the
+background, as in QBASIC; `AUDIO OFF` keeps them silent, and `SAVEWAV
+file.wav` writes everything played. Events: `ON TIMER(n)`, `ON KEY(n)` (F1 to
+F12, the arrow keys and keys a program defines with `KEY 15-25`), `ON PLAY(n)`
+(the background music queue running low) and `ON MEASURE` call their handlers
+with `GOSUB`, each armed, disarmed or held by `TIMER`, `KEY(n)` or `PLAY` with
+`ON`, `OFF` or `STOP`; `INKEY$` reads a key without a character as `CHR$(0)`
+and its scan code.
+
+The PC underneath: after `DEF SEG = &HA000`, `PEEK` and `POKE` reach SCREEN
+13's pixels, and after `DEF SEG = &HB800` the text screen's characters and
+colours; `BSAVE` and `BLOAD` save and load those bytes; `OUT` and `INP` drive
+the VGA palette ports (`&H3C7` to `&H3C9`) and read the vertical retrace at
+`&H3DA`, which `WAIT &H3DA, 8` paces animation by at 70 Hz. `RUN` and `CLEAR`
+inside a program, `CSRLIN`, `SCREEN(row, col)`, `VIEW PRINT`, `FILEATTR`,
+`LPOS`, `ENVIRON$`, `SHELL` (off in agent mode) and the Microsoft Binary Format
+conversions behave as in QBASIC, while `CALL ABSOLUTE` and `VARPTR` report that
+there is no machine code or memory address to reach. Without `DEF SEG`,
+`PEEK` and `POKE` address QUBASIC's own memory map (below).
 
 ## Quantum programs
 
@@ -190,6 +212,17 @@ needs and what to change; `RAM` reports what fits. `QUBASIC_MEMORY_LIMIT=4GB`
 caps what QUBASIC treats as available. `COUPLING`, `BASIS` and `DEVICE`
 constrain transpilation to a hardware topology and native gates.
 
+A live run holds a statevector per shot while one fits. Past that, or under
+`METHOD stabilizer`, each shot holds a stabilizer tableau (Aaronson and
+Gottesman's, bit-packed), so a Clifford program that loops and branches on
+its measurements runs at hundreds or thousands of qubits: 500 qubits take
+about 50 ms a shot. Pauli noise channels, `NOISE depolarizing` and
+`phase_flip` among them, run on the tableau as sampled Paulis; `SAVE_EXPECT`
+and `SAVE_PROBS` read it exactly; `STATE` lists the stabilizer generators of
+the first shot and `BLOCH` reads one qubit from them. A non-Clifford gate,
+a non-Pauli channel or `SAVE_AMPS` stops such a run with the reason it holds
+a tableau.
+
 ## Noise and error mitigation
 
 ```
@@ -216,10 +249,15 @@ a diagonal Hamiltonian), `VQE` (with `EXCITED k` for excited states),
 `QWALK` and `QKERNEL`. `MINIMIZE` and `GRADIENT` optimize a program's own
 parameters (Nelder-Mead, SPSA or parameter-shift gradient descent), compiling
 the circuit once with bound parameters when the program allows.
-`HAMILTONIAN H = MOLECULE H2 0.7414` builds molecular hydrogen's STO-3G
-Hamiltonian with a built-in integrals engine, and `ISING`, `HEISENBERG`,
-`HUBBARD` and `RYDBERG` build model Hamiltonians; `LINDBLAD` evolves open
-systems. Benchmarks: `RB`, `RBINT`, `XEB`, `QVOLUME`, `MIRROR`, `GST`,
+`HAMILTONIAN H = MOLECULE LIH FREEZE` builds a molecule's qubit Hamiltonian
+with no chemistry package: STO-3G integrals over s and p Gaussians
+(McMurchie-Davidson), restricted Hartree-Fock, a frozen core or `ACTIVE`
+space, and the Jordan-Wigner transform, for H2, HeH+, LiH, BeH2, H2O, NH3,
+N2 and H4 by name or any geometry of atoms from H to Ne, reporting the
+Hartree-Fock and exact energies. `VQE H ANSATZ UCCSD` then runs unitary
+coupled cluster from the Hartree-Fock state and `PROGRAM` writes its circuit.
+`ISING`, `HEISENBERG`, `HUBBARD` and `RYDBERG` build model Hamiltonians;
+`LINDBLAD` evolves open systems. Benchmarks: `RB`, `RBINT`, `XEB`, `QVOLUME`, `MIRROR`, `GST`,
 `TOMOGRAPHY` and `PTOMOGRAPHY`.
 
 ## Error correction
@@ -235,7 +273,8 @@ LATTICE CNOT 0 1                                     lattice-surgery CNOT
 ```
 
 Codes: repetition, Steane, Shor, rotated surface and bivariate-bicycle qLDPC.
-Decoders: minimum-weight lookup, exact minimum-weight matching, pymatching and
+Decoders: minimum-weight lookup, exact minimum-weight matching, union-find
+(Delfosse and Nickerson, weighted on space-time graphs), pymatching and
 BP+OSD. `PHENOM` adds measurement errors over d rounds, and `CIRCUIT` makes
 every gate, measurement and reset of the syndrome circuit noisy, building the
 detector error model itself (`CIRCUIT STIM` uses stim instead). `LQUBITS`

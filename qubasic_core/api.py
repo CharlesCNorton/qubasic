@@ -111,6 +111,8 @@ class Session:
         return self.result(self.execute('RUN'))
 
     def result(self, output: str = '') -> dict[str, Any]:
+        """The terminal's result() for the last run, with `output` (the text
+        given) and `errors` (its ?... lines) added."""
         out = self.terminal.result()
         out['output'] = output
         out['errors'] = [line.strip() for line in output.splitlines()
@@ -119,10 +121,12 @@ class Session:
 
     @property
     def counts(self) -> dict[str, int] | None:
+        """The last run's histogram, or None before a run that measures."""
         return self.terminal.last_counts
 
     @property
     def variables(self) -> dict[str, Any]:
+        """The program's variables as the last run left them."""
         return self.terminal.variables
 
     @property
@@ -133,8 +137,8 @@ class Session:
 
 def run(source: str, *, basic: bool | None = None, **settings: Any) -> dict[str, Any]:
     """Load `source`, RUN it and return the result: counts, num_qubits, shots,
-    bit_order, variables, statevector (8 qubits or fewer), method, depth,
-    gates, output and errors. A source with no numbered line is QBASIC source
+    bit_order, variables, statevector (8 qubits or fewer), method (and engine
+    for a live run), depth, gates, output and errors. A source with no numbered line is QBASIC source
     (basic=None decides so; True or False forces it). Settings are Session's
     (qubits, shots, seed, method, precision, noise, inputs, agent)."""
     if basic is None:

@@ -1,13 +1,14 @@
 """QUBASIC physical models: Hamiltonians, channels and Lindblad
-evolution, molecular hydrogen in STO-3G, Pauli propagation, qudits and
-bosonic modes.
+evolution, molecules in STO-3G, Pauli propagation, qudits and bosonic
+modes.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import MutableMapping, Sequence
-from math import erf, exp, pi, sqrt
+from dataclasses import dataclass
+from math import cos, pi, sin, sqrt
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
@@ -76,6 +77,8 @@ class DynamicsMixin(SimulationHost):
 
     def _init_dynamics(self) -> None:
         self._hamiltonians: dict = {}   # name -> SparsePauliOp
+        self._ham_molecules: dict[str, Molecule] = {}     # the MOLECULE ones, by name
+        self._molecule_built: Molecule | None = None
 
     # ── Hamiltonian construction ────────────────────────────────────────
 
@@ -123,14 +126,9 @@ class DynamicsMixin(SimulationHost):
         up = spec.upper().split()
         kind = up[0] if up else ''
         if kind == 'MOLECULE':
-            # Built-in STO-3G engine (no pyscf): MOLECULE H2 [R_angstrom].
-            parts = spec.split()
-            mol = parts[1].upper() if len(parts) > 1 else 'H2'
-            if mol != 'H2':
-                raise ValueError("MOLECULE supports H2 (built-in STO-3G engine); "
-                                 "other species need external integrals")
-            r = float(self._safe_eval(parts[2])) if len(parts) > 2 else 0.7414
-            return h2_hamiltonian(r)
+            mol = parse_molecule(spec.strip()[len('MOLECULE'):].strip() or 'H2', self._safe_eval)
+            self._molecule_built = mol
+            return mol.hamiltonian
         if kind == 'ISING':
             # Transverse-field Ising: -J sum Z_i Z_{i+1} - h sum X_i.
             parts = spec.split()
@@ -250,19 +248,39 @@ class DynamicsMixin(SimulationHost):
         return True
 
     def cmd_hamiltonian(self, rest: str) -> None:
-        """HAMILTONIAN name = pauli sum | ISING J h | HEISENBERG J | HUBBARD t V | RYDBERG Omega Delta V | MOLECULE H2 [R] — declare a Hamiltonian.
+        """HAMILTONIAN name = pauli sum | ISING J h | HEISENBERG J | HUBBARD t V | RYDBERG Omega Delta V | MOLECULE <molecule> [R] [CHARGE q] [FREEZE [n]] [ACTIVE e o] — declare a Hamiltonian.
 
         A Pauli sum is terms joined by '+', each '<coeff> <pauli> <qubits>', e.g.
-        HAMILTONIAN H = 1.0 ZZ 0 1 + 0.5 X 0. Use it with EVOLVE or LINDBLAD."""
+        HAMILTONIAN H = 1.0 ZZ 0 1 + 0.5 X 0. Use it with EVOLVE or LINDBLAD.
+        MOLECULE builds a molecule's STO-3G qubit Hamiltonian: H2, HEH+, LIH,
+        BEH2, H2O, NH3, N2 or H4 at bond length R in angstroms, or a geometry
+        in quotes ("O 0 0 0; H 0.76 0.59 0; H -0.76 0.59 0"). FREEZE drops
+        the core orbitals and ACTIVE keeps e electrons in o orbitals; VQE
+        ANSATZ UCCSD reads the electron count it records."""
         m = re.match(r'(\w+)\s*=\s*(.+)$', rest.strip())
         if not m:
             self.io.writeln("?USAGE: HAMILTONIAN <name> = <terms>")
             return
         name = m.group(1).upper()
         try:
+            self._molecule_built = None
             op = self._build_hamiltonian(m.group(2).strip())
             self._hamiltonians[name] = op
             self.io.writeln(f"HAMILTONIAN {name}: {len(op)} term(s), {op.num_qubits} qubits")
+            mol = self._molecule_built
+            if mol is None:
+                self._ham_molecules.pop(name, None)
+                return
+            self._ham_molecules[name] = mol
+            core = f", {mol.frozen} core orbital(s) frozen" if mol.frozen else ""
+            self.io.writeln(f"  {mol.label}, STO-3G: {mol.electrons} electrons in {mol.orbitals} "
+                            f"orbitals{core}")
+            exact = ""
+            if mol.exact_energy is not None:
+                exact = f", {'FCI' if mol.complete else 'CASCI'} {mol.exact_energy:.6f} Ha"
+                self.variables['_EXACT_ENERGY'] = mol.exact_energy
+            self.io.writeln(f"  Hartree-Fock {mol.hf_energy:.6f} Ha{exact}")
+            self.variables['_HF_ENERGY'] = mol.hf_energy
         except Exception as e:
             self.io.writeln(f"?HAMILTONIAN ERROR: {e}")
 
@@ -501,150 +519,468 @@ class DynamicsMixin(SimulationHost):
 
 
 # ---------------------------------------------------------------------------
-# QUBASIC molecular Hamiltonians — self-contained STO-3G integrals engine.
+# QUBASIC molecular Hamiltonians — a self-contained STO-3G engine.
 #
-# HAMILTONIAN H = MOLECULE H2 [R_angstrom] builds the exact 4-qubit
-# Jordan-Wigner Hamiltonian of molecular hydrogen in the STO-3G minimal basis:
-# Gaussian s-orbital integrals (Szabo & Ostlund closed forms), restricted
-# Hartree-Fock molecular orbitals (analytic by symmetry for H2), the
-# spin-orbital tensors, and a Jordan-Wigner transform done by building the
-# second-quantized 16x16 matrix from ladder operators and decomposing it with
-# SparsePauliOp.from_operator. No pyscf, no openfermion.
+# HAMILTONIAN H = MOLECULE LIH builds a molecule's qubit Hamiltonian with no
+# external chemistry package: STO-3G basis functions for H to Ne (Hehre,
+# Stewart and Pople's universal 1s and 2sp expansions scaled by each
+# element's Slater exponent), McMurchie-Davidson integrals over Cartesian s
+# and p Gaussians (Hermite expansion coefficients and the Boys function),
+# restricted Hartree-Fock with DIIS, an optional frozen core and active
+# space, and the Jordan-Wigner transform of the second-quantized Hamiltonian
+# over interleaved spin orbitals (qubit 2p spin up, 2p+1 spin down, so the
+# Hartree-Fock state fills the lowest qubits). Nuclear repulsion and the
+# frozen core ride on the identity coefficient.
 #
-# Ground truth: exact diagonalization of the result at R = 0.7414 A gives the
-# FCI/STO-3G energy -1.1373 Ha (nuclear repulsion included as the identity
-# coefficient).
+# Ground truth: water at Crawford's reference geometry gives the textbook
+# STO-3G SCF energy, -74.94208 Ha, and H2 at 0.7414 A the FCI energy
+# -1.13727 Ha.
 # ---------------------------------------------------------------------------
 
 BOHR_PER_ANGSTROM = 1.0 / 0.529177210903
 
-# STO-3G hydrogen 1s: (exponent, contraction) with zeta = 1.24 folded in.
-_STO3G_H = ((3.42525091, 0.15432897),
-            (0.62391373, 0.53532814),
-            (0.16885540, 0.44463454))
+# The universal STO-3G expansions of a Slater 1s and 2sp function with
+# exponent 1: (Gaussian exponent, coefficient) and (exponent, 2s, 2p).
+_STO3G_1S = ((2.227660584, 0.1543289673), (0.4057711562, 0.5353281423),
+             (0.1098175104, 0.4446345422))
+_STO3G_2SP = ((0.9942027300, -0.09996722919, 0.1559162750),
+              (0.2310313333, 0.3995128261, 0.6076837186),
+              (0.0751385600, 0.7001154689, 0.3919573931))
+# Element: (nuclear charge, 1s Slater exponent, 2sp Slater exponent).
+_ELEMENTS = {
+    'H': (1, 1.24, None), 'HE': (2, 1.69, None), 'LI': (3, 2.69, 0.80),
+    'BE': (4, 3.68, 1.15), 'B': (5, 4.68, 1.50), 'C': (6, 5.67, 1.72),
+    'N': (7, 6.67, 1.95), 'O': (8, 7.66, 2.25), 'F': (9, 8.65, 2.55),
+    'NE': (10, 9.64, 2.88),
+}
+# Named molecules: (geometry in angstroms from the bond length R, default R,
+# charge). Water and ammonia take their experimental angles.
+_MOLECULES: dict[str, tuple[Callable[[float], list[tuple[str, tuple[float, float, float]]]], float, int]] = {
+    'H2': (lambda r: [('H', (0, 0, 0)), ('H', (0, 0, r))], 0.7414, 0),
+    'HEH+': (lambda r: [('He', (0, 0, 0)), ('H', (0, 0, r))], 0.772, 1),
+    'LIH': (lambda r: [('Li', (0, 0, 0)), ('H', (0, 0, r))], 1.5949, 0),
+    'BEH2': (lambda r: [('Be', (0, 0, 0)), ('H', (0, 0, r)), ('H', (0, 0, -r))], 1.3264, 0),
+    'H2O': (lambda r: [('O', (0, 0, 0)), ('H', (r * sin(0.9114), r * cos(0.9114), 0)),
+                       ('H', (-r * sin(0.9114), r * cos(0.9114), 0))], 0.9584, 0),
+    'NH3': (lambda r: [('N', (0, 0, 0))] + [
+        ('H', (r * 0.9391 * cos(2 * pi * k / 3), r * 0.9391 * sin(2 * pi * k / 3), -r * 0.3437))
+        for k in range(3)], 1.0124, 0),
+    'N2': (lambda r: [('N', (0, 0, 0)), ('N', (0, 0, r))], 1.0977, 0),
+    'H4': (lambda r: [('H', (0, 0, k * r)) for k in range(4)], 0.9, 0),
+}
 
 
-def _f0(x: float) -> float:
-    """Boys function F0(x) = (1/2) sqrt(pi/x) erf(sqrt(x))."""
-    if x < 1e-12:
-        return 1.0 - x / 3.0
-    return 0.5 * sqrt(pi / x) * erf(sqrt(x))
+def _hermite_e(i: int, j: int, t: int, qx: float, a: np.ndarray, b: np.ndarray) -> Any:
+    """McMurchie-Davidson coefficient E_t^{ij} of the product of two 1D
+    Gaussians with exponents a and b whose centres differ by qx."""
+    if t < 0 or t > i + j:
+        return 0.0
+    p = a + b
+    q = a * b / p
+    if i == j == t == 0:
+        return np.exp(-q * qx * qx)
+    if j == 0:
+        return (_hermite_e(i - 1, j, t - 1, qx, a, b) / (2 * p)
+                - q * qx / a * _hermite_e(i - 1, j, t, qx, a, b)
+                + (t + 1) * _hermite_e(i - 1, j, t + 1, qx, a, b))
+    return (_hermite_e(i, j - 1, t - 1, qx, a, b) / (2 * p)
+            + q * qx / b * _hermite_e(i, j - 1, t, qx, a, b)
+            + (t + 1) * _hermite_e(i, j - 1, t + 1, qx, a, b))
 
 
-def _h2_ao_integrals(r_bohr: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """AO overlap, core Hamiltonian, and two-electron integrals for H2.
+def _hermite_r(tmax: int, umax: int, vmax: int, p: np.ndarray, pc: np.ndarray) -> dict:
+    """Hermite Coulomb integrals R_tuv for t <= tmax, u <= umax, v <= vmax,
+    elementwise over arrays of exponents p and separations pc (last axis xyz)."""
+    from scipy.special import hyp1f1
+    arg = p * np.sum(pc * pc, axis=-1)
+    boys = [(-2 * p) ** n * hyp1f1(n + 0.5, n + 1.5, -arg) / (2 * n + 1)
+            for n in range(tmax + umax + vmax + 1)]
+    memo: dict = {}
 
-    Two 1s contractions on the z-axis at 0 and r_bohr. Primitive formulas are
-    the standard s-orbital closed forms; contraction coefficients absorb the
-    primitive normalization (2a/pi)^(3/4).
-    """
-    centers = (0.0, r_bohr)
-    prims = []
-    for c in centers:
-        prims.append([(a, d * (2.0 * a / pi) ** 0.75) for a, d in _STO3G_H])
+    def r(t: int, u: int, v: int, n: int) -> Any:
+        if t < 0 or u < 0 or v < 0:
+            return 0.0
+        key = (t, u, v, n)
+        if key not in memo:
+            if t == u == v == 0:
+                memo[key] = boys[n]
+            elif t == u == 0:
+                memo[key] = (v - 1) * r(t, u, v - 2, n + 1) + pc[..., 2] * r(t, u, v - 1, n + 1)
+            elif t == 0:
+                memo[key] = (u - 1) * r(t, u - 2, v, n + 1) + pc[..., 1] * r(t, u - 1, v, n + 1)
+            else:
+                memo[key] = (t - 1) * r(t - 2, u, v, n + 1) + pc[..., 0] * r(t - 1, u, v, n + 1)
+        return memo[key]
 
-    def sep2(i: int, j: int) -> float:
-        return (centers[i] - centers[j]) ** 2
+    return {(t, u, v): r(t, u, v, 0) for t in range(tmax + 1)
+            for u in range(umax + 1) for v in range(vmax + 1)}
 
-    S = np.zeros((2, 2))
-    T = np.zeros((2, 2))
-    V = np.zeros((2, 2))
-    for i in range(2):
-        for j in range(2):
-            r2 = sep2(i, j)
-            for a, ca in prims[i]:
-                for b, cb in prims[j]:
-                    g = a + b
-                    pre = ca * cb * exp(-a * b / g * r2)
-                    S[i, j] += pre * (pi / g) ** 1.5
-                    T[i, j] += pre * (a * b / g) * (3.0 - 2.0 * a * b / g * r2) \
-                        * (pi / g) ** 1.5
-                    # Gaussian product center (z coordinate).
-                    zp = (a * centers[i] + b * centers[j]) / g
-                    for zc in centers:                      # both protons, Z=1
-                        V[i, j] += -pre * (2.0 * pi / g) * _f0(g * (zp - zc) ** 2)
 
-    eri = np.zeros((2, 2, 2, 2))                            # chemists (ij|kl)
-    for i in range(2):
-        for j in range(2):
-            for k in range(2):
-                for l in range(2):
-                    for a, ca in prims[i]:
-                        for b, cb in prims[j]:
-                            for c, cc in prims[k]:
-                                for d, cd in prims[l]:
-                                    g1, g2 = a + b, c + d
-                                    zp = (a * centers[i] + b * centers[j]) / g1
-                                    zq = (c * centers[k] + d * centers[l]) / g2
-                                    pre = (ca * cb * cc * cd
-                                           * exp(-a * b / g1 * sep2(i, j))
-                                           * exp(-c * d / g2 * sep2(k, l)))
-                                    eri[i, j, k, l] += pre * 2.0 * pi ** 2.5 / (
-                                        g1 * g2 * sqrt(g1 + g2)) * _f0(
-                                        g1 * g2 / (g1 + g2) * (zp - zq) ** 2)
-    return S, T + V, eri
+class _Pair:
+    """Two contracted Gaussians as arrays over their primitive pairs: the
+    exponents, product centres, coefficient products and the Hermite
+    coefficients of each axis."""
+
+    def __init__(self, fa: tuple, fb: tuple) -> None:
+        ca, self.la, ea, da = fa
+        cb, self.lb, eb, db = fb
+        self.a = np.repeat(ea, len(eb))
+        self.b = np.tile(eb, len(ea))
+        self.coef = np.repeat(da, len(db)) * np.tile(db, len(da))
+        self.p = self.a + self.b
+        self.centre = (self.a[:, None] * ca + self.b[:, None] * cb) / self.p[:, None]
+        self.q = ca - cb
+        self.e = [[_hermite_e(self.la[k], self.lb[k], t, self.q[k], self.a, self.b)
+                   for t in range(self.la[k] + self.lb[k] + 1)] for k in range(3)]
+
+
+def _sto3g_basis(atoms: list[tuple[str, np.ndarray]]) -> list[tuple]:
+    """Contracted STO-3G functions (centre, (l, m, n), exponents, normalized
+    coefficients) for atoms given in bohr."""
+    raw = []
+    for sym, xyz in atoms:
+        _, z1s, z2sp = _ELEMENTS[sym]
+        raw.append((xyz, (0, 0, 0), np.array([a for a, _ in _STO3G_1S]) * z1s ** 2,
+                    np.array([d for _, d in _STO3G_1S])))
+        if z2sp is not None:
+            exps = np.array([a for a, _, _ in _STO3G_2SP]) * z2sp ** 2
+            raw.append((xyz, (0, 0, 0), exps, np.array([d for _, d, _ in _STO3G_2SP])))
+            for lmn in ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
+                raw.append((xyz, lmn, exps, np.array([d for _, _, d in _STO3G_2SP])))
+    basis = []
+    for centre, lmn, exps, coefs in raw:
+        norm = (2 * exps / pi) ** 0.75 * (4 * exps) ** (sum(lmn) / 2)
+        f = (centre, lmn, exps, coefs * norm)
+        pair = _Pair(f, f)
+        s = float(np.sum(pair.coef * pair.e[0][0] * pair.e[1][0] * pair.e[2][0]
+                         * (pi / pair.p) ** 1.5))
+        basis.append((centre, lmn, exps, coefs * norm / sqrt(s)))
+    return basis
+
+
+def _one_electron(basis: list[tuple], nuclei: list[tuple[int, np.ndarray]]
+                  ) -> tuple[np.ndarray, np.ndarray]:
+    """Overlap and core Hamiltonian (kinetic plus nuclear attraction)."""
+    n = len(basis)
+    S, H = np.zeros((n, n)), np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            pr = _Pair(basis[i], basis[j])
+            la, lb = pr.la, pr.lb
+
+            def ov(k: int, l2: int, pr: _Pair = pr) -> Any:
+                return _hermite_e(pr.la[k], l2, 0, pr.q[k], pr.a, pr.b) if l2 >= 0 else 0.0
+
+            base = (pi / pr.p) ** 1.5
+            s = [ov(k, lb[k]) for k in range(3)]
+            S[i, j] = np.sum(pr.coef * s[0] * s[1] * s[2] * base)
+            kin = 0.0
+            for k in range(3):
+                l2 = lb[k]
+                d2 = (pr.b * (2 * l2 + 1) * s[k] - 2 * pr.b ** 2 * ov(k, l2 + 2)
+                      - 0.5 * l2 * (l2 - 1) * ov(k, l2 - 2))
+                kin = kin + d2 * s[(k + 1) % 3] * s[(k + 2) % 3]
+            H[i, j] = np.sum(pr.coef * kin * base)
+            for charge, c in nuclei:
+                rr = _hermite_r(la[0] + lb[0], la[1] + lb[1], la[2] + lb[2], pr.p, pr.centre - c)
+                acc = sum(pr.e[0][t] * pr.e[1][u] * pr.e[2][v] * rr[(t, u, v)]
+                          for t in range(la[0] + lb[0] + 1) for u in range(la[1] + lb[1] + 1)
+                          for v in range(la[2] + lb[2] + 1))
+                H[i, j] -= charge * np.sum(pr.coef * 2 * pi / pr.p * acc)
+    return S, H
+
+
+def _two_electron(basis: list[tuple]) -> np.ndarray:
+    """Electron repulsion integrals (ij|kl) in chemists' notation, each
+    unique one computed once over all its primitive quartets."""
+    n = len(basis)
+    keys = [(i, j) for i in range(n) for j in range(i + 1)]
+    pairs = {key: _Pair(basis[key[0]], basis[key[1]]) for key in keys}
+    eri = np.zeros((n, n, n, n))
+    for x, (i, j) in enumerate(keys):
+        p1 = pairs[(i, j)]
+        l1 = [len(p1.e[k]) - 1 for k in range(3)]
+        for k, l in keys[:x + 1]:
+            p2 = pairs[(k, l)]
+            l2 = [len(p2.e[m]) - 1 for m in range(3)]
+            pp, qq = p1.p[:, None], p2.p[None, :]
+            alpha = pp * qq / (pp + qq)
+            rr = _hermite_r(l1[0] + l2[0], l1[1] + l2[1], l1[2] + l2[2], alpha,
+                            p1.centre[:, None, :] - p2.centre[None, :, :])
+            acc = 0.0
+            for t in range(l1[0] + 1):
+                for u in range(l1[1] + 1):
+                    for v in range(l1[2] + 1):
+                        left = (p1.e[0][t] * p1.e[1][u] * p1.e[2][v])[:, None]
+                        for tau in range(l2[0] + 1):
+                            for nu in range(l2[1] + 1):
+                                for phi in range(l2[2] + 1):
+                                    right = (p2.e[0][tau] * p2.e[1][nu] * p2.e[2][phi])[None, :]
+                                    term = left * right * rr[(t + tau, u + nu, v + phi)]
+                                    acc = acc - term if (tau + nu + phi) % 2 else acc + term
+            val = float(np.sum(p1.coef[:, None] * p2.coef[None, :] * 2 * pi ** 2.5
+                               / (pp * qq * np.sqrt(pp + qq)) * acc))
+            for a, b in ((i, j), (j, i)):
+                for c, d in ((k, l), (l, k)):
+                    eri[a, b, c, d] = eri[c, d, a, b] = val
+    return eri
+
+
+def _scf(S: np.ndarray, H: np.ndarray, eri: np.ndarray, n_occ: int, X: np.ndarray,
+         guess: np.ndarray, max_iter: int) -> tuple[float, np.ndarray] | None:
+    """Roothaan-Hall iterations with DIIS from the orbitals of a guessed Fock
+    matrix; None when they do not converge."""
+    C = X @ np.linalg.eigh(X.T @ guess @ X)[1]
+    P = 2 * C[:, :n_occ] @ C[:, :n_occ].T
+    fock_hist: list[np.ndarray] = []
+    err_hist: list[np.ndarray] = []
+    e_old = None
+    for _ in range(max_iter):
+        F = H + np.einsum('pqrs,rs->pq', eri, P) - 0.5 * np.einsum('prqs,rs->pq', eri, P)
+        e_elec = 0.5 * float(np.sum(P * (H + F)))
+        err = F @ P @ S - S @ P @ F
+        if e_old is not None and abs(e_elec - e_old) < 1e-12 and np.max(np.abs(err)) < 1e-9:
+            return e_elec, C
+        e_old = e_elec
+        fock_hist = (fock_hist + [F])[-8:]
+        err_hist = (err_hist + [err])[-8:]
+        m = len(fock_hist)
+        if m > 1:
+            B = -np.ones((m + 1, m + 1))
+            B[m, m] = 0.0
+            B[:m, :m] = [[float(np.sum(a * b)) for b in err_hist] for a in err_hist]
+            rhs = np.zeros(m + 1)
+            rhs[m] = -1.0
+            try:
+                weights = np.linalg.solve(B, rhs)[:m]
+                F = sum(w * f for w, f in zip(weights, fock_hist))
+            except np.linalg.LinAlgError:
+                pass
+        C = X @ np.linalg.eigh(X.T @ F @ X)[1]
+        P = 2 * C[:, :n_occ] @ C[:, :n_occ].T
+    return None
+
+
+def rhf(S: np.ndarray, H: np.ndarray, eri: np.ndarray, n_occ: int,
+        max_iter: int = 200) -> tuple[float, np.ndarray]:
+    """Closed-shell Hartree-Fock, (electronic energy, molecular orbital
+    coefficients by orbital energy): DIIS iterations from the core
+    Hamiltonian and from the generalized Wolfsberg-Helmholz guess
+    (F_ij = 1.75 S_ij (H_ii + H_jj) / 2), keeping the lower solution."""
+    evals, evecs = np.linalg.eigh(S)
+    X = evecs @ np.diag(evals ** -0.5) @ evecs.T
+    diag = np.diag(H)
+    gwh = 0.875 * S * (diag[:, None] + diag[None, :])
+    np.fill_diagonal(gwh, diag)
+    found = [r for r in (_scf(S, H, eri, n_occ, X, g, max_iter) for g in (H, gwh)) if r is not None]
+    if not found:
+        raise ValueError("Hartree-Fock did not converge")
+    return min(found, key=lambda r: r[0])
+
+
+def jw_ladder(n: int) -> list[SparsePauliOp]:
+    """Jordan-Wigner annihilation operators on n qubits: a_j = (X_j + iY_j)/2
+    times Z on every lower qubit."""
+    from qiskit.quantum_info import SparsePauliOp
+    return [SparsePauliOp(['I' * (n - 1 - j) + 'X' + 'Z' * j, 'I' * (n - 1 - j) + 'Y' + 'Z' * j],
+                          [0.5, 0.5j]) for j in range(n)]
+
+
+def _jordan_wigner(h: np.ndarray, eri: np.ndarray, e_const: float) -> SparsePauliOp:
+    """E + sum h_pq a+p aq + 1/2 sum (pr|qs) a+p a+q as ar over the
+    interleaved spin orbitals of spatial integrals h and eri."""
+    from qiskit.quantum_info import SparsePauliOp
+    n = 2 * h.shape[0]
+    a = jw_ladder(n)
+    ad = [op.adjoint() for op in a]
+    terms = [SparsePauliOp('I' * n, [e_const])]
+    terms += [h[p // 2, q // 2] * (ad[p] @ a[q]) for p in range(n) for q in range(n)
+              if p % 2 == q % 2 and abs(h[p // 2, q // 2]) > 1e-12]
+    create = {(p, q): ad[p] @ ad[q] for p in range(n) for q in range(n) if p != q}
+    destroy = {(s, r): a[s] @ a[r] for s in range(n) for r in range(n) if s != r}
+    for (p, q), cpq in create.items():
+        for (s, r), asr in destroy.items():
+            if r % 2 == p % 2 and s % 2 == q % 2:
+                g = eri[p // 2, r // 2, q // 2, s // 2]
+                if abs(g) > 1e-12:
+                    terms.append(0.5 * g * (cpq @ asr))
+    return SparsePauliOp.sum(terms).simplify(atol=1e-10)
+
+
+def fermion_sector(n_so: int, n_elec: int) -> np.ndarray:
+    """The determinants of n_elec electrons, half spin up (even qubits) and
+    half down (odd), over n_so interleaved spin orbitals, as sorted integers."""
+    from itertools import combinations
+    up, down = range(0, n_so, 2), range(1, n_so, 2)
+    k = n_elec // 2
+    dets = [sum(1 << q for q in cu + cd) for cu in combinations(up, n_elec - k)
+            for cd in combinations(down, k)]
+    return np.array(sorted(dets), dtype=np.int64)
+
+
+def sector_matrix(op: SparsePauliOp, basis: np.ndarray) -> Any:
+    """The real part of a Pauli operator restricted to the basis states in
+    `basis` (sorted integers), as a sparse matrix; the operator must map the
+    span of `basis` into itself."""
+    import scipy.sparse as sps
+    n = op.num_qubits
+    weights = 1 << np.arange(n, dtype=np.int64)
+    xs = op.paulis.x.astype(np.int64) @ weights
+    zs = op.paulis.z.astype(np.int64) @ weights
+    ny = np.count_nonzero(op.paulis.x & op.paulis.z, axis=1)
+    phases = (-1j) ** ((op.paulis.phase + ny) % 4) * op.coeffs
+    rows, cols, vals = [], [], []
+    idx = np.arange(len(basis))
+    for xm, zm, ph in zip(xs, zs, phases):
+        target = basis ^ xm
+        pos = np.searchsorted(basis, target)
+        pos[pos == len(basis)] = 0
+        keep = basis[pos] == target
+        parity = np.zeros(len(basis), dtype=np.int64)
+        bits = target & zm
+        while bits.any():
+            parity ^= bits & 1
+            bits = bits >> 1
+        rows.append(pos[keep])
+        cols.append(idx[keep])
+        vals.append(np.real(ph * (1 - 2 * parity[keep])))
+    m = sps.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+                       shape=(len(basis), len(basis)))
+    m.eliminate_zeros()
+    return m
+
+
+def sector_ground(m: Any) -> float:
+    """The lowest eigenvalue of a real symmetric sparse matrix."""
+    if m.shape[0] <= 400:
+        return float(np.linalg.eigvalsh(m.toarray())[0])
+    from scipy.sparse.linalg import eigsh
+    return float(eigsh(m, k=1, which='SA')[0][0])
+
+
+@dataclass
+class Molecule:
+    """A molecular qubit Hamiltonian and what it describes: the active
+    electrons and spatial orbitals (two qubits each), the frozen core, whether
+    the active space is every orbital, and the Hartree-Fock energy and the
+    exact energy within the active space, in hartree."""
+    label: str
+    hamiltonian: SparsePauliOp
+    electrons: int
+    orbitals: int
+    frozen: int
+    complete: bool
+    hf_energy: float
+    exact_energy: float | None
+
+
+def build_molecule(atoms: list[tuple[str, tuple[float, float, float]]], *, charge: int = 0,
+                   frozen: int = 0, active: tuple[int, int] | None = None,
+                   label: str = 'molecule') -> Molecule:
+    """The STO-3G qubit Hamiltonian of atoms placed in angstroms. `frozen`
+    core orbitals are filled and dropped, and active=(electrons, orbitals)
+    keeps that many electrons in the orbitals around the Fermi level."""
+    atoms_bohr = []
+    for sym, xyz in atoms:
+        key = sym.upper()
+        if key not in _ELEMENTS:
+            raise ValueError(f"STO-3G here covers H to Ne, not {sym}")
+        atoms_bohr.append((key, np.array(xyz, dtype=float) * BOHR_PER_ANGSTROM))
+    nuclei = [(_ELEMENTS[s][0], xyz) for s, xyz in atoms_bohr]
+    n_elec = sum(z for z, _ in nuclei) - charge
+    if n_elec <= 0 or n_elec % 2:
+        raise ValueError(f"{n_elec} electrons: the Hartree-Fock reference here is closed-shell "
+                         f"(an even number of electrons)")
+    basis = _sto3g_basis(atoms_bohr)
+    S, H = _one_electron(basis, nuclei)
+    eri = _two_electron(basis)
+    e_nuc = sum(nuclei[i][0] * nuclei[j][0] / float(np.linalg.norm(nuclei[i][1] - nuclei[j][1]))
+                for i in range(len(nuclei)) for j in range(i))
+    e_elec, C = rhf(S, H, eri, n_elec // 2)
+    n_mo = len(basis)
+    if active is not None:
+        act_e, act_o = active
+        if act_e % 2 or act_e > n_elec or act_e < 0:
+            raise ValueError(f"ACTIVE needs an even number of electrons up to {n_elec}")
+        frozen = (n_elec - act_e) // 2
+        if act_o < act_e // 2 or frozen + act_o > n_mo:
+            raise ValueError(f"ACTIVE {act_e} {act_o}: {act_e} electrons need at least "
+                             f"{act_e // 2} orbitals and at most {n_mo - frozen} are free")
+    else:
+        if not 0 <= frozen < n_elec // 2 + (n_elec == 0):
+            raise ValueError(f"cannot freeze {frozen} orbitals of {n_elec // 2} occupied")
+        act_e, act_o = n_elec - 2 * frozen, n_mo - frozen
+    h_mo = C.T @ H @ C
+    eri_mo = np.einsum('ip,jq,kr,ls,ijkl->pqrs', C, C, C, C, eri, optimize=True)
+    core, act = slice(0, frozen), slice(frozen, frozen + act_o)
+    e_core = (2 * np.trace(h_mo[core, core]) + 2 * np.einsum('iijj->', eri_mo[core, core, core, core])
+              - np.einsum('ijji->', eri_mo[core, core, core, core]))
+    h_act = (h_mo[act, act] + 2 * np.einsum('pqcc->pq', eri_mo[act, act, core, core])
+             - np.einsum('pccq->pq', eri_mo[act, core, core, act]))
+    op = _jordan_wigner(h_act, eri_mo[act, act, act, act], e_nuc + float(e_core))
+    fci = None
+    basis_dets = fermion_sector(2 * act_o, act_e)
+    if len(basis_dets) <= 50_000:
+        fci = sector_ground(sector_matrix(op, basis_dets))
+    return Molecule(label, op, act_e, act_o, frozen, frozen == 0 and act_o == n_mo,
+                    e_elec + e_nuc, fci)
+
+
+def parse_molecule(spec: str, evaluate: Callable[[str], Any]) -> Molecule:
+    """MOLECULE <name> [R] | MOLECULE "<atom x y z; ...>" (angstroms), then
+    [CHARGE q] [FREEZE [n]] [ACTIVE electrons orbitals]."""
+    m = re.match(r'\s*("[^"]*"|\S+)\s*(.*)$', spec)
+    if not m:
+        raise ValueError("MOLECULE needs a molecule: " + ', '.join(_MOLECULES) + ' or "atom x y z; ..."')
+    what, tail = m.group(1), m.group(2)
+    opts: dict[str, Any] = {}
+    for key, count in (('CHARGE', 1), ('ACTIVE', 2), ('FREEZE', None)):
+        pat = rf'\b{key}\b((?:\s+[-+]?[\w.()*/+-]+){{{count}}})' if count else rf'\b{key}\b(\s+\d+)?'
+        mm = re.search(pat, tail, re.IGNORECASE)
+        if mm:
+            opts[key] = mm.group(1).split() if mm.group(1) else []
+            tail = tail[:mm.start()] + tail[mm.end():]
+    rest = tail.split()
+    charge = int(evaluate(opts['CHARGE'][0])) if 'CHARGE' in opts else 0
+    if what.startswith('"'):
+        atoms = []
+        for part in what.strip('"').split(';'):
+            toks = part.split()
+            if not toks:
+                continue
+            if len(toks) != 4:
+                raise ValueError(f"atom '{part.strip()}' is not 'symbol x y z'")
+            atoms.append((toks[0], (float(evaluate(toks[1])), float(evaluate(toks[2])),
+                                    float(evaluate(toks[3])))))
+        label = ' '.join(a for a, _ in atoms)
+        if rest:
+            raise ValueError(f"unexpected '{' '.join(rest)}' after the geometry")
+    else:
+        key = what.upper()
+        if key not in _MOLECULES:
+            raise ValueError(f"unknown molecule {what}: use one of {', '.join(_MOLECULES)} "
+                             f"or a geometry in quotes")
+        geometry, r0, charge0 = _MOLECULES[key]
+        if len(rest) > 1:
+            raise ValueError(f"unexpected '{' '.join(rest[1:])}' after {what} {rest[0]}")
+        r = float(evaluate(rest[0])) if rest else r0
+        atoms = geometry(r)
+        charge = charge if 'CHARGE' in opts else charge0
+        label = f"{key} at R = {r:g} A"
+    frozen = 0
+    if 'FREEZE' in opts:
+        frozen = int(opts['FREEZE'][0]) if opts['FREEZE'] else sum(
+            1 for sym, _ in atoms if _ELEMENTS.get(sym.upper(), (0, 0, None))[2] is not None)
+    active = None
+    if 'ACTIVE' in opts:
+        active = (int(evaluate(opts['ACTIVE'][0])), int(evaluate(opts['ACTIVE'][1])))
+    return build_molecule(atoms, charge=charge, frozen=frozen, active=active, label=label)
 
 
 def h2_hamiltonian(r_angstrom: float = 0.7414) -> SparsePauliOp:
-    """4-qubit Jordan-Wigner SparsePauliOp for H2/STO-3G at bond length R.
-
-    Spin-orbital order (qubit index): 0 = g up, 1 = g down, 2 = u up,
-    3 = u down, with g/u the symmetric/antisymmetric molecular orbitals.
-    Nuclear repulsion rides on the identity term.
-    """
-    from qiskit.quantum_info import Operator, SparsePauliOp
-
-    r_bohr = r_angstrom * BOHR_PER_ANGSTROM
-    S, hcore, eri = _h2_ao_integrals(r_bohr)
-    s12 = S[0, 1]
-    # RHF MOs by inversion symmetry: gerade and ungerade combinations.
-    cg = 1.0 / sqrt(2.0 * (1.0 + s12))
-    cu = 1.0 / sqrt(2.0 * (1.0 - s12))
-    C = np.array([[cg, cu], [cg, -cu]])
-    h_mo = C.T @ hcore @ C
-    eri_mo = np.einsum('ip,jq,kr,ls,ijkl->pqrs', C, C, C, C, eri)
-
-    # Spatial -> spin orbitals: index 2*mo + spin, spin in (0 up, 1 down).
-    n_so = 4
-    h_so = np.zeros((n_so, n_so))
-    g_so = np.zeros((n_so, n_so, n_so, n_so))    # physicists <pq|rs>
-    for p in range(n_so):
-        for q in range(n_so):
-            if p % 2 == q % 2:
-                h_so[p, q] = h_mo[p // 2, q // 2]
-            for r in range(n_so):
-                for s in range(n_so):
-                    if p % 2 == r % 2 and q % 2 == s % 2:
-                        g_so[p, q, r, s] = eri_mo[p // 2, r // 2, q // 2, s // 2]
-
-    # Jordan-Wigner ladder operators as dense 16x16 matrices. Qubit j is the
-    # j-th kron factor from the right (little-endian, matching the display).
-    I2 = np.eye(2)
-    Z2 = np.diag([1.0, -1.0])
-    low = np.array([[0.0, 1.0], [0.0, 0.0]])     # sigma-minus: |0><1|
-    def ann(j: int) -> np.ndarray:
-        out = np.array([[1.0]])
-        for k in range(n_so - 1, -1, -1):
-            out = np.kron(out, low if k == j else (Z2 if k < j else I2))
-        return out
-    a = [ann(j) for j in range(n_so)]
-    ad = [m.conj().T for m in a]
-
-    H = np.zeros((16, 16), dtype=complex)
-    for p in range(n_so):
-        for q in range(n_so):
-            if h_so[p, q]:
-                H += h_so[p, q] * (ad[p] @ a[q])
-    for p in range(n_so):
-        for q in range(n_so):
-            for r in range(n_so):
-                for s in range(n_so):
-                    if g_so[p, q, r, s]:
-                        H += 0.5 * g_so[p, q, r, s] * (ad[p] @ ad[q] @ a[s] @ a[r])
-    e_nuc = 1.0 / r_bohr
-    H += e_nuc * np.eye(16)
-    op = SparsePauliOp.from_operator(Operator(H)).simplify(atol=1e-10)
-    return op
+    """The 4-qubit Jordan-Wigner Hamiltonian of H2 in STO-3G at bond length R."""
+    geometry, _, _ = _MOLECULES['H2']
+    return build_molecule(geometry(r_angstrom), label='H2').hamiltonian
 
 
 # ---------------------------------------------------------------------------

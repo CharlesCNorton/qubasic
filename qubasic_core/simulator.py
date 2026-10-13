@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 import sys
 import time
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Callable, MutableMapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -30,7 +30,16 @@ from qubasic_core.parser import (
     RE_SYNDROME,
     CompiledProgram,
 )
-from qubasic_core.simtools import _GATE_BUILDERS, _apply_gate_inplace, _measure_inplace, _np_gate_matrix, _sample_counts
+from qubasic_core.simtools import (
+    _GATE_BUILDERS,
+    Tableau,
+    _apply_gate_inplace,
+    _measure_inplace,
+    _np_gate_matrix,
+    _sample_counts,
+    clifford_table,
+    pauli_mixture,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Container, Iterable
@@ -66,11 +75,13 @@ class RunStateMixin(SimulationHost):
     def last_sv(self, value: Any) -> None:
         self._last_sv = value
         self._state_source = None
+        self._last_tableau = None
 
     def _defer_state(self, source: Any) -> None:
         """Record a zero-argument callable that produces the state on demand."""
         self._last_sv = None
         self._state_source = source
+        self._last_tableau = None
 
     def _invalidate_run_state(self) -> None:
         """Drop cached results that describe a now-stale configuration.
@@ -898,6 +909,8 @@ class RunPipelineMixin(SimulationHost):
         manifest = getattr(self, '_run_manifest', None)
         if manifest:
             out['method'] = manifest.get('method')
+            if manifest.get('engine'):
+                out['engine'] = manifest['engine']
             out['depth'] = manifest.get('depth')
             out['gates'] = manifest.get('gates')
         return out
@@ -1214,6 +1227,7 @@ class ExecutorMixin(SimulationHost):
         # a previous run's state.
         self._error_target = None
         self._in_error_handler = False
+        self._reset_events()
         # Declarations (DIM AS, CONST, DIM SHARED) start over; DEFtype ranges
         # apply to the whole program.
         self._reset_declarations(self._compiled())
@@ -1294,10 +1308,10 @@ class ExecutorMixin(SimulationHost):
                     self._trace_line(line_num)
                 if self._breakpoints and self._check_breakpoint(line_num, prog, ctx.ip):
                     break
-            if self._on_timer_target is not None:
-                _timer_tgt = self._check_timer_callback(prog, ctx.ip)
-                if _timer_tgt is not None:
-                    ctx.ip = _timer_tgt
+            if self._events_armed():
+                _event_tgt = self._check_events(prog, ctx.ip)
+                if _event_tgt is not None:
+                    ctx.ip = _event_tgt
                     continue
 
             if isinstance(parsed, MeasureStmt):
@@ -2164,8 +2178,7 @@ class QuantumStatementMixin(SimulationHost):
             if self._live is not None:
                 # Live run: the value at this point of this shot (mean over
                 # shots once the run ends).
-                from qiskit.quantum_info import Statevector
-                val = float(np.real(Statevector(self._live.sv).expectation_value(op)))
+                val = self._live.expectation(op)
                 self._record_save('exp', var, val)
                 run_vars[var] = val
                 self.variables[var] = val
@@ -2192,8 +2205,7 @@ class QuantumStatementMixin(SimulationHost):
         var = m.group(2)
         try:
             if self._live is not None:
-                from qiskit.quantum_info import Statevector
-                probs = Statevector(self._live.sv).probabilities(qubits)
+                probs = self._live.probabilities(qubits)
                 self._record_save('prob', var, probs)
                 run_vars[var] = probs
                 self.variables[var] = probs
@@ -2217,7 +2229,7 @@ class QuantumStatementMixin(SimulationHost):
         var = m.group(2)
         try:
             if self._live is not None:
-                amps = np.array(self._live.sv[indices], dtype=complex)
+                amps = self._live.amplitudes(indices)
                 self._record_save('amp', var, amps)
                 run_vars[var] = amps
                 self.variables[var] = amps
@@ -2347,6 +2359,7 @@ class QuantumStatementMixin(SimulationHost):
         'EVOLVE': (lambda s, st, qc, rv, b: s._try_exec_evolve(st, qc, rv, backend=b),),
         'APPLYCHANNEL': (lambda s, st, qc, rv, b: s._try_exec_applychannel(st, qc, rv, backend=b),),
         'POKE': (lambda s, st, qc, rv, b: s._try_exec_poke(st, rv),),
+        'WAIT': (lambda s, st, qc, rv, b: s._try_exec_wait(st, rv),),
         'SYS': (lambda s, st, qc, rv, b: s._try_exec_sys(st),),
         'SAVE_EXPECT': (lambda s, st, qc, rv, b: s._try_exec_save_expect(st, qc, rv),),
         'SAVE_PROBS': (lambda s, st, qc, rv, b: s._try_exec_save_probs(st, qc, rv),),
@@ -2370,6 +2383,12 @@ class QuantumStatementMixin(SimulationHost):
 # state when a measurement or a state read needs them. An active noise model
 # runs as quantum trajectories (gate errors as Kraus jumps, readout error as
 # classical flips).
+#
+# Under METHOD stabilizer, or under METHOD automatic when the statevector does
+# not fit in memory, each shot holds a stabilizer tableau instead, which costs
+# O(n^2) bits at any width: Clifford gates and Pauli noise channels run on it,
+# SAVE_EXPECT and SAVE_PROBS read it exactly, and any other operation stops
+# the run with the reason the run holds a tableau.
 #
 # Only the first shot prints. Later shots replay the first shot's INPUT
 # answers and skip file output, so a run reads as one execution of the
@@ -2483,6 +2502,7 @@ class _Channel:
     def __init__(self, error: Any) -> None:
         from qiskit.quantum_info import Kraus
         ops = [np.asarray(k, dtype=complex) for k in Kraus(error).data]
+        self.paulis = pauli_mixture(ops)          # what a stabilizer tableau samples
         self.n = int(round(np.log2(ops[0].shape[0])))
         d = ops[0].shape[0]
         eye = np.eye(d)
@@ -2558,33 +2578,14 @@ def _numeric(params: Sequence[Any]) -> bool:
         return False
 
 
-class LiveState:
-    """The statevector of one live shot plus the circuit fragment the
-    executor is appending to. Built-in gates apply at once; everything else
-    queues in `qc` until flush(). Qubit q is bit q of the amplitude index."""
+class _ShotState:
+    """What the two live states share: the circuit fragment the executor
+    appends to, applied in order by flush()."""
 
-    def __init__(self, n: int, precision: str = 'double', noise: LiveNoise | None = None) -> None:
-        from qiskit import QuantumCircuit
-        self.n = n
-        self.dtype = np.complex64 if precision == 'single' else np.complex128
-        self._sv: np.ndarray = np.zeros(1 << n, dtype=self.dtype)
-        self._sv[0] = 1.0
-        self.qc = QuantumCircuit(n)
-        self.noise = noise
-        self.ops = 0
+    qc: Any
 
-    def reset_state(self, init: np.ndarray | None = None) -> None:
-        if init is None:
-            self._sv[...] = 0
-            self._sv[0] = 1.0
-        else:
-            np.copyto(self._sv, init)
-        self.qc.clear()
-
-    @property
-    def sv(self) -> np.ndarray:
-        self.flush()
-        return self._sv
+    def apply_operation(self, op: Any, qubits: list[int]) -> None:
+        raise NotImplementedError
 
     def flush(self) -> None:
         """Apply the instructions queued in qc, in order, and clear it."""
@@ -2596,6 +2597,53 @@ class LiveState:
             self.apply_operation(inst.operation, [index[q] for q in inst.qubits])
         qc.clear()
 
+
+class LiveState(_ShotState):
+    """The statevector of one live shot plus the circuit fragment the
+    executor is appending to. Built-in gates apply at once; everything else
+    queues in `qc` until flush(). Qubit q is bit q of the amplitude index."""
+
+    engine = 'statevector'
+
+    def __init__(self, n: int, precision: str = 'double', noise: LiveNoise | None = None) -> None:
+        from qiskit import QuantumCircuit
+        self.n = n
+        self.dtype = np.complex64 if precision == 'single' else np.complex128
+        self._sv: np.ndarray = np.zeros(1 << n, dtype=self.dtype)
+        self._sv[0] = 1.0
+        self.qc = QuantumCircuit(n)
+        self.noise = noise
+        self.ops = 0
+
+    def reset_state(self, init: Any = None) -> None:
+        if init is None:
+            self._sv[...] = 0
+            self._sv[0] = 1.0
+        else:
+            np.copyto(self._sv, init)
+        self.qc.clear()
+
+    def snapshot(self) -> np.ndarray:
+        return self.sv.copy()
+
+    @property
+    def sv(self) -> np.ndarray:
+        self.flush()
+        return self._sv
+
+    # Reading the state (SAVE_EXPECT, SAVE_PROBS, SAVE_AMPS)
+
+    def expectation(self, op: Any) -> float:
+        from qiskit.quantum_info import Statevector
+        return float(np.real(Statevector(self.sv).expectation_value(op)))
+
+    def probabilities(self, qubits: list[int]) -> np.ndarray:
+        from qiskit.quantum_info import Statevector
+        return Statevector(self.sv).probabilities(qubits)
+
+    def amplitudes(self, indices: list[int]) -> np.ndarray:
+        return np.array(self.sv[indices], dtype=complex)
+
     # Gates
 
     def apply_named(self, name: str, params: tuple, qubits: list[int]) -> None:
@@ -2606,7 +2654,8 @@ class LiveState:
         self.ops += 1
         self._noise_after(canonical.lower(), qubits)
 
-    def apply_matrix(self, matrix: np.ndarray, qubits: list[int], name: str = 'unitary') -> None:
+    def apply_matrix(self, matrix: np.ndarray, qubits: list[int], name: str = 'unitary',
+                     label: str | None = None) -> None:
         """A unitary in Qiskit order over `qubits` (qubits[0] least significant)."""
         _apply_gate_inplace(self._sv, np.asarray(matrix, dtype=complex), list(qubits)[::-1], self.n)
         self.ops += 1
@@ -2722,12 +2771,192 @@ class LiveState:
         return ''.join(str(bits[q]) for q in reversed(qubits))
 
 
+_TABLEAU_GATES: dict[str, Callable[..., None]] = {
+    'H': Tableau.h, 'S': Tableau.s, 'SDG': Tableau.sdg, 'X': Tableau.pauli_x,
+    'Y': Tableau.pauli_y, 'Z': Tableau.pauli_z, 'CX': Tableau.cx, 'CZ': Tableau.cz,
+    'SWAP': Tableau.swap,
+}
+
+
+class TableauState(_ShotState):
+    """One live shot on a stabilizer tableau, for a Clifford program wider
+    than a statevector fits or run under METHOD stabilizer. Clifford gates
+    and Pauli noise update the tableau; anything else stops the run with
+    `why`, the reason it holds one. Operations queue in `qc` as in LiveState."""
+
+    engine = 'stabilizer tableau'
+
+    def __init__(self, n: int, noise: LiveNoise | None, why: str) -> None:
+        from qiskit import QuantumCircuit
+        self.n = n
+        self.tab = Tableau(n)
+        self.qc = QuantumCircuit(n)
+        self.noise = noise
+        self.ops = 0
+        self.why = why
+
+    def _refuse(self, what: str) -> ValueError:
+        return ValueError(f"{what}, and this live run holds a stabilizer tableau ({self.why})")
+
+    def reset_state(self, init: Any = None) -> None:
+        if init is None:
+            self.tab = Tableau(self.n)
+        else:
+            self.tab.assign(init)
+        self.qc.clear()
+
+    def snapshot(self) -> Tableau:
+        self.flush()
+        return self.tab.copy()
+
+    @property
+    def sv(self) -> np.ndarray:
+        raise self._refuse("the statevector is not held")
+
+    # Gates
+
+    def _clifford(self, matrix: np.ndarray, qubits: list[int], label: str) -> None:
+        """A unitary in Qiskit order over `qubits` (qubits[0] least significant)."""
+        table = clifford_table(matrix) if len(qubits) <= 4 else None
+        if table is None:
+            raise self._refuse(f"{label} is not a Clifford gate")
+        self.tab.apply_table(table, qubits)
+
+    def apply_named(self, name: str, params: tuple, qubits: list[int]) -> None:
+        """A built-in gate (GATE_TABLE name), MSB-first over `qubits`."""
+        canonical = GATE_ALIASES.get(name, name)
+        fast = None if params else _TABLEAU_GATES.get(canonical)
+        if fast is not None:
+            fast(self.tab, *qubits)
+        elif canonical != 'ID':
+            label = f"{canonical}({', '.join(f'{float(p):g}' for p in params)})" if params else canonical
+            self._clifford(_np_gate_matrix(canonical, tuple(params)), list(qubits)[::-1], label)
+        self.ops += 1
+        self._noise_after(canonical.lower(), qubits)
+
+    def apply_matrix(self, matrix: np.ndarray, qubits: list[int], name: str = 'unitary',
+                     label: str | None = None) -> None:
+        """A unitary in Qiskit order over `qubits` (qubits[0] least
+        significant); `label` names it in a refusal."""
+        self._clifford(np.asarray(matrix, dtype=complex), list(qubits), label or name.upper())
+        self.ops += 1
+        self._noise_after(name, qubits)
+
+    def apply_operation(self, op: Any, qubits: list[int]) -> None:
+        name = op.name
+        if name in ('barrier', 'delay', 'id'):
+            return
+        if name == 'measure':
+            self.measure(qubits[0])
+            return
+        if name == 'reset':
+            self.reset(qubits[0])
+            return
+        if name == 'kraus':
+            mix = pauli_mixture([np.asarray(k, dtype=complex) for k in op.params])
+            if mix is None:
+                raise self._refuse("the channel is not a Pauli channel")
+            self._sample_pauli(mix, qubits)
+            return
+        if name in ('set_statevector', 'set_density_matrix'):
+            raise self._refuse("SET_STATE needs the statevector")
+        if name in _CONTROL_FLOW_OPS or name.startswith('save_'):
+            raise ValueError(f"'{name}' is not available in a live run")
+        upper = name.upper()
+        if upper in _GATE_BUILDERS and _numeric(op.params):
+            self.apply_named(upper, tuple(float(p) for p in op.params), qubits)
+            return
+        matrix = None
+        if op.num_qubits <= 4:
+            try:
+                matrix = op.to_matrix()
+            except Exception:
+                matrix = None
+        if matrix is not None:
+            self.apply_matrix(matrix, qubits, name)
+            return
+        definition = getattr(op, 'definition', None)
+        if definition is None:
+            raise self._refuse(f"{upper} has no Clifford form")
+        sub = {bit: i for i, bit in enumerate(definition.qubits)}
+        for inst in definition.data:
+            self.apply_operation(inst.operation, [qubits[sub[q]] for q in inst.qubits])
+
+    # Noise: Pauli channels sampled per gate, readout error on recorded bits
+
+    def _sample_pauli(self, mix: tuple[np.ndarray, np.ndarray], qubits: list[int]) -> None:
+        cum, codes = mix
+        i = min(int(np.searchsorted(cum, np.random.random(), side='right')), len(codes) - 1)
+        self.tab.apply_pauli(int(codes[i]), qubits)
+
+    def _noise_after(self, name: str, qubits: list[int]) -> None:
+        if self.noise is None:
+            return
+        ch = self.noise.channel(name, list(qubits))
+        if ch is None:
+            return
+        if ch.paulis is None:
+            raise self._refuse(f"the noise on {name.upper()} is not a Pauli channel")
+        self._sample_pauli(ch.paulis, list(qubits))
+
+    def _recorded(self, qubit: int, bit: int) -> int:
+        if self.noise is not None:
+            p = self.noise.readout(qubit)
+            if p is not None and np.random.random() < p[bit][1 - bit]:
+                return 1 - bit
+        return bit
+
+    def measure(self, qubit: int) -> int:
+        self.flush()
+        self._noise_after('measure', [qubit])
+        return self._recorded(qubit, self.tab.measure(qubit))
+
+    def reset(self, qubit: int) -> None:
+        self.flush()
+        self.tab.reset(qubit)
+        self._noise_after('reset', [qubit])
+
+    def sample_final(self, subset: list[int] | None) -> str:
+        """The final MEASURE of a shot, as in LiveState.sample_final: drawn
+        from a copy, so the shot's state stays as the program left it."""
+        self.flush()
+        qubits = list(subset) if subset else list(range(self.n))
+        if self.noise is not None:
+            for q in qubits:
+                self._noise_after('measure', [q])
+        final = self.tab.copy()
+        bits = {q: final.measure(q) for q in qubits}
+        bits = {q: self._recorded(q, b) for q, b in bits.items()}
+        return ''.join(str(bits[q]) for q in reversed(qubits))
+
+    # Reading the state
+
+    def expectation(self, op: Any) -> float:
+        """<op> for a SparsePauliOp: each Pauli term is 0 or +-1 on a
+        stabilizer state."""
+        self.flush()
+        total = 0.0
+        for pauli, coeff in zip(op.paulis, op.coeffs):
+            value = self.tab.expectation(np.asarray(pauli.x), np.asarray(pauli.z))
+            total += float(np.real(coeff * (-1j) ** int(pauli.phase))) * value
+        return total
+
+    def probabilities(self, qubits: list[int]) -> np.ndarray:
+        if len(qubits) > 20:
+            raise self._refuse(f"SAVE_PROBS over {len(qubits)} qubits lists 2^{len(qubits)} outcomes")
+        self.flush()
+        return self.tab.probabilities(qubits)
+
+    def amplitudes(self, indices: list[int]) -> np.ndarray:
+        raise self._refuse("SAVE_AMPS reads amplitudes")
+
+
 class LiveBackend:
     """Executor backend for a live shot: built-in gates go straight to the
     state, custom gates as their matrices, and other circuit operations
     queue in the shot's circuit."""
 
-    def __init__(self, state: LiveState, custom_gates: dict[str, np.ndarray]) -> None:
+    def __init__(self, state: LiveState | TableauState, custom_gates: dict[str, np.ndarray]) -> None:
         self.state = state
         self._custom = custom_gates
 
@@ -2741,7 +2970,7 @@ class LiveBackend:
         self.state.flush()
         canonical = GATE_ALIASES.get(gate_name, gate_name)
         if canonical in self._custom:
-            self.state.apply_matrix(self._custom[canonical], list(qubits))
+            self.state.apply_matrix(self._custom[canonical], list(qubits), label=canonical)
         else:
             self.state.apply_named(canonical, tuple(params), list(qubits))
 
@@ -2786,9 +3015,10 @@ class LiveMixin(SimulationHost):
     """Live (shot-by-shot) execution for QBasicTerminal."""
 
     def _init_live(self) -> None:
-        self._live: LiveState | None = None
+        self._live: LiveState | TableauState | None = None
         self._live_needed = False
         self._live_saves: dict[str, tuple[str, list]] = {}
+        self._last_tableau: Tableau | None = None
 
     # Static check
 
@@ -2879,20 +3109,30 @@ class LiveMixin(SimulationHost):
                             "on a pure state; use SET_STATE rather than SET_DENSITY")
             return
         peak = cap.numpy_peak_bytes(n, prec)
-        if not cap.fits(peak):
-            self.io.writeln(f"?MEMORY: a live run at {n} qubits needs ~{cap.fmt_gb(peak)}, "
-                            f"{cap.fmt_gb(cap.available_bytes())} available")
+        why = None                        # why the run holds a stabilizer tableau
+        if self.sim_method == 'stabilizer':
+            why = "METHOD stabilizer"
+        elif not cap.fits(peak):
+            if self.sim_method != 'automatic':
+                self.io.writeln(f"?MEMORY: a live run at {n} qubits needs ~{cap.fmt_gb(peak)}, "
+                                f"{cap.fmt_gb(cap.available_bytes())} available")
+                return
+            why = f"a {n}-qubit statevector needs ~{cap.fmt_gb(peak)}"
+        if why is not None and not cap.fits(cap.tableau_bytes(n)):
+            self.io.writeln(f"?MEMORY: a live run at {n} qubits needs ~{cap.fmt_gb(cap.tableau_bytes(n))} "
+                            f"on the stabilizer tableau, {cap.fmt_gb(cap.available_bytes())} available")
             return
         has_measure = self._program_has_measure(sorted_lines)
         shots = self.shots if has_measure else 1
         noise = self._live_noise()
-        state = LiveState(n, prec, noise)
+        state: LiveState | TableauState = (LiveState(n, prec, noise) if why is None
+                                           else TableauState(n, noise, why))
         backend = LiveBackend(state, self._custom_gates)
         shot_io = ShotIO(self.io, carry.answers if carry else None, carry.shown if carry else 0)
         real_io = self.io
         base_vars = dict(self.variables)
         base_arrays = {k: list(v) for k, v in self.arrays.items()}
-        keep_copy = shots > 1 and cap.fits(cap.numpy_peak_bytes(n, prec, True))
+        keep_copy = shots > 1 and (why is not None or cap.fits(cap.numpy_peak_bytes(n, prec, True)))
         if self._seed is not None:
             np.random.seed(self._seed)
         self._live_saves = {}
@@ -2900,6 +3140,7 @@ class LiveMixin(SimulationHost):
         first_vars: dict[str, Any] = {}
         first_arrays: dict[str, Any] = {}
         first_sv = None
+        first_tab = None
         first_ops = 0
         start, snapshot, start_vars, start_arrays = 0, None, base_vars, base_arrays
         prefix_ops = 0
@@ -2911,7 +3152,7 @@ class LiveMixin(SimulationHost):
             if prefix:
                 self._gosub_stack = []
                 self.build_circuit(backend=backend, stop_ip=prefix)
-                snapshot = state.sv.copy()
+                snapshot = state.snapshot()
                 prefix_ops = state.ops
                 start, start_vars = prefix, dict(self.variables)
                 start_arrays = {k: list(v) for k, v in self.arrays.items()}
@@ -2935,7 +3176,9 @@ class LiveMixin(SimulationHost):
                     first_vars = dict(self.variables)
                     first_arrays = {k: list(v) for k, v in self.arrays.items()}
                     first_ops = prefix_ops + state.ops
-                    if shots == 1:
+                    if isinstance(state, TableauState):
+                        first_tab = state.snapshot()
+                    elif shots == 1:
                         first_sv = state.sv
                     elif keep_copy:
                         first_sv = state.sv.copy()
@@ -2961,6 +3204,7 @@ class LiveMixin(SimulationHost):
         self.arrays.update(first_arrays)
         self._finish_live_saves()
         self.last_sv = first_sv
+        self._last_tableau = first_tab
         self.last_counts = counts if has_measure else None
         self.last_circuit = None
         dt = time.time() - t0
@@ -2968,12 +3212,14 @@ class LiveMixin(SimulationHost):
         self.variables['_TIME'] = dt
         self._run_manifest = {
             'program': dict(self.program), 'num_qubits': n, 'shots': shots,
-            'method': 'live', 'precision': prec, 'device': 'CPU', 'seed': self._seed,
-            'noise_depol_p': self._noise_depol_p, 'depth': 0, 'gates': first_ops,
-            'time_s': dt,
+            'method': 'live', 'engine': state.engine, 'precision': prec, 'device': 'CPU',
+            'seed': self._seed, 'noise_depol_p': self._noise_depol_p, 'depth': 0,
+            'gates': first_ops, 'time_s': dt,
         }
         tags = ["method=live"]
-        if prec == 'single':
+        if first_tab is not None:
+            tags.append("stabilizer tableau")
+        elif prec == 'single':
             tags.append("precision=single")
         if noise is not None:
             tags.append("noise=trajectories")
@@ -2983,6 +3229,8 @@ class LiveMixin(SimulationHost):
         if has_measure and counts:
             self.print_histogram(counts)
             self._mitigate_after_run()
+        elif first_tab is not None:
+            self.io.writeln("(no MEASURE — one shot; STATE lists the stabilizers, BLOCH reads a qubit)")
         elif not has_measure:
             self.io.writeln("(no MEASURE — one shot; use STATE, PROBS, or BLOCH to inspect)")
 

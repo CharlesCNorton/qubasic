@@ -437,7 +437,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         'PEEK': 'cmd_peek', 'POKE': 'cmd_poke', 'SYS': 'cmd_sys', 'DUMP': 'cmd_dump', 'WAIT': 'cmd_wait',
         # Screen
         'SCREEN': 'cmd_screen', 'COLOR': 'cmd_color', 'LOCATE': 'cmd_locate',
-        'DISPLAY': 'cmd_display', 'SHOW': 'cmd_show', 'SAVEWAV': 'cmd_savewav',
+        'DISPLAY': 'cmd_display', 'SHOW': 'cmd_show', 'SAVEWAV': 'cmd_savewav', 'AUDIO': 'cmd_audio',
         'FILES': 'cmd_files',
         'PROMPT': 'cmd_prompt',
         # Debug

@@ -1419,7 +1419,12 @@ class OracleMixin(ApplicationsHost):
 #
 # VQE minimizes <H> over a hardware-efficient ansatz (RY, or RY and RZ, on
 # every qubit between layers of a CX chain), with random restarts, and reports
-# the energy beside the exact ground energy.
+# the energy beside the exact ground energy. On a MOLECULE Hamiltonian,
+# ANSATZ UCCSD applies e^{theta (T - T^dagger)} for every spin-conserving
+# single and double excitation T of the Hartree-Fock determinant, in the
+# space of determinants with the molecule's electron count, where each factor
+# is I + sin(theta) G + (1 - cos theta) G^2 exactly; the energy's gradient
+# comes from one backward sweep, starting from theta = 0 (Hartree-Fock).
 #
 # PROGRAM writes the optimized circuit into the program (QUBITS set to match),
 # so it can be RUN, sampled under NOISE, or exported.
@@ -1453,6 +1458,46 @@ def _apply_cx(psi: np.ndarray, n: int, c: int, tq: int) -> np.ndarray:
     flip = idx ^ (1 << tq)
     out[sel] = psi[flip[sel]]
     return out
+
+
+def uccsd_excitations(n_so: int, n_elec: int) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
+    """The spin-conserving single and double excitations of the Hartree-Fock
+    determinant (the lowest n_elec interleaved spin orbitals) as (spin
+    orbitals filled, spin orbitals emptied), singles first."""
+    from itertools import combinations
+    occ, virt = range(n_elec), range(n_elec, n_so)
+    out: list[tuple[tuple[int, ...], tuple[int, ...]]] = [
+        ((a,), (i,)) for i in occ for a in virt if a % 2 == i % 2]
+    out += [((a, b), (i, j)) for i, j in combinations(occ, 2) for a, b in combinations(virt, 2)
+            if a % 2 + b % 2 == i % 2 + j % 2]
+    return out
+
+
+def _excitation_generator(create: tuple[int, ...], destroy: tuple[int, ...], n: int) -> Any:
+    """T - T^dagger for T = a+_c1 a+_c2 ... a_d2 a_d1 under Jordan-Wigner."""
+    from qubasic_core.physics import jw_ladder
+    a = jw_ladder(n)
+    t = a[create[0]].adjoint()
+    for c in create[1:]:
+        t = t @ a[c].adjoint()
+    for d in reversed(destroy):
+        t = t @ a[d]
+    return (t - t.adjoint()).simplify(atol=1e-12)
+
+
+def _pauli_exponential(label: str, phi: float) -> list[str]:
+    """Program lines for e^{-i phi P}, P a Pauli label with qubit 0 rightmost:
+    each X or Y turned to Z, the parity gathered by a CX ladder, RZ(2 phi)."""
+    n = len(label)
+    support = sorted((n - 1 - k, ch) for k, ch in enumerate(label) if ch != 'I')
+    if not support:
+        return []
+    qs = [q for q, _ in support]
+    half = math.pi / 2
+    pre = [f"H {q}" if ch == 'X' else f"RX {half!r}, {q}" for q, ch in support if ch != 'Z']
+    post = [f"H {q}" if ch == 'X' else f"RX {-half!r}, {q}" for q, ch in support if ch != 'Z']
+    ladder = [f"CX {a}, {b}" for a, b in zip(qs, qs[1:])]
+    return pre + ladder + [f"RZ {2 * phi!r}, {qs[-1]}"] + ladder[::-1] + post
 
 
 def _ry(theta: float) -> np.ndarray:
@@ -1736,18 +1781,19 @@ class VariationalMixin(ApplicationsHost):
         return psi
 
     def cmd_vqe(self, rest: str) -> None:
-        """VQE <HAMILTONIAN> [LAYERS L] [ANSATZ RY|RYRZ] [METHOD m] [RESTARTS k] [EXCITED k] [PROGRAM] — variational ground and excited-state energies of a Hamiltonian.
+        """VQE <HAMILTONIAN> [LAYERS L] [ANSATZ RY|RYRZ|UCCSD] [METHOD m] [RESTARTS k] [EXCITED k] [PROGRAM] — variational ground and excited-state energies of a Hamiltonian.
 
         Minimizes <H> over a hardware-efficient ansatz (L layers of a CX chain
         between rotation layers, default L=2) and compares with the exact
         ground energy. EXCITED k then finds k more levels by variational
         quantum deflation: each minimizes <H> + beta * sum |<psi_j|psi>|^2 over
-        the states already found ($_VQE_ENERGIES holds every level). See
-        qubasic_core/algorithms.py."""
+        the states already found ($_VQE_ENERGIES holds every level). ANSATZ
+        UCCSD runs unitary coupled cluster from Hartree-Fock on a MOLECULE
+        Hamiltonian. See qubasic_core/algorithms.py."""
         text, opts = self._var_options(rest)
         name = text.strip().upper()
         if not name:
-            self.io.writeln("?USAGE: VQE <HAMILTONIAN> [LAYERS L] [ANSATZ RY|RYRZ] [METHOD m] "
+            self.io.writeln("?USAGE: VQE <HAMILTONIAN> [LAYERS L] [ANSATZ RY|RYRZ|UCCSD] [METHOD m] "
                             "[RESTARTS k] [PROGRAM]")
             return
         try:
@@ -1755,12 +1801,15 @@ class VariationalMixin(ApplicationsHost):
                 raise ValueError(f"unknown HAMILTONIAN '{name}' (declare one with HAMILTONIAN)")
             op = self._hamiltonians[name]
             n = op.num_qubits
+            kind = opts.get('ansatz', 'RY')
+            if kind == 'UCCSD':
+                self._vqe_uccsd(name, op, opts)
+                return
             if n > 16:
                 raise ValueError("VQE simulates at most 16 qubits")
             layers = opts.get('layers', 2)
-            kind = opts.get('ansatz', 'RY')
             if kind not in ('RY', 'RYRZ'):
-                raise ValueError("ANSATZ is RY or RYRZ")
+                raise ValueError("ANSATZ is RY, RYRZ or UCCSD")
             method = opts.get('method', 'LBFGS')
             restarts = max(1, opts.get('restarts', 3))
             Hs = op.to_matrix(sparse=True).tocsr()
@@ -1813,6 +1862,93 @@ class VariationalMixin(ApplicationsHost):
                 self._vqe_program(n, layers, params, kind, name)
         except Exception as e:
             self.io.writeln(f"?VQE ERROR: {e}")
+
+    def _vqe_uccsd(self, name: str, op: Any, opts: dict[str, Any]) -> None:
+        """VQE with the UCCSD ansatz on a MOLECULE Hamiltonian, in the space
+        of determinants with its electron count (see the module docstring)."""
+        from qubasic_core.physics import fermion_sector, sector_ground, sector_matrix
+        mol = self._ham_molecules.get(name)
+        if mol is None:
+            raise ValueError(f"ANSATZ UCCSD needs a MOLECULE Hamiltonian; {name} records no electrons")
+        if opts.get('excited'):
+            raise ValueError("EXCITED runs with the RY and RYRZ ansatzes")
+        n = op.num_qubits
+        basis = fermion_sector(n, mol.electrons)
+        if len(basis) > 200_000:
+            raise ValueError(f"{mol.electrons} electrons on {n} qubits span {len(basis)} determinants; "
+                             f"ACTIVE narrows the space")
+        H = sector_matrix(op, basis)
+        excitations = uccsd_excitations(n, mol.electrons)
+        gens = [sector_matrix(_excitation_generator(c, d, n), basis) for c, d in excitations]
+        start = np.zeros(len(basis))
+        start[int(np.searchsorted(basis, (1 << mol.electrons) - 1))] = 1.0
+
+        def turn(g: Any, theta: float, v: np.ndarray) -> np.ndarray:
+            gv = g @ v
+            return v + math.sin(theta) * gv + (1 - math.cos(theta)) * (g @ gv)
+
+        def energy_grad(theta: np.ndarray) -> tuple[float, np.ndarray]:
+            psi = start
+            for th, g in zip(theta, gens):
+                psi = turn(g, th, psi)
+            lam = H @ psi
+            e = float(psi @ lam)
+            grad = np.zeros(len(gens))
+            for k in range(len(gens) - 1, -1, -1):
+                grad[k] = 2 * float(lam @ (gens[k] @ psi))
+                psi = turn(gens[k], -theta[k], psi)
+                lam = turn(gens[k], -theta[k], lam)
+            return e, grad
+
+        method = opts.get('method', 'LBFGS')
+        iters = opts.get('iters', 500)
+        x0 = np.zeros(len(gens))
+        if method in ('LBFGS', 'L-BFGS', 'BFGS'):
+            from scipy.optimize import minimize
+            evals = [0]
+
+            def counted(v: np.ndarray) -> tuple[float, np.ndarray]:
+                evals[0] += 1
+                return energy_grad(np.asarray(v, dtype=float))
+
+            res = minimize(counted, x0, jac=True, method='L-BFGS-B',
+                           options={'maxiter': iters, 'ftol': 1e-15, 'gtol': 1e-9})
+            theta, e_vqe, n_evals = np.asarray(res.x), float(res.fun), evals[0]
+        else:
+            theta, e_vqe, n_evals = self._optimize(lambda v: energy_grad(v)[0], x0, method, iters)
+        e0 = mol.exact_energy if mol.exact_energy is not None else sector_ground(H)
+        err = e_vqe - e0
+        singles = sum(1 for c, _ in excitations if len(c) == 1)
+        self.io.writeln(f"\n  VQE {name}: {n} qubits, UCCSD ansatz, {singles} singles and "
+                        f"{len(excitations) - singles} doubles, {method.lower()} ({n_evals} evaluations)")
+        self.io.writeln(f"    VQE energy   = {e_vqe:.6f}")
+        self.io.writeln(f"    exact ground = {e0:.6f}   (error {err:.2e})")
+        if abs(mol.hf_energy - e0) > 1e-12:
+            share = (mol.hf_energy - e_vqe) / (mol.hf_energy - e0)
+            self.io.writeln(f"    Hartree-Fock = {mol.hf_energy:.6f}   "
+                            f"(correlation energy recovered {100 * share:.2f}%)")
+        self.variables['_VQE_ENERGY'] = e_vqe
+        self.variables['_VQE_EXACT'] = e0
+        self.variables['_VQE_ERROR'] = err
+        self.arrays['_VQE_PARAMS'] = [float(v) for v in theta]
+        if opts.get('program'):
+            self._uccsd_program(n, mol.electrons, excitations, theta, name)
+
+    def _uccsd_program(self, n: int, n_elec: int, excitations: list, theta: np.ndarray,
+                       name: str) -> None:
+        """Write the optimized UCCSD circuit: X on the occupied spin orbitals,
+        then each excitation's commuting Pauli terms as exponentials."""
+        lines = [f'REM UCCSD ansatz for {name} written by VQE ... PROGRAM']
+        lines += [f"X {q}" for q in range(n_elec)]
+        for (create, destroy), th in zip(excitations, theta):
+            if abs(th) < 1e-10:
+                continue
+            gen = _excitation_generator(create, destroy, n)
+            for label, coeff in zip(gen.paulis.to_labels(), gen.coeffs):
+                lines += _pauli_exponential(label, -float(th) * float(np.imag(coeff)))
+        lines.append(f"SAVE_EXPECT {name} -> energy")
+        self._write_program(n, lines)
+        self.io.writeln(f"    PROGRAM: {len(lines)} lines written (QUBITS {n}); RUN sets 'energy'")
 
     def _vqe_excited(self, n: int, layers: int, kind: str, method: str, restarts: int,
                      iters: int, Hs: Any, params: np.ndarray, e0_vqe: float, excited: int,

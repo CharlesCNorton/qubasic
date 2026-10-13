@@ -132,6 +132,47 @@ class TestQuantumIdentities(unittest.TestCase):
         self.assertIn('parametric compile', out)
         self.assertAlmostEqual(t.variables['_COST'], -1.13727, places=3)
 
+    def test_molecular_integrals_and_hartree_fock(self):
+        from qubasic_core.physics import BOHR_PER_ANGSTROM, build_molecule, parse_molecule
+        bohr = 1 / BOHR_PER_ANGSTROM
+        water = build_molecule([('O', (0, -0.143225816552 * bohr, 0)),
+                                ('H', (1.638036840407 * bohr, 1.136548822547 * bohr, 0)),
+                                ('H', (-1.638036840407 * bohr, 1.136548822547 * bohr, 0))])
+        self.assertAlmostEqual(water.hf_energy, -74.942079928, places=6)      # Crawford's water
+        lih = parse_molecule('LIH', float)
+        self.assertAlmostEqual(lih.hf_energy, -7.862027, places=5)
+        self.assertAlmostEqual(lih.exact_energy, -7.882403, places=5)
+        n2 = parse_molecule('N2 FREEZE', float)
+        self.assertAlmostEqual(n2.hf_energy, -107.495893, places=5)
+        self.assertEqual((n2.frozen, n2.electrons, n2.hamiltonian.num_qubits), (2, 10, 16))
+        heh = parse_molecule('"He 0 0 0; H 0 0 0.772" CHARGE 1', float)
+        self.assertAlmostEqual(heh.exact_energy, parse_molecule('HEH+', float).exact_energy, places=10)
+        for bad in ('XE2', '"H 0 0 0; H 0 0 0.7; H 0 0 1.4"', 'LIH ACTIVE 3 2', 'H2 0.7 extra'):
+            with self.assertRaises(ValueError):
+                parse_molecule(bad, float)
+
+    def test_sector_restriction_matches_the_dense_operator(self):
+        from qubasic_core.physics import fermion_sector, parse_molecule, sector_matrix
+        op = parse_molecule('H4', float).hamiltonian
+        basis = fermion_sector(8, 4)
+        self.assertEqual(len(basis), 36)                                      # C(4,2) squared
+        dense = op.to_matrix()[np.ix_(basis, basis)]
+        np.testing.assert_allclose(sector_matrix(op, basis).toarray(), dense.real, atol=1e-12)
+        self.assertLess(np.max(np.abs(dense.imag)), 1e-12)
+
+    def test_uccsd_vqe(self):
+        t, out = run_script(['HAMILTONIAN H = MOLECULE H2', 'VQE H ANSATZ UCCSD PROGRAM', 'RUN'])
+        self.assertIn('2 singles and 1 doubles', out)
+        self.assertAlmostEqual(t.variables['_VQE_ENERGY'], -1.137270, places=6)
+        self.assertAlmostEqual(t.variables['energy'], t.variables['_VQE_ENERGY'], places=8)  # the circuit
+        t, out = run_script(['HAMILTONIAN L = MOLECULE LIH FREEZE', 'VQE L ANSATZ UCCSD'])
+        self.assertLess(abs(t.variables['_VQE_ERROR']), 1e-8)                # two electrons: exact
+        t, out = run_script(['HAMILTONIAN W = MOLECULE H2O FREEZE', 'VQE W ANSATZ UCCSD'])
+        self.assertLess(t.variables['_VQE_ERROR'], 5e-4)
+        self.assertIn('correlation energy recovered 99.', out)
+        t, out = run_script(['HAMILTONIAN Z = 1.0 ZZ 0 1', 'VQE Z ANSATZ UCCSD'])
+        self.assertIn('needs a MOLECULE Hamiltonian', out)
+
     def test_parametric_minimize_tfim(self):
         t, out = run_script([
             'QUBITS 2',

@@ -12,19 +12,20 @@ import os
 import re
 import shutil
 import struct
+import sys
 import time
 import wave
 import zlib
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
-from typing import IO, Any
+from typing import IO, Any, Callable
 
 import numpy as np
 
 from qubasic_core.engine import NullIO
 from qubasic_core.expression import Record, fixed_length, is_string_kind, next_column
 from qubasic_core.host import LanguageHost
-from qubasic_core.parser import RE_LPRINT, _top_split
+from qubasic_core.parser import PrintUsingStmt, _top_split, parse_stmt
 
 # ---------------------------------------------------------------------------
 # QBASIC graphics as a framebuffer: the SCREEN modes, their palettes, and the
@@ -91,6 +92,39 @@ def vga_long(c: int) -> tuple[int, int, int]:
     """A PALETTE value 65536*blue + 256*green + red, components 0-63, as RGB."""
     r, g, b = c & 0x3F, (c >> 8) & 0x3F, (c >> 16) & 0x3F
     return (round(r * 255 / 63), round(g * 255 / 63), round(b * 255 / 63))
+
+
+
+# The font QBASIC prints with on a graphics SCREEN: printable ASCII, eight
+# bytes a character, top row first, the high bit the leftmost pixel. Other
+# characters print as a hollow box.
+FONT_8X8 = bytes.fromhex(
+    '0000000000000000183c3c18180018006c6c4800000000006c6cfe6cfe6c6c00307cc0780cf8300000c6cc183066c600'
+    '386c3876dccc76006060c000000000001830606060301800603018181830600000663cff3c660000003030fc30300000'
+    '0000000000303060000000fc000000000000000000303000060c183060c080007cc6cedef6e67c00307030303030fc00'
+    '78cc0c3860ccfc0078cc0c380ccc78001c3c6cccfe0c1e00fcc0f80c0ccc78003860c0f8cccc7800fccc0c1830303000'
+    '78cccc78cccc780078cccc7c0c18700000303000003030000030300000303060183060c0603018000000fc0000fc0000'
+    '6030180c1830600078cc0c18300030007cc6dededec078003078ccccfccccc00fc66667c6666fc003c66c0c0c0663c00'
+    'f86c6666666cf800fe6268786862fe00fe6268786860f0003c66c0c0ce663e00ccccccfccccccc007830303030307800'
+    '1e0c0c0ccccc7800e6666c786c66e600f06060606266fe00c6eefefed6c6c600c6e6f6decec6c600386cc6c6c66c3800'
+    'fc66667c6060f00078ccccccdc781c00fc66667c6c66e60078cce0701ccc7800fcb4303030307800ccccccccccccfc00'
+    'cccccccccc783000c6c6c6d6feeec600c6c66c38386cc600cccccc7830307800fec68c183266fe007860606060607800'
+    'c06030180c060200781818181818780010386cc60000000000000000000000ff30301800000000000000780c7ccc7600'
+    'e060607c6666dc00000078ccc0cc78001c0c0c7ccccc7600000078ccfcc07800386c60f06060f000000076cccc7c0cf8'
+    'e0606c766666e60030007030303078000c000c0c0ccccc78e060666c786ce60070303030303078000000ccfefed6c600'
+    '0000f8cccccccc00000078cccccc78000000dc66667c60f0000076cccc7c0c1e0000dc766660f00000007cc0780cf800'
+    '10307c30303418000000cccccccc76000000cccccc7830000000c6d6fefe6c000000c66c386cc6000000cccccc7c0cf8'
+    '0000fc983064fc001c3030e030301c001818180018181800e030301c3030e00076dc000000000000'
+)
+_MISSING_GLYPH = bytes.fromhex('7e42424242427e00')
+
+
+def glyph(ch: str) -> bytes:
+    """The eight rows of a character in FONT_8X8."""
+    code = ord(ch)
+    if 32 <= code < 127:
+        return FONT_8X8[(code - 32) * 8:(code - 31) * 8]
+    return _MISSING_GLYPH
 
 
 class Canvas:
@@ -470,6 +504,49 @@ class Canvas:
         self.pixels[vy1:vy2 + 1, vx1:vx2 + 1] = self.bg
         self.last = self.to_logical((vx1 + vx2) / 2, (vy1 + vy2) / 2)
 
+    # ── text ────────────────────────────────────────────────────────────
+
+    def text_grid(self) -> tuple[int, int, int]:
+        """(columns, rows, cell height) of QBASIC's text in this mode: 8-pixel
+        wide cells, 25 rows on 200- and 350-line screens, 30 on 480 lines."""
+        rows = 30 if self.height == 480 else 25
+        return self.width // 8, rows, self.height // rows
+
+    def draw_char(self, ch: str, col: int, row: int) -> None:
+        """Draw a character in text cell (col, row), counted from 0, in the
+        foreground colour on the background colour."""
+        _, _, cell = self.text_grid()
+        x0, y0 = col * 8, row * cell
+        if x0 + 8 > self.width or y0 + cell > self.height:
+            return
+        rows = glyph(ch)
+        bits = np.array([[(rows[r * 8 // cell] >> (7 - c)) & 1 for c in range(8)] for r in range(cell)],
+                        dtype=bool)
+        fg = self.fg % self.colors if self.colors < 256 else self.fg & 0xFF
+        self.pixels[y0:y0 + cell, x0:x0 + 8] = np.where(bits, fg, self.bg)
+        self.drawn = True
+
+    def scroll_text(self, top: int = 1, bottom: int | None = None) -> None:
+        """Scroll text rows top..bottom (counted from 1) up one row, clearing
+        the bottom one."""
+        _, rows, cell = self.text_grid()
+        y0, y1 = (top - 1) * cell, (bottom or rows) * cell
+        self.pixels[y0:y1 - cell] = self.pixels[y0 + cell:y1].copy()
+        self.pixels[y1 - cell:y1] = self.bg
+
+    def char_at(self, col: int, row: int) -> int:
+        """The code of the character drawn in text cell (col, row), counted
+        from 0, or 0 when the cell holds no character of the font."""
+        _, _, cell = self.text_grid()
+        block = self.pixels[row * cell:(row + 1) * cell, col * 8:col * 8 + 8] != self.bg
+        if not block.any():
+            return 32
+        rows = [int(''.join('1' if v else '0' for v in block[r * cell // 8]), 2) for r in range(8)]
+        found = FONT_8X8.find(bytes(rows))
+        while found >= 0 and found % 8:
+            found = FONT_8X8.find(bytes(rows), found + 1)
+        return 32 + found // 8 if found >= 0 else 0
+
     def set_palette(self, attribute: int | None = None, color: int | None = None) -> None:
         if attribute is None:
             self.palette = default_palette(self.mode)
@@ -560,7 +637,8 @@ def parse_png(data: bytes) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # QUBASIC graphics statements: SCREEN modes 1, 2 and 7-13 with PSET, PRESET,
 # LINE, CIRCLE, PAINT, DRAW, VIEW, WINDOW, PALETTE, GET and PUT on images,
-# PCOPY, and the POINT and PMAP functions (the framebuffer is Canvas, above).
+# PCOPY, and the POINT and PMAP functions (the framebuffer is Canvas, above),
+# with PRINT, LOCATE, CLS and INPUT text drawn in the screen's character cells.
 #
 # A program's picture is drawn as colour half-block cells on a terminal and
 # as text shading elsewhere. On a terminal it is redrawn in place while the
@@ -596,6 +674,12 @@ class GraphicsMixin(LanguageHost):
     def _init_graphics(self) -> None:
         self._canvas: Canvas | None = None
         self._sprites: dict[tuple[str, int], np.ndarray] = {}
+        self._gfx_row = 1                           # the text cursor on a graphics screen,
+        self._gfx_col = 1                           # counted from 1 as LOCATE counts
+        self._def_seg: int | None = None            # DEF SEG: the segment PEEK and POKE address
+        self._dac_index = 0                         # the VGA palette ports' state
+        self._dac_read = 0
+        self._dac_rgb: list[int] = []
         self._gfx_live = False                      # this run draws its frames in place
         self._gfx_frame_at = 0.0                    # when the last frame was drawn
         self._gfx_shown: tuple[bytes, bytes] | None = None   # that frame's pixels and palette
@@ -651,6 +735,7 @@ class GraphicsMixin(LanguageHost):
             return
         self._canvas = Canvas(mode)
         self._sprites.clear()
+        self._gfx_row = self._gfx_col = 1
 
     def _gfx_begin_run(self) -> None:
         if self._canvas is not None:
@@ -711,6 +796,217 @@ class GraphicsMixin(LanguageHost):
         self.io.writeln(f"SCREEN {c.mode} ({c.width}x{c.height}, {c.colors} colours):")
         for row in c.text_rows(max(8, cols), color=color):
             self.io.writeln(row)
+
+    def _gfx_print(self, text: str, newline: bool) -> None:
+        """Draw printed text on the graphics screen at its text cursor, wrapping
+        at the right edge and scrolling the screen up past the bottom row, as
+        QBASIC prints on a graphics SCREEN."""
+        c = self._canvas
+        if c is None:
+            return
+        cols, rows, _ = c.text_grid()
+        for ch in text:
+            if ch == '\n':
+                self._gfx_newline(rows)
+                continue
+            if ch in '\r\a':
+                continue
+            if self._gfx_col > cols:
+                self._gfx_newline(rows)
+            c.draw_char(ch, self._gfx_col - 1, self._gfx_row - 1)
+            self._gfx_col += 1
+        if newline:
+            self._gfx_newline(rows)
+
+    def _gfx_newline(self, rows: int) -> None:
+        self._gfx_col = 1
+        self._gfx_row += 1
+        bottom = min(self._text_bottom, rows)
+        if self._gfx_row > bottom:
+            assert self._canvas is not None
+            self._canvas.scroll_text(self._text_top, bottom)
+            self._gfx_row = bottom
+
+    # ── memory, ports and the BIOS clock ────────────────────────────────
+
+    def _stmt_def_seg(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """DEF SEG [= segment] — the segment PEEK, POKE, BSAVE and BLOAD
+        address: &HA000 is SCREEN 13's pixels, &HB800 the text screen's
+        character and colour bytes, 0 and &H40 the BIOS clock; DEF SEG alone
+        returns PEEK and POKE to the memory map."""
+        m = re.match(r'DEF\s+SEG\b\s*(?:=\s*(.+))?$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        self._def_seg = None if m.group(1) is None else int(self._eval_with_vars(m.group(1), run_vars)) & 0xFFFF
+        return True
+
+    def _segment_read(self, offset: int) -> int:
+        """PEEK under DEF SEG: a byte of the emulated PC memory."""
+        seg = self._def_seg or 0
+        linear = seg * 16 + offset
+        if seg == 0xA000:
+            c = self._video13()
+            return int(c.pixels.flat[offset]) if c is not None and 0 <= offset < c.pixels.size else 0
+        if seg in (0xB800, 0xB000):
+            cell, attr = divmod(offset, 2)
+            row, col = divmod(cell, 80)
+            if 0 <= row < 25:
+                return self._text_attr[row][col] if attr else ord(self._text_screen[row][col])
+            return 0
+        if 0x46C <= linear <= 0x46F:                     # BIOS ticks since midnight
+            ticks = int(self._seconds_since_midnight() * 18.2065)
+            return (ticks >> (8 * (linear - 0x46C))) & 0xFF
+        return 0
+
+    def _segment_write(self, offset: int, value: int) -> None:
+        """POKE under DEF SEG."""
+        seg = self._def_seg or 0
+        value = int(value) & 0xFF
+        if seg == 0xA000:
+            c = self._video13()
+            if c is not None and 0 <= offset < c.pixels.size:
+                c.pixels.flat[offset] = value
+                c.drawn = True
+        elif seg in (0xB800, 0xB000):
+            cell, attr = divmod(offset, 2)
+            row, col = divmod(cell, 80)
+            if 0 <= row < 25:
+                if attr:
+                    self._text_attr[row][col] = value
+                else:
+                    self._text_screen[row][col] = chr(value)
+                    if self._on_terminal() and not getattr(self.io, 'replay', False):
+                        self.io.write(f'\x1b7\x1b[{row + 1};{col + 1}H{chr(value)}\x1b8')
+
+    def _video13(self) -> Canvas | None:
+        """SCREEN 13's canvas, whose pixels are the bytes at &HA000; in other
+        modes those bytes read 0 and take no writes."""
+        c = self._canvas
+        return c if c is not None and c.mode == 13 else None
+
+    @staticmethod
+    def _seconds_since_midnight() -> float:
+        import datetime
+        now = datetime.datetime.now()
+        return now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1e6
+
+    def _inp(self, port: float) -> int:
+        """INP(port): the VGA status (&H3DA, vertical retrace at 70 Hz), palette
+        data (&H3C9), the keyboard (&H60, the scan code of the last key); other
+        ports read 0."""
+        p = int(port)
+        if p == 0x3DA:
+            phase = (time.monotonic() * 70) % 1
+            return 9 if phase < 0.15 else 0
+        if p == 0x3C9:
+            c = self._canvas
+            entry = self._dac_read // 3
+            rgb = c.palette[entry] if c is not None and entry < len(c.palette) else (0, 0, 0)
+            self._dac_read += 1
+            return round(rgb[(self._dac_read - 1) % 3] * 63 / 255)
+        if p == 0x60:
+            key = self._key_buffer[-1] if self._key_buffer else ''
+            return ord(key[-1]) if key.startswith('\x00') else 0
+        return 0
+
+    def _stmt_out(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """OUT port, value — &H3C8 picks the palette entry to write, &H3C7 the
+        one to read, and three writes to &H3C9 set its red, green and blue
+        (0-63); other ports take the value and do nothing."""
+        m = re.match(r'OUT\s+(.+)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        parts = _top_split(m.group(1))
+        if len(parts) != 2:
+            raise ValueError("SYNTAX ERROR: OUT port, value")
+        port = int(self._eval_with_vars(parts[0], run_vars))
+        value = int(self._eval_with_vars(parts[1], run_vars)) & 0xFF
+        if port == 0x3C8:
+            self._dac_index, self._dac_rgb = value, []
+        elif port == 0x3C7:
+            self._dac_read = value * 3
+        elif port == 0x3C9:
+            self._dac_rgb.append(value & 63)
+            if len(self._dac_rgb) == 3:
+                c = self._canvas
+                if c is not None and self._dac_index < len(c.palette):
+                    r, g, b = (round(v * 255 / 63) for v in self._dac_rgb)
+                    c.palette[self._dac_index] = (r, g, b)
+                    c.drawn = True
+                self._dac_index, self._dac_rgb = (self._dac_index + 1) & 0xFF, []
+        return True
+
+    def _port_wait(self, port: int, mask: int, xor: int = 0) -> None:
+        """WAIT on a port: hold until (INP(port) XOR xor) AND mask is not 0.
+        The retrace bit of &H3DA comes 70 times a second at a terminal and at
+        once elsewhere; any other port is read once."""
+        def ready() -> bool:
+            return bool((self._inp(port) ^ xor) & mask)
+        if port != 0x3DA or not self._on_terminal():
+            return
+        deadline = time.monotonic() + 0.1
+        while not ready() and time.monotonic() < deadline:
+            time.sleep(0.001)
+
+    def _stmt_bsave(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """BSAVE file$, offset, length — write bytes of the DEF SEG segment
+        with QBASIC's 7-byte header."""
+        m = re.match(r'BSAVE\s+(.+)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        parts = _top_split(m.group(1))
+        if len(parts) != 3:
+            raise ValueError("SYNTAX ERROR: BSAVE file$, offset, length")
+        path = self._basic_path(self._file_name_value(parts[0], run_vars), 'BSAVE')
+        offset = int(self._eval_with_vars(parts[1], run_vars))
+        length = int(self._eval_with_vars(parts[2], run_vars))
+        if self._def_seg is None:
+            raise ValueError("ILLEGAL FUNCTION CALL: BSAVE needs DEF SEG")
+        data = bytes(self._segment_read(offset + k) for k in range(length))
+        header = bytes([0xFD]) + struct.pack('<HHH', self._def_seg, offset & 0xFFFF, length & 0xFFFF)
+        with open(path, 'wb') as fh:
+            fh.write(header + data)
+        return True
+
+    def _stmt_bload(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """BLOAD file$[, offset] — read a BSAVE file into memory at its own
+        segment and offset, or at offset in the DEF SEG segment."""
+        m = re.match(r'BLOAD\s+(.+)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        parts = _top_split(m.group(1))
+        path = self._basic_path(self._file_name_value(parts[0], run_vars), 'BLOAD')
+        try:
+            raw = open(path, 'rb').read()
+        except FileNotFoundError:
+            raise RuntimeError(f"FILE NOT FOUND: {parts[0]}") from None
+        if len(raw) < 7 or raw[0] != 0xFD:
+            raise RuntimeError("BAD FILE FORMAT: not a BSAVE file")
+        seg, offset, length = struct.unpack('<HHH', raw[1:7])
+        if len(parts) > 1:
+            if self._def_seg is None:
+                raise ValueError("ILLEGAL FUNCTION CALL: BLOAD to an offset needs DEF SEG")
+            seg, offset = self._def_seg, int(self._eval_with_vars(parts[1], run_vars))
+        saved, self._def_seg = self._def_seg, seg
+        try:
+            for k, b in enumerate(raw[7:7 + length]):
+                self._segment_write(offset + k, b)
+        finally:
+            self._def_seg = saved
+        return True
+
+    def _gfx_locate(self, row: int | None, col: int | None) -> None:
+        """LOCATE on a graphics screen: move its text cursor."""
+        c = self._gfx()
+        cols, rows, _ = c.text_grid()
+        if row is not None:
+            if not 1 <= row <= rows:
+                raise ValueError(f"ILLEGAL FUNCTION CALL: LOCATE row {row} (1-{rows})")
+            self._gfx_row = row
+        if col is not None:
+            if not 1 <= col <= cols:
+                raise ValueError(f"ILLEGAL FUNCTION CALL: LOCATE column {col} (1-{cols})")
+            self._gfx_col = col
 
     def cmd_show(self, rest: str = '') -> None:
         """SHOW [columns] — draw the graphics screen in the terminal."""
@@ -807,8 +1103,18 @@ class GraphicsMixin(LanguageHost):
         m = re.match(r'\s*VIEW\b\s*(SCREEN\b)?\s*', stmt, re.IGNORECASE)
         if not m:
             return False
-        if re.match(r'\s*VIEW\s+PRINT\b', stmt, re.IGNORECASE):
-            return True                       # a text viewport: the terminal scrolls
+        vp = re.match(r'\s*VIEW\s+PRINT\b\s*(?:(.+?)\s+TO\s+(.+))?$', stmt, re.IGNORECASE)
+        if vp:
+            rows = self._canvas.text_grid()[1] if self._canvas is not None else 25
+            if vp.group(1) is None:
+                self._text_top, self._text_bottom = 1, rows
+            else:
+                top = int(self._eval_with_vars(vp.group(1), run_vars))
+                bottom = int(self._eval_with_vars(vp.group(2), run_vars))
+                if not 1 <= top <= bottom <= rows:
+                    raise ValueError(f"ILLEGAL FUNCTION CALL: VIEW PRINT {top} TO {bottom}")
+                self._text_top, self._text_bottom = top, bottom
+            return True
         c = self._gfx()
         pos = m.end()
         if not stmt[pos:].strip():
@@ -948,16 +1254,19 @@ class GraphicsMixin(LanguageHost):
 
 
 # ---------------------------------------------------------------------------
-# QUBASIC sound: PLAY's music macro language, SOUND and BEEP, gathered into a
-# waveform that SAVEWAV writes as a WAV file (nothing plays through a speaker).
+# QUBASIC sound: PLAY's music macro language, SOUND and BEEP. At an
+# interactive terminal with AUDIO ON they play through the speaker, foreground
+# music (MF, the default) holding the program until it ends as in QBASIC and
+# background music (MB) queueing behind what is playing; everywhere they are
+# also gathered into a waveform that SAVEWAV writes as a WAV file.
 #
 # PLAY follows QBASIC: notes A-G with # or + (sharp) and - (flat), N n (note
 # number 0-84, 0 a rest), O n (octave 0-6, middle C starts octave 3), < and >,
 # L n (default length 1-64), T n (tempo, quarter notes a minute, 32-255),
 # P n or R n (pause), dots (each adds half the previous value), MN, ML and
-# MS (normal, legato, staccato) and MF, MB (foreground or background, the same
-# here). SOUND frequency, duration takes the duration in clock ticks (18.2 a
-# second); frequency 32767 is silence.
+# MS (normal, legato, staccato) and MF, MB (foreground or background). SOUND
+# frequency, duration takes the duration in clock ticks (18.2 a second);
+# frequency 32767 is silence.
 # ---------------------------------------------------------------------------
 
 TICKS_PER_SECOND = 18.2
@@ -977,6 +1286,7 @@ class PlayState:
     length: int = 4
     octave: int = 4
     articulation: float = 7 / 8
+    background: bool = False             # MB: queue behind the music playing
 
 
 def parse_play(text: str, state: PlayState) -> list[tuple[float, float]]:
@@ -1069,7 +1379,9 @@ def parse_play(text: str, state: PlayState) -> list[tuple[float, float]]:
                 state.articulation = 1.0
             elif kind == 'S':
                 state.articulation = 3 / 4
-            elif kind not in ('F', 'B'):
+            elif kind in ('F', 'B'):
+                state.background = kind == 'B'
+            else:
                 raise ValueError(f"PLAY: unknown M{kind}")
         elif ch == ';':
             continue
@@ -1112,12 +1424,218 @@ def wav_bytes(samples: np.ndarray, rate: int = SAMPLE_RATE) -> bytes:
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# The keyboard, as QBASIC's INKEY$ and event traps see it: a key with a
+# character reads as that character, any other key as CHR$(0) followed by its
+# scan code. KEY(1)-KEY(10) trap F1-F10, KEY(11)-KEY(14) the up, left, right
+# and down arrows, KEY(30) and KEY(31) F11 and F12, and KEY(15)-KEY(25) the
+# keys a program defines with KEY n, CHR$(flags) + CHR$(scan code).
+# ---------------------------------------------------------------------------
+
+_SCAN = {'F1': 59, 'F2': 60, 'F3': 61, 'F4': 62, 'F5': 63, 'F6': 64, 'F7': 65, 'F8': 66,
+         'F9': 67, 'F10': 68, 'F11': 133, 'F12': 134, 'UP': 72, 'LEFT': 75, 'RIGHT': 77,
+         'DOWN': 80, 'HOME': 71, 'END': 79, 'PGUP': 73, 'PGDN': 81, 'INS': 82, 'DEL': 83}
+# The escape sequences terminals send for those keys (after ESC).
+_ESCAPES = {'[A': 'UP', '[B': 'DOWN', '[C': 'RIGHT', '[D': 'LEFT', 'OA': 'UP', 'OB': 'DOWN',
+            'OC': 'RIGHT', 'OD': 'LEFT', 'OP': 'F1', 'OQ': 'F2', 'OR': 'F3', 'OS': 'F4',
+            '[11~': 'F1', '[12~': 'F2', '[13~': 'F3', '[14~': 'F4', '[15~': 'F5', '[17~': 'F6',
+            '[18~': 'F7', '[19~': 'F8', '[20~': 'F9', '[21~': 'F10', '[23~': 'F11', '[24~': 'F12',
+            '[H': 'HOME', '[F': 'END', 'OH': 'HOME', 'OF': 'END', '[1~': 'HOME', '[4~': 'END',
+            '[5~': 'PGUP', '[6~': 'PGDN', '[2~': 'INS', '[3~': 'DEL'}
+# Scan codes of the character keys, for the keys KEY 15-25 define.
+_SCAN_CHARS = {1: '\x1b', 2: '1!', 3: '2@', 4: '3#', 5: '4$', 6: '5%', 7: '6^', 8: '7&', 9: '8*',
+               10: '9(', 11: '0)', 12: '-_', 13: '=+', 14: '\x08', 15: '\t', 16: 'qQ', 17: 'wW',
+               18: 'eE', 19: 'rR', 20: 'tT', 21: 'yY', 22: 'uU', 23: 'iI', 24: 'oO', 25: 'pP',
+               28: '\r\n', 30: 'aA', 31: 'sS', 32: 'dD', 33: 'fF', 34: 'gG', 35: 'hH', 36: 'jJ',
+               37: 'kK', 38: 'lL', 44: 'zZ', 45: 'xX', 46: 'cC', 47: 'vV', 48: 'bB', 49: 'nN',
+               50: 'mM', 57: ' '}
+
+
+def special_key(name: str) -> str:
+    """INKEY$'s two-character code for a key without a character."""
+    return '\x00' + chr(_SCAN[name])
+
+
+KEY_TRAP_KEYS = {**{n: special_key(f'F{n}') for n in range(1, 11)},
+                 11: special_key('UP'), 12: special_key('LEFT'), 13: special_key('RIGHT'),
+                 14: special_key('DOWN'), 30: special_key('F11'), 31: special_key('F12')}
+
+
+def defined_keys(code: str) -> set[str]:
+    """The keys a KEY 15-25 definition (shift flags, then a scan code) matches."""
+    if len(code) != 2:
+        raise ValueError("ILLEGAL FUNCTION CALL: KEY n, CHR$(flags) + CHR$(scan code)")
+    scan = ord(code[1])
+    keys = set(_SCAN_CHARS.get(scan, ''))
+    keys |= {'\x00' + chr(scan)}
+    return keys
+
+
+def split_keys(data: str) -> list[str]:
+    """Characters and terminal escape sequences, as INKEY$ keys."""
+    keys: list[str] = []
+    i = 0
+    by_length = sorted(_ESCAPES, key=len, reverse=True)
+    while i < len(data):
+        if data[i] == '\x1b' and i + 1 < len(data):
+            seq = next((s for s in by_length if data.startswith(s, i + 1)), None)
+            if seq is not None:
+                keys.append(special_key(_ESCAPES[seq]))
+                i += 1 + len(seq)
+                continue
+        keys.append(data[i])
+        i += 1
+    return keys
+
+
+def read_terminal_keys(wait: bool = False) -> list[str]:
+    """The keys waiting at an interactive terminal (at least one when wait is
+    set), in INKEY$'s form; none when input is not a terminal."""
+    try:
+        if not (sys.stdin and sys.stdin.isatty()):
+            return []
+        if sys.platform == 'win32':
+            import msvcrt
+            keys: list[str] = []
+            while wait or msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                keys.append('\x00' + msvcrt.getwch() if ch in ('\x00', '\xe0') else ch)
+                wait = False
+            return keys
+        import select
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            data = ''
+            while select.select([fd], [], [], None if wait and not data else 0)[0]:
+                data += os.read(fd, 64).decode('utf-8', 'replace')
+                wait = False
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return split_keys(data)
+    except (OSError, ValueError, ImportError):
+        return []
+
+
+class Speaker:
+    """Plays a waveform through the system's audio: winsound on Windows,
+    afplay, paplay or aplay elsewhere; silent when there is none."""
+
+    def __init__(self) -> None:
+        self._proc: Any = None
+        self._files: list[str] = []
+        self._player: str | None = None
+        if sys.platform != 'win32':
+            self._player = next((p for p in (shutil.which(n) for n in ('afplay', 'paplay', 'aplay')) if p), None)
+
+    def available(self) -> bool:
+        return sys.platform == 'win32' or self._player is not None
+
+    def _temp_wav(self, data: bytes) -> str:
+        import tempfile
+        for old in self._files[:-1]:
+            try:
+                os.remove(old)
+                self._files.remove(old)
+            except OSError:
+                pass
+        fd, path = tempfile.mkstemp(suffix='.wav', prefix='qubasic-')
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(data)
+        self._files.append(path)
+        return path
+
+    def play(self, samples: np.ndarray, *, wait: bool) -> bool:
+        """Play samples, waiting until they finish or not; False when no player
+        is available."""
+        if not self.available():
+            return False
+        data = wav_bytes(samples)
+        self.stop()
+        if sys.platform == 'win32':
+            import winsound
+            if wait:
+                winsound.PlaySound(data, winsound.SND_MEMORY)
+            else:
+                winsound.PlaySound(self._temp_wav(data), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            return True
+        import subprocess
+        assert self._player is not None
+        proc = subprocess.Popen([self._player, self._temp_wav(data)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if wait:
+            proc.wait()
+        else:
+            self._proc = proc
+        return True
+
+    def stop(self) -> None:
+        """Stop background playback."""
+        if self._proc is not None:
+            self._proc.terminate()
+            self._proc = None
+        elif sys.platform == 'win32':
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+
+
 class SoundMixin(LanguageHost):
-    """PLAY, SOUND and BEEP gathered for SAVEWAV."""
+    """PLAY, SOUND and BEEP: played at a terminal, gathered for SAVEWAV."""
 
     def _init_sound(self) -> None:
         self._play_state = PlayState()
         self._sound_events: list[tuple[float, float]] = []
+        self._audio = True                       # AUDIO ON | OFF
+        self._speaker = Speaker()
+        # The background music queue: (frequency, start, end) on _clock's time.
+        self._bg_queue: list[tuple[float, float, float]] = []
+        self._clock: Callable[[], float] = time.monotonic
+
+    def _audio_on(self) -> bool:
+        """Whether sound plays through the speaker: AUDIO ON, at an interactive
+        terminal, outside agent mode and the replayed shots of a live run."""
+        return (self._audio and self._on_terminal() and not self.agent_mode
+                and not getattr(self.io, 'replay', False))
+
+    def _sound_out(self, events: list[tuple[float, float]], background: bool) -> None:
+        """Queue tones behind the background music (MB), or play them now and
+        hold the program until they end (MF); off the speaker only the
+        background queue's timing is kept, for ON PLAY."""
+        if background:
+            now = self._clock()
+            self._bg_queue = [e for e in self._bg_queue if e[2] > now]
+            start = self._bg_queue[-1][2] if self._bg_queue else now
+            for freq, seconds in events:
+                self._bg_queue.append((freq, start, start + seconds))
+                start += seconds
+            if self._audio_on():
+                self._speaker.play(synthesize([(f, e - max(s, now)) for f, s, e in self._bg_queue]),
+                                   wait=False)
+            return
+        if not self._audio_on() or not events:
+            return
+        samples = synthesize(events)
+        if not self._speaker.play(samples, wait=True):
+            time.sleep(len(samples) / SAMPLE_RATE)
+
+    def _bg_remaining(self) -> int:
+        """Notes still to play in the background music queue."""
+        now = self._clock()
+        return sum(1 for freq, _, end in self._bg_queue if end > now and freq > 0)
+
+    def cmd_audio(self, rest: str = '') -> None:
+        """AUDIO [ON | OFF] — play PLAY, SOUND and BEEP through the speaker at an interactive terminal (on by default), or only gather them for SAVEWAV; no argument shows the setting."""
+        arg = rest.strip().upper()
+        if arg in ('ON', 'OFF'):
+            self._audio = arg == 'ON'
+        elif arg:
+            self.io.writeln("?USAGE: AUDIO [ON | OFF]")
+            return
+        where = '' if self._speaker.available() else ' (no audio player found)'
+        self.io.writeln(f"AUDIO {'ON' if self._audio else 'OFF'}{where}")
 
     def _sound_seconds(self) -> float:
         return sum(seconds for _, seconds in self._sound_events)
@@ -1128,11 +1646,14 @@ class SoundMixin(LanguageHost):
         if not m or not m.group(1).strip():
             return False
         if re.match(r'(ON|OFF|STOP)\s*$', m.group(1).strip(), re.IGNORECASE):
-            return True                       # PLAY ON/OFF/STOP: no music events here
+            self._set_play_trap(m.group(1).strip().upper())
+            return True
         text = self._safe_eval(m.group(1), extra_ns=run_vars)
         if not isinstance(text, str):
             raise ValueError("TYPE MISMATCH: PLAY takes a string")
-        self._sound_events.extend(parse_play(text, self._play_state))
+        events = parse_play(text, self._play_state)
+        self._sound_events.extend(events)
+        self._sound_out(events, self._play_state.background)
         return True
 
     def _stmt_sound(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
@@ -1147,11 +1668,14 @@ class SoundMixin(LanguageHost):
         ticks = float(self._eval_with_vars(parts[1], run_vars))
         if not (37 <= freq <= 32767) or not 0 <= ticks <= 65535:
             raise ValueError(f"ILLEGAL FUNCTION CALL: SOUND {freq:g}, {ticks:g}")
-        self._sound_events.append((0.0 if freq >= 32767 else freq, ticks / TICKS_PER_SECOND))
+        tone = (0.0 if freq >= 32767 else freq, ticks / TICKS_PER_SECOND)
+        self._sound_events.append(tone)
+        self._sound_out([tone], self._play_state.background)
         return True
 
     def _sound_beep(self) -> None:
         self._sound_events.append((800.0, 0.25))
+        self._sound_out([(800.0, 0.25)], False)
 
     def cmd_savewav(self, rest: str) -> None:
         """SAVEWAV <file> [CLEAR] — write the sound PLAY, SOUND and BEEP made as a
@@ -1194,6 +1718,62 @@ class ScreenMixin(LanguageHost):
         self._color_fg: str = ''
         self._color_bg: str = ''
         self._prompt: str = '] '
+        # QBASIC's 80x25 text screen, kept beside the terminal for SCREEN(),
+        # CSRLIN and the text video memory at &HB800; VIEW PRINT sets the rows
+        # that scroll.
+        self._text_screen: list[list[str]] = [[' '] * 80 for _ in range(25)]
+        self._text_attr: list[list[int]] = [[7] * 80 for _ in range(25)]
+        self._print_row = 1
+        self._text_top, self._text_bottom = 1, 25
+
+    def _text_put(self, text: str, newline: bool, col: int) -> None:
+        """Copy printed text onto the text screen from column col (counted
+        from 0) of the cursor row, wrapping at column 80 and scrolling the
+        VIEW PRINT rows."""
+        for ch in text:
+            if ch == '\n' or col >= 80:
+                self._text_newline()
+                col = 0
+                if ch == '\n':
+                    continue
+            if ch in '\r\a':
+                continue
+            self._text_screen[self._print_row - 1][col] = ch
+            col += 1
+        if newline:
+            self._text_newline()
+
+    def _text_newline(self) -> None:
+        self._print_row += 1
+        if self._print_row > self._text_bottom:
+            top, bottom = self._text_top - 1, self._text_bottom
+            self._text_screen[top:bottom] = self._text_screen[top + 1:bottom] + [[' '] * 80]
+            self._text_attr[top:bottom] = self._text_attr[top + 1:bottom] + [[7] * 80]
+            self._print_row = self._text_bottom
+
+    def _text_clear(self) -> None:
+        for r in range(self._text_top - 1, self._text_bottom):
+            self._text_screen[r] = [' '] * 80
+            self._text_attr[r] = [7] * 80
+        self._print_row = self._text_top
+
+    def _csrlin(self) -> int:
+        """CSRLIN: the cursor's row."""
+        return self._gfx_row if self._canvas is not None else self._print_row
+
+    def _screen_fn(self, row: float, col: float, colorflag: float = 0) -> int:
+        """SCREEN(row, column[, 1]): the character code at a text position,
+        or with 1 its colour attribute."""
+        r, c = int(row), int(col)
+        canvas = self._canvas
+        if canvas is not None:
+            cols, rows, _ = canvas.text_grid()
+            if not (1 <= r <= rows and 1 <= c <= cols):
+                raise ValueError(f"ILLEGAL FUNCTION CALL: SCREEN({r}, {c})")
+            return canvas.fg if colorflag else canvas.char_at(c - 1, r - 1)
+        if not (1 <= r <= 25 and 1 <= c <= 80):
+            raise ValueError(f"ILLEGAL FUNCTION CALL: SCREEN({r}, {c})")
+        return self._text_attr[r - 1][c - 1] if colorflag else ord(self._text_screen[r - 1][c - 1])
 
     _DISPLAY_NAMES = {0: 'text', 1: 'histogram', 2: 'statevector', 3: 'Bloch',
                       4: 'density', 5: 'circuit'}
@@ -1385,6 +1965,8 @@ class FileIOMixin(LanguageHost):
         self._file_dir = ''                       # CHDIR: relative to the working directory
         self._file_cols: dict[int, int] = {}      # PRINT # cursor column, per handle
         self._print_col = 0                       # screen cursor column (POS)
+        self._file_modes: dict[int, str] = {}     # OPEN mode, per handle (FILEATTR)
+        self._lprint_col = 0                      # printer column (LPOS)
 
     # ── paths and numbers ───────────────────────────────────────────────
 
@@ -1470,6 +2052,7 @@ class FileIOMixin(LanguageHost):
         else:
             self._file_handles[num] = open(path, {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a'}[mode],
                                            encoding=enc)
+        self._file_modes[num] = mode
         return num, path, mode
 
     def cmd_open(self, rest: str) -> None:
@@ -1486,10 +2069,104 @@ class FileIOMixin(LanguageHost):
         self._file_fields.pop(handle, None)
         self._file_cols.pop(handle, None)
         self._record_files.pop(handle, None)
+        self._file_modes.pop(handle, None)
         if f is None:
             return False
         f.close()
         return True
+
+    _FILE_MODE_NUMBERS = {'INPUT': 1, 'OUTPUT': 2, 'RANDOM': 4, 'APPEND': 8, 'BINARY': 32}
+
+    def _fileattr(self, handle: float, attribute: float) -> int:
+        """FILEATTR(n, 1) is file n's mode (1 INPUT, 2 OUTPUT, 4 RANDOM, 8
+        APPEND, 32 BINARY); FILEATTR(n, 2) its handle number."""
+        n = int(handle)
+        if n not in self._file_handles:
+            raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{n}")
+        if int(attribute) == 1:
+            return self._FILE_MODE_NUMBERS[self._file_modes.get(n, 'OUTPUT')]
+        if int(attribute) == 2:
+            return n + 4
+        raise ValueError(f"ILLEGAL FUNCTION CALL: FILEATTR({n}, {attribute})")
+
+    def _stmt_lock(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """LOCK | UNLOCK [#]n[, record | [start] TO end] — accepted for an open
+        file; one program holds its files alone."""
+        m = re.match(r'(?:UN)?LOCK\s+#?\s*([^,]+)', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        n = int(self._eval_with_vars(m.group(1), run_vars))
+        if n not in self._file_handles:
+            raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{n}")
+        return True
+
+    def _stmt_reset_files(self, stmt: str) -> bool:
+        """RESET with nothing after it closes every file (RESET q resets a
+        qubit)."""
+        if stmt.strip().upper() != 'RESET':
+            return False
+        for handle in list(self._file_handles):
+            self._close_file(handle)
+        return True
+
+    def _stmt_shell(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """SHELL [command$] — run a command in the system shell and print its
+        output; refused in agent mode."""
+        m = re.match(r'SHELL\b\s*(.*)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        if self.agent_mode:
+            raise RuntimeError("PERMISSION DENIED: SHELL is off in agent mode")
+        command = self._safe_eval(m.group(1), extra_ns=run_vars) if m.group(1).strip() else ''
+        if not isinstance(command, str):
+            raise ValueError("TYPE MISMATCH: SHELL takes a string")
+        if not command:
+            raise ValueError("ILLEGAL FUNCTION CALL: SHELL needs a command here")
+        import subprocess
+        done = subprocess.run(command, shell=True, capture_output=True, text=True,
+                              cwd=os.path.join(os.getcwd(), self._file_dir) if self._file_dir else None)
+        for line in (done.stdout + done.stderr).splitlines():
+            self.io.writeln(line)
+        return True
+
+    def _environ_fn(self, key: Any) -> str:
+        """ENVIRON$(name$) is that environment variable ("" when unset);
+        ENVIRON$(n) the nth NAME=value entry. Agent mode reads none."""
+        if self.agent_mode:
+            return ''
+        if isinstance(key, str):
+            return os.environ.get(key.upper(), os.environ.get(key, ''))
+        entries = [f'{k}={v}' for k, v in os.environ.items()]
+        n = int(key)
+        return entries[n - 1] if 1 <= n <= len(entries) else ''
+
+    def _stmt_environ(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
+        """ENVIRON "NAME=value" — set an environment variable for this
+        session and what it runs; refused in agent mode."""
+        m = re.match(r'ENVIRON\s+(.+)$', stmt.strip(), re.IGNORECASE)
+        if not m:
+            return False
+        if self.agent_mode:
+            raise RuntimeError("PERMISSION DENIED: ENVIRON is off in agent mode")
+        text = self._safe_eval(m.group(1), extra_ns=run_vars)
+        if not isinstance(text, str) or '=' not in text:
+            raise ValueError('ILLEGAL FUNCTION CALL: ENVIRON "NAME=value"')
+        name, value = text.split('=', 1)
+        if value:
+            os.environ[name.strip().upper()] = value
+        else:
+            os.environ.pop(name.strip().upper(), None)
+        return True
+
+    @staticmethod
+    def _erdev() -> int:
+        """ERDEV: the last device error (none occur here)."""
+        return 0
+
+    @staticmethod
+    def _erdev_str() -> str:
+        """ERDEV$: the device of the last device error."""
+        return ''
 
     def _close_list(self, text: str, run_vars: MutableMapping[str, Any]) -> list[int]:
         if not text.strip():
@@ -1938,25 +2615,28 @@ class FileIOMixin(LanguageHost):
     # ── LPRINT ──────────────────────────────────────────────────────────
 
     def _exec_lprint(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
-        """Handle LPRINT data — output to log file or stderr."""
-        m = RE_LPRINT.match(stmt)
+        """LPRINT [USING fmt$;] items — PRINT to the printer: the file the
+        printer is set to, else the screen."""
+        m = re.match(r'LPRINT\b\s*(.*)$', stmt.strip(), re.IGNORECASE)
         if not m:
             return False
         if getattr(self.io, 'replay', False):
             return True
-        data = m.group(1).strip()
-        if (data.startswith('"') and data.endswith('"')):
-            text = data[1:-1]
+        rest = m.group(1)
+        if re.match(r'USING\b', rest, re.IGNORECASE):
+            parsed = parse_stmt('PRINT ' + rest)
+            if not isinstance(parsed, PrintUsingStmt):
+                raise ValueError("SYNTAX ERROR: LPRINT USING fmt$; values")
+            text, newline = self._using_text(parsed.fmt, parsed.values, run_vars)
         else:
-            try:
-                text = str(self._eval_with_vars(data, run_vars) if run_vars else self.eval_expr(data))
-            except Exception:
-                text = data
+            text, newline = self._format_print(rest, run_vars, start=self._lprint_col)
+        out = text + ('\n' if newline else '')
         if self._lprint_path:
             with open(self._lprint_path, 'a', encoding='utf-8') as f:
-                f.write(text + '\n')
+                f.write(out)
         else:
-            self.io.writeln(text)
+            self.io.write(out)
+        self._lprint_col = 0 if newline else next_column(self._lprint_col, text)
         return True
 
     # ── the file system ─────────────────────────────────────────────────

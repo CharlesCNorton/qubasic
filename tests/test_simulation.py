@@ -578,6 +578,123 @@ class TestTrajectories(unittest.TestCase):
         np.testing.assert_allclose(noise.readout(1), [[0.9, 0.1], [0.2, 0.8]])
 
 
+class TestStabilizerTableau(unittest.TestCase):
+    """The stabilizer tableau against qiskit's statevector, and live runs on
+    it past the statevector's memory."""
+
+    def test_random_clifford_circuits_match_the_statevector(self):
+        import itertools
+
+        from qiskit.quantum_info import Pauli, Statevector, random_clifford
+        rng = np.random.default_rng(11)
+        on_tableau = {'h': 'h', 's': 's', 'sdg': 'sdg', 'x': 'pauli_x', 'y': 'pauli_y', 'z': 'pauli_z'}
+        for n in (1, 2, 3, 4):
+            for _ in range(10):
+                tab = simtools.Tableau(n)
+                sv = Statevector.from_label('0' * n)
+                for _ in range(24):
+                    kind = int(rng.integers(0, 10))
+                    a, b = (int(v) for v in rng.permutation(n)[:2]) if n > 1 else (0, 0)
+                    qc = QuantumCircuit(n)
+                    if kind < 6:
+                        gate = list(on_tableau)[kind]
+                        getattr(tab, on_tableau[gate])(a)
+                        getattr(qc, gate)(a)
+                    elif kind == 6 and n > 1:
+                        tab.cx(a, b)
+                        qc.cx(a, b)
+                    elif kind == 7 and n > 1:
+                        gate = 'cz' if rng.random() < 0.5 else 'swap'
+                        getattr(tab, gate)(a, b)
+                        getattr(qc, gate)(a, b)
+                    elif kind == 8 and n > 1:
+                        m = random_clifford(2, seed=int(rng.integers(1 << 30))).to_matrix()
+                        tab.apply_table(simtools.clifford_table(m), [a, b])
+                        qc.unitary(m, [a, b])
+                    else:
+                        qs = [int(q) for q in rng.permutation(n)[:min(n, 2)]]
+                        np.testing.assert_allclose(tab.probabilities(qs), sv.probabilities(qs), atol=1e-9)
+                        q = qs[0]
+                        p1 = sv.probabilities([q])[1]
+                        bit = 1 if p1 > 0.75 else 0 if p1 < 0.25 else int(rng.integers(0, 2))
+                        got = tab.measure(q, force=bit) if tab.is_random(q) else tab.measure(q)
+                        self.assertEqual(got, bit)
+                        proj = np.zeros((2, 2))
+                        proj[bit, bit] = 1
+                        sv = sv.evolve(proj, [q])
+                        sv = Statevector(sv.data / np.linalg.norm(sv.data))
+                        continue
+                    sv = sv.evolve(qc)
+                for label in map(''.join, itertools.product('IXYZ', repeat=n)):
+                    px = np.array([c in 'XY' for c in label[::-1]])
+                    pz = np.array([c in 'ZY' for c in label[::-1]])
+                    self.assertAlmostEqual(tab.expectation(px, pz),
+                                           sv.expectation_value(Pauli(label)).real, places=9)
+
+    def test_clifford_tables_and_pauli_channels(self):
+        from qiskit.quantum_info import Kraus
+        from qiskit_aer.noise import amplitude_damping_error, depolarizing_error, phase_damping_error
+        self.assertIsNone(simtools.clifford_table(_np_gate_matrix('T')))
+        self.assertIsNotNone(simtools.clifford_table(_np_gate_matrix('RZ', (math.pi / 2,))))
+        self.assertIsNone(simtools.clifford_table(_np_gate_matrix('RZ', (0.3,))))
+        cum, codes = simtools.pauli_mixture(Kraus(depolarizing_error(0.3, 1)).data)
+        self.assertEqual(list(codes), [0, 1, 2, 3])
+        np.testing.assert_allclose(np.diff(cum, prepend=0), [0.775, 0.075, 0.075, 0.075])
+        _, codes = simtools.pauli_mixture(Kraus(phase_damping_error(0.4)).data)
+        self.assertEqual(list(codes), [0, 2])                                  # dephasing: I and Z
+        self.assertIsNone(simtools.pauli_mixture(Kraus(amplitude_damping_error(0.4)).data))
+
+    def test_a_wide_clifford_program_runs_live(self):
+        t = term(60, seed=5, shots=40)
+        out = feed(t, '10 H 0', '20 FOR i = 0 TO 58: CX i, i + 1: NEXT i', '30 MEAS 0 -> m',
+                   '40 PRINT "m ="; m', '50 MEAS 59 -> k', '60 IF k <> m THEN PRINT "broken"', '70 MEASURE',
+                   'RUN')
+        self.assertIn('stabilizer tableau', out)
+        self.assertNotIn('broken', out)
+        self.assertEqual(set(t.last_counts), {'0' * 60, '1' * 60})
+        self.assertEqual(t.result()['counts'], t.last_counts)
+        out = feed(t, '20 T 0', 'RUN')
+        self.assertIn('T is not a Clifford gate', out)
+        self.assertIn('60-qubit statevector needs', out)
+
+    def test_method_stabilizer_agrees_with_the_statevector(self):
+        prog = ['10 X 0', '15 H 0', '20 H 1', '30 CX 1, 2', '40 CX 0, 1', '50 H 0', '60 MEAS 0 -> a', '70 MEAS 1 -> b',
+                '80 IF b = 1 THEN X 2', '90 IF a = 1 THEN Z 2', '100 PRINT a + b', '110 H 2', '120 MEASURE 2']
+        for method in ('automatic', 'stabilizer'):
+            t = term(3, seed=2, shots=30)
+            out = feed(t, f'METHOD {method}', *prog, 'RUN')
+            self.assertEqual(t.last_counts, {'1': 30})                         # |-> teleported, then H
+        self.assertIn('stabilizer tableau', out)
+
+    def test_saved_values_and_state_on_the_tableau(self):
+        t = term(40, seed=1, shots=20)
+        out = feed(t, '10 H 0', '20 CX 0, 1', '30 SAVE_EXPECT ZZ 0, 1 -> zz', '40 SAVE_EXPECT XX 0, 1 -> xx',
+                   '50 SAVE_EXPECT Z 0 -> z', '60 SAVE_PROBS 0, 1 -> p', '70 SAVE_AMPS 0 -> a', '80 MEAS 0 -> m',
+                   '90 PRINT m', '100 MEASURE 0, 1', 'RUN')
+        self.assertIn('SAVE_AMPS reads amplitudes', out)
+        self.assertEqual((t.variables['zz'], t.variables['xx'], t.variables['z']), (1.0, 1.0, 0.0))
+        np.testing.assert_allclose(t.arrays['p'], [0.5, 0, 0, 0.5])
+        self.assertEqual(set(t.last_counts), {'00', '11'})
+        t2 = term(40, seed=1, shots=10)
+        out = feed(t2, '10 H 0', '20 CX 0, 1', '30 MEAS 2 -> m', '40 PRINT m', '50 MEASURE 0, 1', 'RUN',
+                   'STATE', 'BLOCH 2', 'BLOCH 0', 'PROBS')
+        self.assertIn('+' + '_' * 38 + 'XX', out)
+        self.assertIn('+' + '_' * 38 + 'ZZ', out)
+        self.assertIn('Qubit 2  (0.000, 0.000, 1.000)', out)
+        self.assertIn('Qubit 0  (0.000, 0.000, 0.000)  maximally mixed', out)
+        self.assertIn('?PROBS reads a statevector', out)
+        feed(t2, 'OPTION ENDIAN BIG')
+        self.assertIn('+XX' + '_' * 38, feed(t2, 'STATE'))
+
+    def test_pauli_noise_runs_on_the_tableau(self):
+        t = term(40, seed=3, shots=400)
+        feed(t, 'NOISE depolarizing 0.3', '10 X 0', '20 MEAS 0 -> m', '30 PRINT m;', '40 MEASURE 0', 'RUN')
+        self.assertAlmostEqual(p_one(t), 0.85, delta=0.06)                   # X flips back with p/2
+        t2 = term(40, seed=3, shots=10)
+        out = feed(t2, 'NOISE amplitude_damping 0.5', '10 X 0', '20 MEAS 0 -> m', '30 PRINT m', 'RUN')
+        self.assertIn('the noise on X is not a Pauli channel', out)
+
+
 class TestInputAcrossShots(unittest.TestCase):
 
     def test_first_shot_reads_and_later_shots_replay(self):

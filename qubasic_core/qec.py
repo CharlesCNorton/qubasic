@@ -9,7 +9,7 @@ import heapq
 import itertools
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -489,8 +489,8 @@ class CodesMixin(ApplicationsHost):
             self.io.writeln("    SHOR        [[9,1,3]] code")
             self.io.writeln("    SURFACE [d] rotated surface code, odd distance d (default 3)")
             self.io.writeln("    BB [l m]    bivariate-bicycle qLDPC (6 6 -> [[72,12,6]], 12 6 -> [[144,12,12]])")
-            self.io.writeln("  Decoders: minimum-weight lookup (LOOKUP), exact matching (MATCH, alias UF),")
-            self.io.writeln("            pymatching (MWPM), BP+OSD (BP, BB codes)")
+            self.io.writeln("  Decoders: minimum-weight lookup (LOOKUP), exact matching (MATCH),")
+            self.io.writeln("            union-find (UF), pymatching (MWPM), BP+OSD (BP, BB codes)")
             self.io.writeln("  Noise:    code capacity (default), PHENOM (space-time memory),")
             self.io.writeln("            CIRCUIT (stim circuit-level); LATTICE RATE for surgery")
             return
@@ -640,6 +640,114 @@ def _osd0(H: np.ndarray, syndrome: np.ndarray, Lq: np.ndarray) -> np.ndarray:
     return e
 
 
+# ---------------------------------------------------------------------------
+# Union-find decoding (Delfosse and Nickerson, Quantum 5, 595 (2021)).
+#
+# On a decoding graph whose vertices are detectors plus one boundary vertex
+# and whose edges are error mechanisms, each defect starts a cluster. Every
+# odd cluster (an odd number of defects and no boundary vertex) grows one
+# unit along each edge leaving it per round; an edge whose growth reaches its
+# length joins the clusters at its ends. When no odd cluster is left, the
+# peeling decoder picks a correction inside the grown edges: a spanning
+# forest, rooted at the boundary wherever the boundary was reached, is taken
+# apart from the leaves, each defect taking the edge to its parent and
+# handing its defect up. Unweighted graphs give every edge length 2 (growth
+# in half edges); a weighted graph scales its log-likelihood weights so the
+# lightest edge has length 16, fine enough that growth follows the weights.
+# ---------------------------------------------------------------------------
+
+def union_find(n_vertices: int, edges: Sequence[tuple[int, int]], lengths: Sequence[int],
+               defects: Iterable[int], boundary: int | None = None) -> list[int]:
+    """The indices of edges forming a correction for `defects` (the
+    boundary vertex, when given, absorbs any parity), by union-find cluster
+    growth and peeling."""
+    from collections import deque
+    incident: list[list[int]] = [[] for _ in range(n_vertices)]
+    for e, (u, v) in enumerate(edges):
+        incident[u].append(e)
+        incident[v].append(e)
+    parent = list(range(n_vertices))
+    members = [[v] for v in range(n_vertices)]
+    parity = [0] * n_vertices
+    touches = [False] * n_vertices
+    if boundary is not None:
+        touches[boundary] = True
+    marked = sorted({int(d) for d in defects})
+    for d in marked:
+        parity[d] = 1
+
+    def find(v: int) -> int:
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
+
+    def odd_clusters() -> set[int]:
+        return {r for r in map(find, marked) if parity[r] and not touches[r]}
+
+    growth = [0] * len(edges)
+    grown = [False] * len(edges)
+    active = odd_clusters()
+    while active:
+        joined: list[int] = []
+        grew = False
+        for root in active:
+            for v in members[root]:
+                for e in incident[v]:
+                    if not grown[e]:
+                        grew = True
+                        growth[e] += 1
+                        if growth[e] >= lengths[e]:
+                            grown[e] = True
+                            joined.append(e)
+        if not grew:
+            raise ValueError("no correction: an odd cluster has nowhere to grow")
+        for e in joined:
+            a, b = find(edges[e][0]), find(edges[e][1])
+            if a != b:
+                if len(members[a]) < len(members[b]):
+                    a, b = b, a
+                parent[b] = a
+                members[a].extend(members[b])
+                members[b] = []
+                parity[a] ^= parity[b]
+                touches[a] = touches[a] or touches[b]
+        active = odd_clusters()
+    adj: list[list[tuple[int, int]]] = [[] for _ in range(n_vertices)]
+    for e, (u, v) in enumerate(edges):
+        if grown[e]:
+            adj[u].append((v, e))
+            adj[v].append((u, e))
+    seen = [False] * n_vertices
+    via = [-1] * n_vertices
+    order: list[int] = []
+    for root in ([boundary] if boundary is not None else []) + marked:
+        if seen[root]:
+            continue
+        seen[root] = True
+        queue = deque([root])
+        while queue:
+            u = queue.popleft()
+            order.append(u)
+            for v, e in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    via[v] = e
+                    queue.append(v)
+    state = [False] * n_vertices
+    for d in marked:
+        state[d] = True
+    correction = []
+    for v in reversed(order):
+        if via[v] >= 0 and state[v]:
+            e = via[v]
+            correction.append(e)
+            u = edges[e][0] if edges[e][1] == v else edges[e][1]
+            state[u] = not state[u]
+            state[v] = False
+    return correction
+
+
 class DecodingMixin(ApplicationsHost):
     """Decoder choice and syndrome decoding for code-capacity experiments."""
 
@@ -648,11 +756,11 @@ class DecodingMixin(ApplicationsHost):
     LOOKUP_MAX_SYNDROMES = 1 << 16
 
     _DECODER_LABEL = {'lookup': 'lookup decoder', 'match': 'blossom matching decoder',
-                      'pymatching': 'pymatching MWPM decoder'}
+                      'uf': 'union-find decoder', 'pymatching': 'pymatching MWPM decoder'}
 
     # Decoder flags accepted by LOGICAL_ERROR_RATE and THRESHOLD.
     _DECODER_FLAGS = {'LOOKUP': 'lookup', 'MATCH': 'match', 'MATCHING': 'match',
-                      'UF': 'match', 'UNION-FIND': 'match', 'MWPM': 'pymatching',
+                      'UF': 'uf', 'UNION-FIND': 'uf', 'MWPM': 'pymatching',
                       'BP': 'bp'}
 
     def _lookup_feasible(self, code: dict) -> bool:
@@ -712,8 +820,9 @@ class DecodingMixin(ApplicationsHost):
 
     def _match_graph(self, code: dict) -> list:
         """Per error type, the detector graph of a matchable CSS code: the
-        detectors, and shortest-path lengths and qubit paths between every
-        pair of detectors and from each detector to the boundary. Cached."""
+        detectors, its edges (detector, detector or boundary, qubit), and
+        shortest-path lengths and qubit paths between every pair of detectors
+        and from each detector to the boundary. Cached."""
         if '_match' in code:
             return code['_match']
         from collections import deque
@@ -726,6 +835,7 @@ class DecodingMixin(ApplicationsHost):
             pos = {d: k for k, d in enumerate(det)}
             B = len(det)
             adj: list[list] = [[] for _ in range(B + 1)]
+            edges: list[tuple[int, int, int]] = []
             for q in range(n):
                 touch = [pos[i] for i in det if stabs[i][q] == dtype]
                 if len(touch) > 2:
@@ -733,9 +843,11 @@ class DecodingMixin(ApplicationsHost):
                 if len(touch) == 2:
                     adj[touch[0]].append((touch[1], q))
                     adj[touch[1]].append((touch[0], q))
+                    edges.append((touch[0], touch[1], q))
                 elif len(touch) == 1:
                     adj[touch[0]].append((B, q))
                     adj[B].append((touch[0], q))
+                    edges.append((touch[0], B, q))
             dist = np.full((B + 1, B + 1), -1, dtype=np.int64)
             paths: dict = {}
             for src in range(B):
@@ -757,7 +869,8 @@ class DecodingMixin(ApplicationsHost):
                         qs.append(q)
                     dist[src, tgt] = len(qs)
                     paths[(src, tgt)] = qs
-            graphs.append({'etype': etype, 'det': det, 'dist': dist, 'paths': paths, 'B': B})
+            graphs.append({'etype': etype, 'det': det, 'dist': dist, 'paths': paths, 'B': B,
+                           'edges': edges})
         code['_match'] = graphs
         return graphs
 
@@ -800,6 +913,23 @@ class DecodingMixin(ApplicationsHost):
                     target[q] ^= 1
         return rx_v, rz_v
 
+    def _uf_recovery(self, code: dict, synd_bits: Sequence[int] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(rx, rz) recovery from the union-find decoder on each error type's
+        detector graph, every qubit an edge of length 2."""
+        n = code['n']
+        rx_v = np.zeros(n, dtype=np.uint8)
+        rz_v = np.zeros(n, dtype=np.uint8)
+        for g in self._match_graph(code):
+            defects = [k for k, i in enumerate(g['det']) if synd_bits[i]]
+            if not defects:
+                continue
+            edges = g['edges']
+            target = rx_v if g['etype'] == 'X' else rz_v
+            for e in union_find(g['B'] + 1, [(u, v) for u, v, _ in edges], [2] * len(edges),
+                                defects, boundary=g['B']):
+                target[edges[e][2]] ^= 1
+        return rx_v, rz_v
+
     def _qec_matching_decode(self, code: dict, syndrome: Sequence[int]) -> str:
         """Matching decoder on one syndrome; returns the recovery Pauli string."""
         rxv, rzv = self._match_recovery(code, list(syndrome))
@@ -814,8 +944,9 @@ class DecodingMixin(ApplicationsHost):
             return False
 
     def _choose_decoder(self, code: dict, requested: str | None = None) -> str:
-        """'lookup', 'match' or 'pymatching' for a string code: the requested
-        one when it applies, else lookup while feasible, else matching."""
+        """'lookup', 'match', 'uf' or 'pymatching' for a string code: the
+        requested one when it applies, else lookup while feasible, else
+        matching."""
         if requested in ('lookup',) and self._lookup_feasible(code):
             return 'lookup'
         if requested == 'pymatching':
@@ -824,11 +955,11 @@ class DecodingMixin(ApplicationsHost):
                 return 'pymatching'
             except ImportError:
                 requested = 'match'
-        if requested == 'match':
+        if requested in ('match', 'uf'):
             if not self._matchable(code):
                 raise ValueError(f"{code['name']} is not matchable (each qubit must be in "
                                  f"at most two checks of a type); use LOOKUP or BP")
-            return 'match'
+            return requested
         if requested == 'lookup':
             raise ValueError(f"{code['name']}: lookup table would need "
                              f"2^{self._qec_binary(code)['rank']} syndromes; use MATCH")
@@ -846,8 +977,8 @@ class DecodingMixin(ApplicationsHost):
                  + ez.astype(np.int64) @ b['Sx'].T.astype(np.int64)) & 1).astype(np.uint8)
 
     def _decode_batch(self, code: dict, synd: np.ndarray, decoder: str) -> tuple[np.ndarray, np.ndarray]:
-        """(X recovery, Z recovery) for each syndrome row, by the lookup table
-        or by matching; each distinct syndrome is decoded once."""
+        """(X recovery, Z recovery) for each syndrome row, by the lookup table,
+        matching or union-find; each distinct syndrome is decoded once."""
         n = code['n']
         keys, inverse = np.unique(np.packbits(synd, axis=1, bitorder='little'),
                                   axis=0, return_inverse=True)
@@ -865,6 +996,8 @@ class DecodingMixin(ApplicationsHost):
                 xm, zm = table.get(s_val, (0, 0))
                 rec_x[k] = [(xm >> q) & 1 for q in range(n)]
                 rec_z[k] = [(zm >> q) & 1 for q in range(n)]
+            elif decoder == 'uf':
+                rec_x[k], rec_z[k] = self._uf_recovery(code, bits)
             else:
                 rec_x[k], rec_z[k] = self._match_recovery(code, bits)
         return rec_x[inverse], rec_z[inverse]
@@ -912,6 +1045,7 @@ class DetectorModel:
         # detectors (the graph holds their one- and two-detector parts).
         self.events: list[tuple[float, tuple[int, ...], int]] = []
         self._graph: Any = None
+        self._uf: Any = None
 
     def add(self, p: float, dets: Sequence[int], obs_mask: int = 0) -> None:
         """A mechanism of probability p flipping `dets` and the observables in obs_mask."""
@@ -924,6 +1058,7 @@ class DetectorModel:
         self.dets.append(dets)
         self.obs.append(int(obs_mask))
         self._graph = None
+        self._uf = None
 
     def add_event(self, p: float, dets: Sequence[int], obs_mask: int = 0) -> None:
         """A mechanism sampling draws (it may flip any number of detectors)."""
@@ -1027,9 +1162,41 @@ class DetectorModel:
             mask ^= int(par[defects[u], B if v >= k else defects[v]])
         return mask
 
-    def logical_failure_rate(self, shots: int, rng: Any) -> tuple[float, np.ndarray]:
+    def _uf_graph(self) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+        """The decoding graph for union-find: one edge per detector pair (the
+        likeliest mechanism), its integer length and its observable mask."""
+        if self._uf is not None:
+            return self._uf
+        B = self.n_det
+        best: dict[tuple[int, int], tuple[float, int]] = {}
+        for p, ds, o in zip(self.probs, self.dets, self.obs):
+            if not ds:
+                continue
+            key = (ds[0], B) if len(ds) == 1 else (ds[0], ds[1])
+            w = math.log((1 - p) / p) if p < 0.5 else 0.0
+            if key not in best or w < best[key][0]:
+                best[key] = (w, o)
+        keys = list(best)
+        positive = [w for w, _ in best.values() if w > 0]
+        unit = min(positive) / 16 if positive else 1.0
+        self._uf = (keys, [max(1, round(best[k][0] / unit)) for k in keys], [best[k][1] for k in keys])
+        return self._uf
+
+    def decode_uf(self, fired: np.ndarray) -> int:
+        """Observable mask predicted for one detector pattern by union-find."""
+        defects = [int(i) for i in np.flatnonzero(fired)]
+        if not defects:
+            return 0
+        edges, lengths, masks = self._uf_graph()
+        mask = 0
+        for e in union_find(self.n_det + 1, edges, lengths, defects, boundary=self.n_det):
+            mask ^= masks[e]
+        return mask
+
+    def logical_failure_rate(self, shots: int, rng: Any, decoder: str = 'match') -> tuple[float, np.ndarray]:
         """(rate of shots where any observable is mispredicted, per-observable
-        failure rates)."""
+        failure rates), decoding by matching or, for 'uf', union-find."""
+        decode = self.decode_uf if decoder == 'uf' else self.decode
         det, obs = self.sample(shots, rng)
         keys, inverse = np.unique(np.packbits(det, axis=1, bitorder='little'),
                                   axis=0, return_inverse=True)
@@ -1037,7 +1204,7 @@ class DetectorModel:
         pred = np.zeros((len(keys), self.n_obs), dtype=np.uint8)
         for i, packed in enumerate(keys):
             bits = np.unpackbits(packed, bitorder='little')[:self.n_det]
-            mask = self.decode(bits)
+            mask = decode(bits)
             for j in range(self.n_obs):
                 pred[i, j] = (mask >> j) & 1
         wrong = pred[inverse] ^ obs
@@ -1373,7 +1540,7 @@ class RatesMixin(ApplicationsHost):
         """Code-capacity Monte Carlo: i.i.d. errors (X for a bit-flip code,
         depolarizing otherwise), decode, count residual logical errors.
         Vectorized over trials; each distinct syndrome is decoded once."""
-        decoder = self._choose_decoder(code, 'match' if uf else decoder)
+        decoder = self._choose_decoder(code, 'uf' if uf else decoder)
         if decoder == 'pymatching':
             return self._qec_mwpm_rate(code, p, trials, rng)
         b = self._qec_binary(code)
@@ -1397,14 +1564,15 @@ class RatesMixin(ApplicationsHost):
         return float(np.mean(fail))
 
     def cmd_logical_error_rate(self, rest: str) -> None:
-        """LOGICAL_ERROR_RATE <code> [distance] <p> [trials] [LOOKUP|MATCH|MWPM|BP|CIRCUIT [STIM]|PHENOM] — logical error rate under code-capacity, phenomenological or circuit-level noise.
+        """LOGICAL_ERROR_RATE <code> [distance] <p> [trials] [LOOKUP|MATCH|UF|MWPM|BP|CIRCUIT [STIM]|PHENOM] — logical error rate under code-capacity, phenomenological or circuit-level noise.
 
         Code-capacity Monte Carlo (i.i.d. physical errors, decode, count
         residual logical errors), vectorized over trials. The decoder defaults
         to the minimum-weight lookup table while the code's syndrome space
         allows it and to exact minimum-weight matching (blossom) beyond;
-        MATCH (alias UF) forces matching, MWPM uses pymatching when installed,
-        BP the internal BP+OSD. CIRCUIT switches to circuit-level noise: a
+        MATCH forces matching, UF the union-find decoder (also under PHENOM
+        and CIRCUIT), MWPM pymatching when installed and BP the internal
+        BP+OSD. CIRCUIT switches to circuit-level noise: a
         memory experiment of d rounds of syndrome extraction (MemoryCircuit),
         its detector error model found by propagating every fault through the
         circuit, decoded by space-time matching (the trailing counts are shots,
@@ -1417,7 +1585,7 @@ class RatesMixin(ApplicationsHost):
         parts = rest.split()
         if len(parts) < 2:
             self.io.writeln("?USAGE: LOGICAL_ERROR_RATE <code> [distance] <p> [trials] "
-                            "[LOOKUP|MATCH|MWPM|BP|CIRCUIT|PHENOM]")
+                            "[LOOKUP|MATCH|UF|MWPM|BP|CIRCUIT|PHENOM]")
             return
         try:
             name = parts[0]
@@ -1462,12 +1630,12 @@ class RatesMixin(ApplicationsHost):
                 if stim:
                     self._qec_circuit_level(name, distance, p, shots, rounds)
                 else:
-                    self._qec_circuit_model(name, distance, p, shots, rounds)
+                    self._qec_circuit_model(name, distance, p, shots, rounds, decoder)
                 return
             if 'PHENOM' in other:
                 shots = int(tail[1]) if len(tail) > 1 else 10000
                 rounds = int(tail[2]) if len(tail) > 2 else None
-                self._qec_phenomenological(name, distance, p, shots, rounds)
+                self._qec_phenomenological(name, distance, p, shots, rounds, decoder)
                 return
             trials = int(tail[1]) if len(tail) > 1 else 20000
             code = self._qec_code(name, distance)
@@ -1482,7 +1650,7 @@ class RatesMixin(ApplicationsHost):
             self.io.writeln(f"?LOGICAL_ERROR_RATE ERROR: {e}")
 
     def cmd_threshold(self, rest: str) -> None:
-        """THRESHOLD <code> <p1> <p2> <steps> [d1 d2 ...] [TRIALS n] [LOOKUP|MATCH|MWPM|BP|PHENOM|CIRCUIT] — logical error rate against p for several distances, and the threshold where they cross.
+        """THRESHOLD <code> <p1> <p2> <steps> [d1 d2 ...] [TRIALS n] [LOOKUP|MATCH|UF|MWPM|BP|PHENOM|CIRCUIT] — logical error rate against p for several distances, and the threshold where they cross.
 
         Reports the logical error rate (with a one-sigma interval) across
         [p1, p2] for several code distances (default 3, 5, 7) and estimates the
@@ -1494,7 +1662,7 @@ class RatesMixin(ApplicationsHost):
         parts = rest.split()
         if len(parts) < 4:
             self.io.writeln("?USAGE: THRESHOLD <code> <p1> <p2> <steps> [distances] "
-                            "[TRIALS n] [LOOKUP|MATCH|MWPM|BP|PHENOM|CIRCUIT]")
+                            "[TRIALS n] [LOOKUP|MATCH|UF|MWPM|BP|PHENOM|CIRCUIT]")
             return
         try:
             parts, decoder, other = self._split_decoder_flags(parts)
@@ -1514,6 +1682,8 @@ class RatesMixin(ApplicationsHost):
             labels: list[str] = []
             rate_fns = []
             shown: list[int] = []
+            spacetime = 'uf' if decoder == 'uf' else 'match'
+            spacetime_label = 'union-find' if decoder == 'uf' else 'matching'
             for d in distances:
                 if mode == 'capacity':
                     c = self._qec_code(name, d)
@@ -1525,15 +1695,15 @@ class RatesMixin(ApplicationsHost):
                 elif mode == 'phenom':
                     c = self._qec_code(name, d)
                     shown.append(c['d'])
-                    labels.append('matching')
+                    labels.append(spacetime_label)
                     rate_fns.append(lambda p, c=c: self._phenomenological_model(c, p, c['d'])
-                                    .logical_failure_rate(trials, rng)[0])
+                                    .logical_failure_rate(trials, rng, spacetime)[0])
                 else:
                     circ = memory_circuit(name, d, d)
                     shown.append(d)
-                    labels.append('matching')
+                    labels.append(spacetime_label)
                     rate_fns.append(lambda p, circ=circ: detector_model(circ, p)[0]
-                                    .logical_failure_rate(trials, rng)[0])
+                                    .logical_failure_rate(trials, rng, spacetime)[0])
             what = {'capacity': 'code capacity', 'phenom': 'phenomenological, d rounds',
                     'circuit': 'circuit level, d rounds'}[mode]
             self.io.writeln(f"\n  Threshold sweep ({name.upper()}, {what}), {trials} trials/point:")
@@ -1633,20 +1803,23 @@ class RatesMixin(ApplicationsHost):
         'SURF': 'surface_code:rotated_memory_z',
     }
 
-    def _qec_circuit_model(self, name: str, d: int, p: float,
-                           shots: int, rounds: int | None) -> None:
-        """A circuit-level memory experiment on the built-in model (no stim)."""
+    def _qec_circuit_model(self, name: str, d: int, p: float, shots: int, rounds: int | None,
+                           decoder: str | None = None) -> None:
+        """A circuit-level memory experiment on the built-in model (no stim),
+        decoded by space-time matching or, with UF, union-find."""
         rounds = rounds or d
         circ = memory_circuit(name, d, rounds)
         t0 = time.time()
         model, unsplit = detector_model(circ, p)
-        per_shot, _ = model.logical_failure_rate(shots, np.random.default_rng(self._seed))
+        spacetime = 'uf' if decoder == 'uf' else 'match'
+        per_shot, _ = model.logical_failure_rate(shots, np.random.default_rng(self._seed), spacetime)
         dt = time.time() - t0
         per_round = 1.0 - (1.0 - per_shot) ** (1.0 / rounds) if per_shot < 1.0 else 1.0
         self.io.writeln(f"\n  {circ.label}: CIRCUIT-level noise p={p}, {rounds} rounds, {shots:,} shots")
         note = f", {unsplit} unsplit faults left out" if unsplit else ''
         self.io.writeln(f"  physical qubits = {circ.n_qubits}  detectors = {model.n_det}  "
-                        f"fault mechanisms = {len(model.events)}{note}  (space-time matching)")
+                        f"fault mechanisms = {len(model.events)}{note}  "
+                        f"(space-time {'union-find' if spacetime == 'uf' else 'matching'})")
         self.io.writeln(f"  Logical error rate = {per_shot:.3e} per shot   {per_round:.3e} per round")
         self.io.writeln(f"  ({dt:.2f}s)")
         self.variables['_LER'] = per_shot
@@ -1726,17 +1899,19 @@ class RatesMixin(ApplicationsHost):
         return model
 
     def _qec_phenomenological(self, name: str, d: int, p: float, shots: int,
-                              rounds: int | None) -> None:
+                              rounds: int | None, decoder: str | None = None) -> None:
         code = self._qec_code(name, d)
         rounds = rounds or code['d']
         model = self._phenomenological_model(code, p, rounds)
         rng = np.random.default_rng(self._seed)
         t0 = time.time()
-        rate, _ = model.logical_failure_rate(shots, rng)
+        spacetime = 'uf' if decoder == 'uf' else 'match'
+        rate, _ = model.logical_failure_rate(shots, rng, spacetime)
         dt = time.time() - t0
         per_round = 1.0 - (1.0 - rate) ** (1.0 / rounds) if rate < 1.0 else 1.0
+        method = 'union-find' if spacetime == 'uf' else 'matching'
         self.io.writeln(f"\n  {code['name']}: phenomenological noise p={p}, {rounds} rounds, "
-                        f"{shots:,} shots ({model.n_det} detectors, space-time matching, {dt:.1f}s)")
+                        f"{shots:,} shots ({model.n_det} detectors, space-time {method}, {dt:.1f}s)")
         self.io.writeln(f"  Logical error rate = {rate:.3e} per shot   {per_round:.3e} per round")
         self.variables['_LER'] = rate
         self.variables['_LER_ROUND'] = per_round
