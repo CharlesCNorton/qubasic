@@ -301,8 +301,9 @@ class TestJupyterKernel(unittest.TestCase):
         text = kernel.sent[-1][1]['text']
         self.assertIn('|00', text)
         self.assertEqual(set(kernel.term.last_counts), {'00', '11'})
+        sent = len(kernel.sent)
         kernel.do_execute('PRINT 6 * 7', silent=True)
-        self.assertNotIn('42', kernel.sent[-1][1]['text'])
+        self.assertEqual(len(kernel.sent), sent)
 
     def test_input_goes_through_the_notebook(self):
         kernel = self.jk._make_kernel_class()()

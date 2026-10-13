@@ -1511,8 +1511,9 @@ class TestPrintAndCompounds(unittest.TestCase):
         t.variables['S'] = 99.0
         t.process('10 PRINT "value of S here"', track_undo=False)
         _, out = capture(t.cmd_run)
-        self.assertIn('value of S here', out)
-        self.assertNotIn('99', out)
+        printed = out.split('RAN ')[0]
+        self.assertIn('value of S here', printed)
+        self.assertNotIn('99', printed)
 
     def test_print_preserves_commas_in_quotes_and_calls(self):
         """Top-level split skips commas inside quotes and inside call parens."""
