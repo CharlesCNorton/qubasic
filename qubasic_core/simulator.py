@@ -49,6 +49,13 @@ def _has_channel(qc: QuantumCircuit) -> bool:
     return any(inst.operation.name in ('kraus', 'superop', 'quantum_channel')
                for inst in qc.data)
 
+
+def _expectation(val: Any) -> float:
+    """An expectation value as a float, with rounding residue under 1e-12 read as 0."""
+    v = float(np.real(val))
+    return 0.0 if abs(v) < 1e-12 else v
+
+
 def _circuit_fingerprint(qc: QuantumCircuit) -> str:
     """Stable digest of a circuit's registers and instructions.
 
@@ -314,7 +321,7 @@ class RunPipelineMixin(HostState):
         data = result.data()
         for key, val in data.items():
             if key.startswith('exp_'):
-                self.variables[key[4:]] = float(np.real(val))
+                self.variables[key[4:]] = _expectation(val)
             elif key.startswith('prob_'):
                 var = key[5:]
                 self.variables[var] = val
@@ -2424,5 +2431,5 @@ class LiveMixin(HostState):
                 if kind == 'prob':
                     self.arrays[var] = list(np.asarray(val, dtype=float))
                 else:
-                    val = float(val)
+                    val = _expectation(val)
             self.variables[var] = val

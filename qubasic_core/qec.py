@@ -1256,8 +1256,8 @@ def fault_effects(circ: MemoryCircuit, p: float) -> tuple[np.ndarray, np.ndarray
                 Z[f, q] ^= bool(z)
     D = np.zeros((nf, len(circ.detectors)), dtype=bool)
     for k, ms in enumerate(circ.detectors):
-        D[:, k] = np.logical_xor.reduce(meas[:, ms], axis=1)
-    L = np.logical_xor.reduce(meas[:, circ.observable], axis=1)
+        D[:, k] = np.count_nonzero(meas[:, ms], axis=1) % 2 == 1
+    L = np.count_nonzero(meas[:, circ.observable], axis=1) % 2 == 1
     return np.array(probs), D, L
 
 
