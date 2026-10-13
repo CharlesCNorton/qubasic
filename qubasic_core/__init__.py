@@ -44,7 +44,7 @@ __all__ = [
     'run', 'Session',
 ]
 
-__version__ = '0.31.1'
+__version__ = '0.32.0'
 
 def __getattr__(name: str) -> Any:
     """Lazy import heavy modules on first access."""
