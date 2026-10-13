@@ -543,9 +543,10 @@ class ResourceMixin(ApplicationsHost):
     def cmd_device(self, rest: str) -> None:
         """DEVICE <topology> [n] [T1us] [T2us] | DEVICE IBM <device> | DEVICE OFF — load a device model.
 
-        Builds a NoiseModel with per-qubit thermal relaxation (T1/T2 and gate
-        times) and a coupling map for the chosen topology (linear, ring, heavyhex,
-        all), so RUN simulates a realistic hardware device with no network.
+        Builds a NoiseModel with per-qubit thermal relaxation (T1/T2 over gate
+        times and DELAY idle time) and a coupling map for the chosen topology
+        (linear, ring, heavyhex, all), so RUN simulates a realistic hardware
+        device with no network.
         DEVICE IBM <device> builds Aer's noise model from a real IBM device's
         current calibration (its T1, T2, gate and readout errors) and routes on
         its coupling map, through the saved Qiskit Runtime account. DEVICE OFF
@@ -625,7 +626,14 @@ class ResourceMixin(ApplicationsHost):
             edges = []
             for a, b in cm:
                 edges += [[a, b], [b, a]]
+            # Idle qubits relax over each DELAY, through the noise pass Aer's
+            # own device models attach.
+            from qiskit.circuit import Delay
+            from qiskit_aer.noise import RelaxationNoisePass
+            width = max(n, self.num_qubits)
+            nm._custom_noise_passes.append(RelaxationNoisePass([t1] * width, [t2] * width, op_types=Delay))
             self.noise.model = nm
+            self._device_target = None
             self._coupling_map = edges if topo not in ('all', 'full') else None
             self.noise.spec = None
             self._device_spec = f"{topo} {n} {t1 * 1e6:g} {t2 * 1e6:g}"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -157,11 +158,137 @@ def _lindblad(nm: NoiseModel, params: list[str]) -> str:
     return "lindblad " + ' '.join(terms)
 
 
+# ---------------------------------------------------------------------------
+# Defects (NOISE DEFECT): a two-level fluctuator on one qubit. While the
+# defect is excited the qubit's frequency is higher by `khz`; the defect
+# switches with time constant `tau_us` and is excited a fraction `p` of the
+# time, so a Ramsey experiment beats and an echo undoes what the defect did
+# unless it switched in between, which no Markov channel reproduces.
+#
+# A run carries each defect as one extra qubit after the circuit's own. It
+# starts excited with probability p, and every DELAY of its qubit applies the
+# exact joint channel of the qubit and the defect over that time: the
+# defect's state is classical (its coherences are dropped), its populations
+# follow the switching rates, and the qubit's coherence takes the telegraph
+# characteristic function exp((Q + i Omega) t) between defect states, so the
+# defect keeps its state from one DELAY to the next. Before transpiling, a
+# labelled one-qubit barrier marks each DELAY of a defect's qubit; it moves
+# with the qubit through layout and routing, and is replaced by the channel
+# afterwards. Relaxation during the DELAY commutes with the defect's phase,
+# so applying the channel after the delay is exact.
+# ---------------------------------------------------------------------------
+
+DEFECT_MARK = 'qb_defect'
+_US = {'s': 1e6, 'ms': 1e3, 'us': 1.0, 'ns': 1e-3, 'ps': 1e-6}
+
+
+@dataclass(frozen=True)
+class Defect:
+    """A two-level defect on one qubit (see the comment above)."""
+
+    qubit: int
+    khz: float
+    tau_us: float
+    p: float = 0.5
+
+
+def defect_kraus(d: Defect, us: float) -> list[np.ndarray]:
+    """Kraus operators of the exact channel on [qubit, defect] over `us`
+    microseconds of idling, the qubit the low bit."""
+    from scipy.linalg import expm
+    rate = 1.0 / d.tau_us
+    up, down = d.p * rate, (1 - d.p) * rate
+    gen = np.array([[-up, down], [up, -down]])
+    pop = expm(gen * us)
+    coh = expm((gen + 1j * np.diag([0.0, 2 * math.pi * d.khz * 1e-3])) * us)
+    ops = []
+    for k in range(2):
+        for j in range(2):
+            e = pop[j, k]                              # P(defect ends in j | starts in k)
+            if e < 1e-15:
+                continue
+            hop = np.zeros((2, 2))
+            hop[j, k] = 1.0
+            m = coh[j, k]
+            ops.append(np.kron(hop, np.diag([math.sqrt(e), m / math.sqrt(e)])))
+            rest = e - abs(m) ** 2 / e
+            if rest > 1e-15:
+                ops.append(np.kron(hop, np.diag([0.0, math.sqrt(rest)])))
+    return ops
+
+
+def mark_defects(qc: QuantumCircuit, qubits: set[int]) -> QuantumCircuit:
+    """qc with a labelled one-qubit barrier after every DELAY of a qubit in
+    `qubits`, naming the qubit and the delay in microseconds; qc itself when
+    no such DELAY exists."""
+    from qiskit.circuit import Barrier
+
+    def idles(inst: Any) -> bool:
+        return inst.operation.name == 'delay' and qc.find_bit(inst.qubits[0]).index in qubits
+    if not any(idles(inst) for inst in qc.data):
+        return qc
+    out = qc.copy_empty_like()
+    for inst in qc.data:
+        out.append(inst)
+        if idles(inst):
+            op = inst.operation
+            if op.unit not in _US:
+                raise ValueError(f"a defect needs a DELAY in time units, not {op.unit}")
+            label = f"{DEFECT_MARK} {qc.find_bit(inst.qubits[0]).index} {float(op.duration) * _US[op.unit]!r}"
+            out.append(Barrier(1, label=label), [inst.qubits[0]])
+    return out
+
+
+def attach_defects(qc: QuantumCircuit, defects: Sequence[Defect]) -> QuantumCircuit:
+    """Replace the defect marks of a transpiled circuit with the defects: one
+    extra qubit each, excited with probability p, and at each mark the exact
+    channel of the marked qubit and every defect on it."""
+    from qiskit import QuantumRegister
+    from qiskit.quantum_info import Kraus
+    from qiskit_aer.noise import pauli_error
+
+    def mark(inst: Any) -> str:
+        op = inst.operation
+        label = (op.label or '') if op.name == 'barrier' else ''
+        return label if label.startswith(DEFECT_MARK) else ''
+    if not any(mark(inst) for inst in qc.data):
+        return qc
+    env = QuantumRegister(len(defects), 'defect')
+    out = qc.copy_empty_like()
+    with warnings.catch_warnings():                    # Aer ignores the transpiled layout
+        warnings.filterwarnings('ignore', message=r'Trying to add QuantumRegister', category=UserWarning)
+        out.add_register(env)
+    for i, d in enumerate(defects):
+        out.append(pauli_error([('X', d.p), ('I', 1 - d.p)]).to_instruction(), [env[i]])
+    channels: dict[tuple[int, float], Any] = {}
+    for inst in qc.data:
+        label = mark(inst)
+        if not label:
+            out.append(inst)
+            continue
+        _, q, us = label.split()
+        for i, d in enumerate(defects):
+            if d.qubit == int(q):
+                key = (i, float(us))
+                if key not in channels:
+                    channels[key] = Kraus(defect_kraus(d, float(us))).to_instruction()
+                out.append(channels[key], [inst.qubits[0], env[i]])
+    return out
+
+
 class NoiseMixin(SimulationHost):
     """NOISE: the active noise model (see the module docstring)."""
 
     def cmd_noise(self, rest: str) -> None:
-        """NOISE <type> <params> [; <type> <params> ...] | ADD <type> <params> | INFO | OFF — set, extend, list or clear the noise model.
+        """NOISE <type> <params> [; <type> <params> ...] | ADD <type> <params> | DEFECT <q> <kHz> <tau_us> [p] | INFO | OFF — set, extend, list or clear the noise model.
+
+        NOISE DEFECT q kHz tau_us [p] attaches a two-level defect to qubit q:
+        while the qubit idles in a DELAY its frequency is kHz higher whenever
+        the defect is excited, the defect switching with time constant tau_us
+        and excited a fraction p (default 0.5) of the time. The defect keeps
+        its state between DELAYs, so an echo undoes it unless it switched.
+        NOISE DEFECT lists the defects and NOISE DEFECT OFF removes them; they
+        stay through NOISE and DEVICE changes, and NOISE OFF clears them too.
 
         Types:
           depolarizing <p1> [p2]        p1 after 1-qubit gates, p2 (default p1) after 2- and 3-qubit gates
@@ -186,11 +313,19 @@ class NoiseMixin(SimulationHost):
             self.noise.locc_type = 'none'
             self.noise.locc_param = 0.0
             self.noise.spec = None
+            self.noise.defects = ()
             self._device_spec = None
             if self.locc is not None:
                 self.locc.noise_param = 0.0
                 self.locc.noise_type = 'none'
             self.io.writeln("NOISE OFF")
+            return
+        m = re.match(r'DEFECT\b\s*(.*)$', arg, re.IGNORECASE)
+        if m:
+            try:
+                self._noise_defect(m.group(1).strip())
+            except ValueError as e:
+                self.io.writeln(f"?NOISE ERROR: {e}")
             return
         m = re.match(r'ADD\s+(.+)$', arg, re.IGNORECASE)
         if m:
@@ -242,9 +377,42 @@ class NoiseMixin(SimulationHost):
         for line in lines:
             self.io.writeln(f"NOISE {line}")
 
+    def _noise_defect(self, args: str) -> None:
+        """NOISE DEFECT q kHz tau_us [p] | NOISE DEFECT OFF | NOISE DEFECT."""
+        if not args:
+            if not self.noise.defects:
+                self.io.writeln("  no defects")
+            for d in self.noise.defects:
+                self.io.writeln(f"  DEFECT on qubit {d.qubit}: {d.khz:g} kHz while excited, "
+                                f"switching time {d.tau_us:g} us, excited {d.p:g} of the time")
+            return
+        if args.upper() == 'OFF':
+            self.noise.defects = ()
+            self._circuit_cache_key = None
+            self.io.writeln("NOISE DEFECT OFF")
+            return
+        parts = args.replace(',', ' ').split()
+        if len(parts) not in (3, 4):
+            raise ValueError("NOISE DEFECT <qubit> <kHz> <tau_us> [p]")
+        q = self._resolve_qubit(parts[0])
+        khz, tau = self.eval_expr(parts[1]), self.eval_expr(parts[2])
+        p = self.eval_expr(parts[3]) if len(parts) == 4 else 0.5
+        if tau <= 0:
+            raise ValueError(f"a defect's switching time must be positive, not {tau:g}")
+        if not 0 < p < 1:
+            raise ValueError(f"a defect is excited a fraction of the time between 0 and 1, not {p:g}")
+        d = Defect(q, float(khz), float(tau), float(p))
+        self.noise.defects = self.noise.defects + (d,)
+        self._circuit_cache_key = None
+        self.io.writeln(f"NOISE DEFECT on qubit {q}: {d.khz:g} kHz while excited, "
+                        f"switching time {d.tau_us:g} us, excited {d.p:g} of the time")
+
     def _noise_info(self) -> None:
-        if self.noise.model is None:
+        if self.noise.model is None and not self.noise.defects:
             self.io.writeln("  NOISE OFF (no noise model active)")
+            return
+        if self.noise.model is None:
+            self._noise_defect('')
             return
         self.io.writeln("  Noise model active:")
         if self.noise.spec:
@@ -257,6 +425,8 @@ class NoiseMixin(SimulationHost):
             self.io.writeln(f"    {line}")
         if self.locc is not None and self.locc.noise_param > 0:
             self.io.writeln(f"    LOCC engine: {self.locc.noise_type} p={self.locc.noise_param}")
+        if self.noise.defects:
+            self._noise_defect('')
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +518,8 @@ def extrapolate(scales: Sequence[float], values: Sequence[float], fit: str) -> f
 class NoiseState:
     """The active noise: the Aer model and the NOISE arguments that built it,
     the depolarizing rate, the channel the LOCC engine applies, the per-qubit
-    noise poked into the memory map, and readout calibration for MITIGATE."""
+    noise poked into the memory map, the NOISE DEFECT fluctuators, and
+    readout calibration for MITIGATE."""
 
     model: NoiseModel | None = None
     spec: str | None = None                                                # the NOISE arguments, for SAVE
@@ -358,6 +529,7 @@ class NoiseState:
     # Poked at $D100 + 2*qubit: qubit -> (type, parameter), type 1 depolarizing,
     # 2 amplitude damping, 3 phase flip.
     per_qubit: dict[int, tuple[int, float]] = field(default_factory=dict)
+    defects: tuple[Defect, ...] = ()
     readout: list[tuple[float, float]] | None = None                       # MITIGATE READOUT's calibration
 
 

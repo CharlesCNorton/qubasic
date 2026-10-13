@@ -111,7 +111,7 @@ program lines, and most can be typed at the prompt as well.
 
 | Command | Syntax | Description |
 |---|---|---|
-| NOISE | `NOISE <type> <params> [; <type> <params> ...] \| ADD <type> <params> \| INFO \| OFF` | Set, extend, list or clear the noise model. |
+| NOISE | `NOISE <type> <params> [; <type> <params> ...] \| ADD <type> <params> \| DEFECT <q> <kHz> <tau_us> [p] \| INFO \| OFF` | Set, extend, list or clear the noise model. |
 | MITIGATE | `MITIGATE READOUT [ON\|OFF] \| STATUS` | Calibrate and invert readout error on every RUN. |
 | ZNE | `ZNE <HAMILTONIAN \| pauli sum> [SCALES 1 3 5] [FIT LINEAR\|QUADRATIC\|RICHARDSON\|EXP]` | Zero-noise extrapolation. |
 

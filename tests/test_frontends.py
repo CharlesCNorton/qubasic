@@ -3,6 +3,7 @@ REPL loop, displays, export, analysis and benchmarking commands."""
 
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -1056,6 +1057,8 @@ class TestIBMHardware(unittest.TestCase):
         self.assertLess(wrong, 0.2)
         feed(t, 'DEVICE OFF')
         self.assertIsNone(t._device_target)
+        feed(t, 'DEVICE IBM fake_five', 'DEVICE linear 2')            # an offline model replaces it
+        self.assertIsNone(t._device_target)
 
     def test_delay_decoheres_only_under_a_device_model(self):
         t = term(1, seed=1, shots=2000)
@@ -1063,6 +1066,8 @@ class TestIBMHardware(unittest.TestCase):
         self.assertEqual(t.last_counts, {'0': 2000})                 # ideal: idling changes nothing
         feed(t, 'DEVICE IBM fake_five', 'RUN')
         self.assertGreater(t.last_counts.get('1', 0), 200)           # T1 and T2 over 300 us
+        feed(t, 'DEVICE linear 1 100 80', 'RUN')                      # the offline model relaxes idle qubits too
+        self.assertAlmostEqual(t.last_counts.get('0', 0) / 2000, (1 + math.exp(-300 / 80)) / 2, delta=0.03)
         self.assertIn('negative', feed(term(1), '10 DELAY 0, -1', 'RUN'))
 
 

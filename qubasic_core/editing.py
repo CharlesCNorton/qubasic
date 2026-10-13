@@ -930,6 +930,10 @@ class PersistenceMixin(LanguageHost):
                 lines.append(f"NOISE {spec}")
             if edges:
                 lines.append(f"COUPLING {edges}")
+        if self.noise.defects:
+            lines.append("NOISE DEFECT OFF")
+            lines += [f"NOISE DEFECT {d.qubit} {d.khz:.10g} {d.tau_us:.10g} {d.p:.10g}"
+                      for d in self.noise.defects]
         if self._basis_gates:
             lines.append("BASIS " + ', '.join(self._basis_gates))
         if lm:

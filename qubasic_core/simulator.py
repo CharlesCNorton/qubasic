@@ -29,6 +29,7 @@ from qubasic_core.engine import (
     _RichTable,
 )
 from qubasic_core.host import SimulationHost
+from qubasic_core.noise import attach_defects, mark_defects
 from qubasic_core.parser import (
     GATE_ALIASES,
 )
@@ -373,6 +374,20 @@ def _has_channel(qc: QuantumCircuit) -> bool:
                for inst in qc.data)
 
 
+# Qiskit refuses three-qubit gates in the basis of a custom coupling map, so a
+# coupled run without BASIS keeps the backend's instructions except those, the
+# multi-controlled gates and the n-qubit matrix and preparation instructions,
+# which the transpiler then decomposes into gates it can route.
+_UNROUTABLE = frozenset({'ccx', 'ccz', 'cswap', 'rccx', 'c3x', 'c3sx', 'rc3x',
+                         'unitary', 'diagonal', 'multiplexer', 'initialize'})
+
+
+def _coupled_basis(backend: AerSimulator) -> list[str]:
+    """The basis for routing onto a COUPLING map when BASIS is unset."""
+    return [name for name in backend.operation_names
+            if name not in _UNROUTABLE and not name.startswith('mc')]
+
+
 def _expectation(val: Any) -> float:
     """An expectation value as a float, with rounding residue under 1e-12 read as 0."""
     v = float(np.real(val))
@@ -528,8 +543,13 @@ class RunPipelineMixin(SimulationHost):
         """transpile() honoring the device model. Passing coupling_map or
         basis_gates alongside a backend is exactly how the offline device
         model works, so qiskit's advisory warning about it is silenced, as is
-        its note that a DELAY was rounded to the device's clock cycle."""
+        its note that a DELAY was rounded to the device's clock cycle. A
+        coupling map without BASIS routes onto the backend's gates of at most
+        two qubits (_coupled_basis)."""
         import warnings
+        kw = self._transpile_kwargs()
+        if 'coupling_map' in kw and 'basis_gates' not in kw:
+            kw['basis_gates'] = _coupled_basis(backend)
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 'ignore', message=r'Providing `coupling_map`', category=UserWarning)
@@ -537,7 +557,21 @@ class RunPipelineMixin(SimulationHost):
             return transpile(
                 qc, backend,
                 optimization_level=self._transpile_opt_level if level is None else level,
-                **self._transpile_kwargs())
+                **kw)
+
+    def _defects_idle(self, qc: QuantumCircuit) -> bool:
+        """Whether a DELAY of the circuit idles a qubit that carries a NOISE DEFECT."""
+        qubits = {d.qubit for d in self.noise.defects}
+        return bool(qubits) and any(inst.operation.name == 'delay' and qc.find_bit(inst.qubits[0]).index in qubits
+                                    for inst in qc.data)
+
+    def _mark_defects(self, qc: QuantumCircuit) -> QuantumCircuit:
+        """The circuit to transpile: each DELAY of a defect's qubit marked (noise.mark_defects)."""
+        return mark_defects(qc, {d.qubit for d in self.noise.defects}) if self.noise.defects else qc
+
+    def _attach_defects(self, qc: QuantumCircuit) -> QuantumCircuit:
+        """The transpiled circuit to run: the marks replaced by the defects (noise.attach_defects)."""
+        return attach_defects(qc, self.noise.defects) if self.noise.defects else qc
 
     def _run_kwargs(self) -> dict:
         """Build keyword args for backend.run() with optional seed."""
@@ -559,7 +593,7 @@ class RunPipelineMixin(SimulationHost):
         method, prec = self.sim_method, self.sim_precision
         if method != 'automatic':
             return method, prec
-        noiseless = not self.noise.model and not self.noise.per_qubit
+        noiseless = not self.noise.model and not self.noise.per_qubit and not self._defects_idle(qc)
         if noiseless and self._is_clifford(qc):
             return 'stabilizer', prec
         n = self.num_qubits
@@ -670,7 +704,8 @@ class RunPipelineMixin(SimulationHost):
             if self._seed is not None:
                 _kw['seed_simulator'] = self._seed
             res = dm_backend.run(
-                transpile(q2, dm_backend, optimization_level=self._transpile_opt_level),
+                self._attach_defects(transpile(self._mark_defects(q2), dm_backend,
+                                               optimization_level=self._transpile_opt_level)),
                 **_kw).result()
             data = res.data(0)
             dm = data.get('density_matrix') if hasattr(data, 'get') else None
@@ -711,12 +746,16 @@ class RunPipelineMixin(SimulationHost):
         n = self.num_qubits
         peak = cap.aer_peak_bytes(n, 'statevector', prec, 'end')
         fits = cap.fits(peak)
-        if self._pending_set_density is not None or _has_channel(qc_sv):
+        if self._pending_set_density is not None or _has_channel(qc_sv) or self._defects_idle(qc_sv):
             # A mixed state has no statevector: DENSITY solves it on demand
-            # from the measure-free circuit.
+            # from the measure-free circuit, and the SAVE_* values come from
+            # the ensemble.
             self.last_sv = None
             self._last_density = None
             self._last_density_qc = qc_sv
+            ensemble = self._ensemble_saves(qc_sv, prec)
+            if ensemble is not None:
+                self._extract_save_results(ensemble)
         elif not qc_sv.data:
             # Nothing to simulate (size() would also skip SET_STATE and SAVE_*
             # directives): the state is |0...0>, built when first read.
@@ -768,13 +807,14 @@ class RunPipelineMixin(SimulationHost):
         """Under noise, the SAVE_* values of a measure-free circuit over the
         ensemble rather than one trajectory: exactly on the density matrix
         when it fits, otherwise averaged over SHOTS trajectories. None when
-        the run is noiseless, saves nothing, or the ensemble run fails."""
+        the run is pure, saves nothing, or the ensemble run fails."""
         from qubasic_core import simtools as cap
-        if not (self.noise.model or self.noise.per_qubit):
+        defects = self._defects_idle(qc)
+        if not (self.noise.model or self.noise.per_qubit or defects or _has_channel(qc)):
             return None
         if not any(inst.operation.name.startswith('save_') for inst in qc.data):
             return None
-        n = qc.num_qubits
+        n = qc.num_qubits + (len(self.noise.defects) if defects else 0)
         if cap.fits(cap.aer_peak_bytes(n, 'density_matrix', precision)):
             method, shots = 'density_matrix', 1
         else:
@@ -784,7 +824,8 @@ class RunPipelineMixin(SimulationHost):
         if self._seed is not None:
             kw['seed_simulator'] = self._seed
         try:
-            return backend.run(transpile(qc, backend, optimization_level=self._transpile_opt_level),
+            return backend.run(self._attach_defects(transpile(self._mark_defects(qc), backend,
+                                                              optimization_level=self._transpile_opt_level)),
                                **kw).result()
         except Exception:
             return None
@@ -809,7 +850,7 @@ class RunPipelineMixin(SimulationHost):
         if method in ('unitary', 'superop'):
             self.last_sv = None
             return
-        if self._pending_set_density is not None or _has_channel(qc_sv):
+        if self._pending_set_density is not None or _has_channel(qc_sv) or self._defects_idle(qc_sv):
             # Mixed state: DENSITY solves the density matrix on demand.
             self.last_sv = None
             self._last_density = None
@@ -836,6 +877,7 @@ class RunPipelineMixin(SimulationHost):
             self.noise.spec,
             id(self.noise.model) if self.noise.model is not None else None,
             tuple(sorted(self.noise.per_qubit.items())),
+            self.noise.defects,
         )
         # The built circuit itself is the key: every input that shapes it
         # (program text, DEF/UNITARY/HAMILTONIAN/CHANNEL definitions, variable
@@ -853,15 +895,16 @@ class RunPipelineMixin(SimulationHost):
             tuple(sorted(self.aer.options().items())),
         )
         if self._circuit_cache_key == cache_key and self._circuit_cache is not None:
-            qc_t, backend = self._circuit_cache
+            run_t, backend = self._circuit_cache
         else:
             backend = AerSimulator(**backend_opts)
-            qc_t = self._transpile_routed(qc, backend)
+            qc_t = self._transpile_routed(self._mark_defects(qc), backend)
+            run_t = self._attach_defects(qc_t)
             self._circuit_cache_key = cache_key
-            self._circuit_cache = (qc_t, backend)
+            self._circuit_cache = (run_t, backend)
             self._last_transpiled = qc_t
         try:
-            return backend.run(qc_t, **self._run_kwargs()).result()
+            return backend.run(run_t, **self._run_kwargs()).result()
         except KeyboardInterrupt:
             self.io.writeln("\n?INTERRUPTED")
             raise
@@ -874,8 +917,8 @@ class RunPipelineMixin(SimulationHost):
                 self._circuit_cache = None
                 backend_opts.pop('device', None)
                 backend = AerSimulator(**backend_opts)
-                qc_t = self._transpile_routed(qc, backend)
-                return backend.run(qc_t, **self._run_kwargs()).result()
+                run_t = self._attach_defects(self._transpile_routed(self._mark_defects(qc), backend))
+                return backend.run(run_t, **self._run_kwargs()).result()
             elif 'stabilizer' in _err_msg or 'invalid parameters' in _err_msg:
                 self._circuit_cache_key = None
                 self._circuit_cache = None
@@ -883,8 +926,8 @@ class RunPipelineMixin(SimulationHost):
                 sv_opts['method'] = 'statevector'
                 self.io.writeln("  (stabilizer failed — falling back to statevector)")
                 backend = AerSimulator(**sv_opts)
-                qc_t = self._transpile_routed(qc, backend)
-                return backend.run(qc_t, **self._run_kwargs()).result()
+                run_t = self._attach_defects(self._transpile_routed(self._mark_defects(qc), backend))
+                return backend.run(run_t, **self._run_kwargs()).result()
             raise
 
     def _start_run(self) -> tuple[float, list[int]] | None:
@@ -961,7 +1004,7 @@ class RunPipelineMixin(SimulationHost):
         if self.sim_method in ('unitary', 'superop'):
             qc.save_unitary(label='unitary') if self.sim_method == 'unitary' else qc.save_superop(label='superop')
         elif has_measure:
-            capture = self._capture_mode(method, precision)
+            capture = 'none' if self._defects_idle(qc_sv) else self._capture_mode(method, precision)
             if capture == 'mid':
                 run_qc = qc.copy()
                 run_qc.save_statevector(label='qb_state')
@@ -1054,6 +1097,8 @@ class RunPipelineMixin(SimulationHost):
         if self.noise.model is not None:
             _noise_tag = f"noise=depol({m['noise_depol_p']})" if m['noise_depol_p'] > 0 else "noise=on"
             _meta_parts.append(_noise_tag)
+        if self._defects_idle(qc_sv):
+            _meta_parts.append(f"defects={len(self.noise.defects)}")
         _meta = ', '.join(_meta_parts)
         _throughput = f", {m['gates']/m['time_s']:.0f} gates/s" if m['time_s'] > 0.001 and m['gates'] >= 1000 else ""
         _complexity = self._circuit_complexity()

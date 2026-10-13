@@ -17,7 +17,7 @@ from qiskit.quantum_info import Operator
 from qubasic_core import simtools
 from qubasic_core.api import CaptureIO
 from qubasic_core.locc import LOCCEngine
-from qubasic_core.noise import correct_readout, extrapolate, fold_circuit
+from qubasic_core.noise import Defect, correct_readout, extrapolate, fold_circuit
 from qubasic_core.simtools import (
     _apply_gate_inplace,
     _apply_gate_np,
@@ -446,6 +446,15 @@ class TestDynamicAndRouting(unittest.TestCase):
         self.assertIn('swaps=', out)
         self.assertIn('basis=rz+sx+x+cx', out)
 
+    def test_coupling_without_basis_routes_any_program(self):
+        t = term(4, seed=2, shots=200)
+        out = feed(t, 'COUPLING linear', '10 X 0', '20 X 1', '30 T 3', '40 CCX 0, 1, 3', '50 MEASURE', 'RUN')
+        self.assertIn('routed onto device', out)
+        self.assertEqual(t.last_counts, {'1011': 200})
+        out = feed(t, 'NOISE depolarizing 0.001', 'RUN')
+        self.assertIn('routed onto device', out)
+        self.assertEqual(sum(t.last_counts.values()), 200)
+
 
 class TestPrimitivesAndStep(unittest.TestCase):
 
@@ -756,6 +765,115 @@ class TestAerGatesAndNoise(unittest.TestCase):
         self.assertAlmostEqual(t3.last_counts.get('0', 0) / 1500, flip, delta=0.03)
         for bad in ('NOISE lindblad X', 'NOISE lindblad Q 0.1', 'NOISE lindblad XYZ 0.1', 'NOISE lindblad X -1'):
             self.assertIn('?', feed(term(1), bad), bad)
+
+
+def _telegraph(segments, khz, tau, p):
+    """The exact coherence of a qubit under a two-level defect (its frequency
+    khz higher while the defect is excited) after free evolution in (time,
+    sign) segments, the sign flipped by each refocusing pulse."""
+    from scipy.linalg import expm
+    up, down = p / tau, (1 - p) / tau
+    gen = np.array([[-up, down], [up, -down]])
+    omega = np.diag([0.0, 2 * math.pi * khz * 1e-3])
+    v = np.array([1 - p, p], dtype=complex)
+    for time, sign in segments:
+        v = expm((gen + 1j * sign * omega) * time) @ v
+    return v.sum()
+
+
+def p_zero(t, qubit_char=-1):
+    return sum(c for k, c in t.last_counts.items() if k[qubit_char] == '0') / sum(t.last_counts.values())
+
+
+class TestDefects(unittest.TestCase):
+    """NOISE DEFECT: a two-level fluctuator Aer carries as an extra qubit."""
+
+    def test_a_frozen_defect_beats_and_an_echo_undoes_it(self):
+        t = term(1, seed=3, shots=2000)
+        feed(t, 'NOISE DEFECT 0 80 1e9 0.5')
+        out = feed(t, '10 H 0', '20 DELAY 0, 6.25', '30 H 0', '40 MEASURE', 'RUN')    # half the 12.5 us beat
+        self.assertIn('defects=1', out)
+        self.assertAlmostEqual(p_zero(t), 0.5, delta=0.05)
+        feed(t, '20 DELAY 0, 12.5', 'RUN')                                              # the whole beat
+        self.assertEqual(t.last_counts, {'0': 2000})
+        feed(t, '20 DELAY 0, 3.125', '25 X 0', '27 DELAY 0, 3.125', 'RUN')             # an echo refocuses
+        self.assertEqual(t.last_counts, {'0': 2000})
+
+    def test_the_channel_gives_the_exact_telegraph_coherence(self):
+        t = term(1, seed=3)
+        feed(t, 'NOISE DEFECT 0 50 10 0.3')
+        for T in (4, 9, 17):
+            feed(t, 'NEW', '10 H 0', f'20 DELAY 0, {T}', '30 SAVE_EXPECT X 0 -> vx', '40 SAVE_EXPECT Y 0 -> vy', 'RUN')
+            c = _telegraph([(T, 1)], 50, 10, 0.3)
+            self.assertAlmostEqual(t.variables['vx'], c.real, places=9)
+            self.assertAlmostEqual(t.variables['vy'], c.imag, places=9)
+        feed(t, 'NEW', '10 H 0', '20 DELAY 0, 10', '30 X 0', '40 DELAY 0, 10', '50 SAVE_EXPECT X 0 -> vx', 'RUN')
+        self.assertAlmostEqual(t.variables['vx'], _telegraph([(10, -1), (10, 1)], 50, 10, 0.3).real, places=9)
+        self.assertIn('Purity', feed(t, 'DENSITY'))                       # the qubit's mixed state
+
+    def test_a_defect_acts_only_while_its_qubit_idles(self):
+        t = term(2, seed=3, shots=500)
+        feed(t, 'NOISE DEFECT 0 80 1e9 0.5')
+        out = feed(t, '10 H 0', '20 H 0', '30 MEASURE', 'RUN')
+        self.assertNotIn('defects=', out)
+        self.assertEqual(t.last_counts, {'00': 500})
+        out = feed(t, '15 DELAY 1, 6.25', 'RUN')                          # only the other qubit idles
+        self.assertNotIn('defects=', out)
+        self.assertEqual(t.last_counts, {'00': 500})
+        self.assertIsNotNone(t.last_sv)
+
+    def test_a_defect_follows_its_qubit_through_routing(self):
+        t = term(4, seed=3, shots=2000)
+        feed(t, 'COUPLING linear', 'NOISE DEFECT 0 80 1e9 0.5')
+        feed(t, '10 CX 0, 1', '12 CX 0, 2', '14 CX 0, 3', '20 H 0', '30 DELAY 0, 6.25', '40 H 0', '50 MEASURE',
+             'RUN')
+        self.assertAlmostEqual(p_zero(t), 0.5, delta=0.05)
+        feed(t, '30 DELAY 0, 12.5', 'RUN')
+        self.assertEqual(p_zero(t), 1.0)
+
+    def test_a_defect_composes_with_a_device_model(self):
+        t = term(2, seed=3, shots=4000)
+        out = feed(t, 'DEVICE linear 2 50 70', 'NOISE DEFECT 0 80 1e9 0.5', '10 H 0', '20 DELAY 0, 6.25', '30 H 0',
+                   '40 MEASURE', 'RUN')
+        self.assertIn('defects=1', out)
+        self.assertAlmostEqual(p_zero(t), 0.5, delta=0.03)                # the beat's zero is the defect's
+        feed(t, '20 DELAY 0, 12.5', 'RUN')
+        self.assertAlmostEqual(p_zero(t), (1 + math.exp(-12.5 / 70)) / 2, delta=0.03)   # T2 alone remains
+
+    def test_noise_defect_command(self):
+        t = term(2)
+        self.assertIn('no defects', feed(t, 'NOISE DEFECT'))
+        out = feed(t, 'NOISE DEFECT 1 80 25')
+        self.assertIn('qubit 1: 80 kHz', out)
+        self.assertIn('excited 0.5', out)
+        self.assertIn('qubit 1', feed(t, 'NOISE INFO'))
+        for bad in ('NOISE DEFECT 0 80', 'NOISE DEFECT 0 80 -1', 'NOISE DEFECT 0 80 25 1', 'NOISE DEFECT 5 80 25'):
+            self.assertIn('?', feed(t, bad), bad)
+        feed(t, 'NOISE DEFECT OFF')
+        self.assertEqual(t.noise.defects, ())
+        feed(t, 'NOISE DEFECT 0 80 25 0.25', 'NOISE OFF')
+        self.assertEqual(t.noise.defects, ())
+
+    def test_save_and_load_keep_the_defects(self):
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                t = term(2)
+                feed(t, 'NOISE DEFECT 1 80 25 0.25', '10 H 1', 'SAVE prog.qb')
+                with open('prog.qb', encoding='utf-8') as f:
+                    self.assertIn('NOISE DEFECT 1 80 25 0.25', f.read())
+                t2 = term(2)
+                feed(t2, 'NOISE DEFECT 0 10 10', 'LOAD prog.qb')
+                self.assertEqual(t2.noise.defects, (Defect(1, 80.0, 25.0, 0.25),))
+            finally:
+                os.chdir(cwd)
+
+    def test_a_measure_free_channel_program_saves_its_ensemble_values(self):
+        t = term(1, seed=3)
+        feed(t, 'CHANNEL AD = [[1, 0], [0, 0.6]] ; [[0, 0.8], [0, 0]]', '10 X 0', '20 APPLYCHANNEL AD 0',
+             '30 SAVE_EXPECT Z 0 -> z', 'RUN')
+        self.assertAlmostEqual(t.variables['z'], 1 - 2 * 0.36, places=9)
 
 
 class TestInputAcrossShots(unittest.TestCase):

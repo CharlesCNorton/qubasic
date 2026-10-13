@@ -232,6 +232,7 @@ NOISE depolarizing 0.001 0.01; readout 0.02 0.03     channels joined with ;
 NOISE thermal 50e-6 70e-6 50e-9                       T1, T2 and gate time
 NOISE ADD amplitude_damping 0.01                      extend the active model
 NOISE lindblad X 0.001 ZZ 0.0005                      Pauli-Lindblad generators and rates
+NOISE DEFECT 0 80 25 0.5                              a switching two-level defect on qubit 0
 MITIGATE READOUT ON                                   invert readout error on every RUN
 ZNE 1.0 ZZ 0 1 SCALES 1 3 5 FIT EXP                   zero-noise extrapolation
 ```
@@ -241,6 +242,16 @@ following histogram with them inverted. `ZNE` measures an observable with the
 gate noise amplified by folding and extrapolates to zero noise with a linear,
 quadratic, Richardson or exponential fit, printing the noiseless value beside
 it.
+
+`NOISE DEFECT q kHz tau [p]` attaches a two-level defect to a qubit: while
+the qubit idles in a `DELAY` its frequency is `kHz` higher whenever the
+defect is excited, the defect switching with time constant `tau`
+microseconds and excited a fraction `p` of the time. The defect keeps its
+state from one `DELAY` to the next, so a Ramsey experiment beats and an echo
+undoes what the defect did unless it switched in between, which no Markov
+channel reproduces. Aer carries each defect as one extra qubit, applying the
+exact joint channel of the qubit and its defect over each `DELAY`; the defect
+follows its qubit through routing and composes with a device model.
 
 ## IBM quantum hardware
 
