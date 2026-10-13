@@ -14,13 +14,15 @@ interactive session with persistent state. Requires ipykernel (installed with
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 
-def _make_kernel_class():
+def _make_kernel_class() -> type:
     from ipykernel.kernelbase import Kernel
+
     from qubasic_core import __version__
+    from qubasic_core.editing import ProgramMgmtMixin
     from qubasic_core.terminal import QBasicTerminal
-    from qubasic_core.program_mgmt import ProgramMgmtMixin
 
     class QubasicKernel(Kernel):
         implementation = 'qubasic'
@@ -34,14 +36,14 @@ def _make_kernel_class():
         }
         banner = f"QUBASIC {__version__} — Quantum BASIC"
 
-        def __init__(self, **kwargs):
+        def __init__(self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
             self.term = QBasicTerminal()
             self.term.agent_mode = True   # confine file writes to the cwd
 
-        def do_execute(self, code, silent, store_history=True,
-                       user_expressions=None, allow_stdin=False, **kwargs):
-            from qubasic_core.web_repl import BufferIO
+        def do_execute(self, code: str, silent: bool, store_history: bool = True,
+                       user_expressions: dict[str, Any] | None = None, allow_stdin: bool = False, **kwargs: Any) -> dict[str, Any]:
+            from qubasic_core.cli import BufferIO
             kernel = self
 
             class CellIO(BufferIO):
@@ -90,6 +92,7 @@ def install_kernelspec() -> str:
     import json
     import os
     import tempfile
+
     from jupyter_client.kernelspec import KernelSpecManager
     with tempfile.TemporaryDirectory() as td:
         spec_dir = os.path.join(td, 'qubasic')
@@ -101,7 +104,7 @@ def install_kernelspec() -> str:
     return dest
 
 
-def main():
+def main() -> None:
     from ipykernel.kernelapp import IPKernelApp
     IPKernelApp.launch_instance(kernel_class=_make_kernel_class())
 

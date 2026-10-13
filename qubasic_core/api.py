@@ -38,7 +38,7 @@ _RE_NUMBERED = re.compile(r'\s*\d+\s')
 class CaptureIO:
     """Collects output; INPUT reads from a fixed list of answers, then ends."""
 
-    def __init__(self, inputs: Iterable[str] = ()):
+    def __init__(self, inputs: Iterable[str] = ()) -> None:
         self.parts: list[str] = []
         self.inputs = list(inputs)
 
@@ -72,7 +72,7 @@ class Session:
     def __init__(self, *, qubits: int | None = None, shots: int | None = None,
                  seed: int | None = None, method: str | None = None,
                  precision: str | None = None, noise: str | None = None,
-                 inputs: Iterable[str] = (), agent: bool = True):
+                 inputs: Iterable[str] = (), agent: bool = True) -> None:
         from qubasic_core.terminal import QBasicTerminal
         self.terminal = QBasicTerminal()
         self.terminal.agent_mode = agent
@@ -90,8 +90,7 @@ class Session:
         enter the program, the rest run as commands) and return what they
         printed. basic=True numbers QBASIC source first, as LOAD numbers a
         .bas file."""
-        from qubasic_core.file_io import number_source
-        from qubasic_core.program_mgmt import ProgramMgmtMixin
+        from qubasic_core.editing import ProgramMgmtMixin, number_source
         lines = source.splitlines()
         if basic:
             lines = [f"{n} {text}" for n, text in number_source(lines)]

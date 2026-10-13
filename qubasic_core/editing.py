@@ -1,13 +1,25 @@
-"""QUBASIC program editing commands: LIST, NEW, DELETE, RENUM, DEF, TYPE, CIRCUIT_DEF, REG, LET, UNDO."""
+"""QUBASIC program editing: LIST, NEW, DELETE, RENUM, DEF, TYPE and the
+other definition commands, AUTO, EDIT, banks, FIND/REPLACE, CHAIN and MERGE,
+and SAVE, LOAD, INCLUDE and IMPORT.
+"""
 
 from __future__ import annotations
 
-import sys
+import hashlib
+import os
 import re
+import sys
+from pathlib import Path
+from typing import Any, Callable
 
-from qubasic_core.engine import GATE_TABLE, RE_DEF_SINGLE
-from qubasic_core.parser import parse_stmt
+from qubasic_core.engine import MAX_INCLUDE_DEPTH
+from qubasic_core.expression import Record
 from qubasic_core.host import HostState
+from qubasic_core.parser import GATE_TABLE, RE_CHAIN, RE_DEF_BEGIN, RE_DEF_SINGLE, RE_MERGE, parse_stmt
+
+# ---------------------------------------------------------------------------
+# QUBASIC program editing commands: LIST, NEW, DELETE, RENUM, DEF, TYPE, CIRCUIT_DEF, REG, LET, UNDO.
+# ---------------------------------------------------------------------------
 
 # Line-number references RENUM rewrites: the keyword (group 1) and the
 # number or comma list of numbers after it (group 2).
@@ -42,7 +54,7 @@ class EditingMixin(HostState):
     """Program editing and definition commands for QBasicTerminal."""
 
     def cmd_list(self, rest: str = '') -> None:
-        """LIST — display program lines. LIST SUBS|VARS|ARRAYS for filtered views."""
+        """LIST [SUBS | VARS | ARRAYS] — show the program, or its procedures, variables or arrays."""
         arg = rest.strip().upper()
         if arg == 'SUBS':
             return self.cmd_list_subs()
@@ -65,7 +77,7 @@ class EditingMixin(HostState):
             self.io.writeln("READY")
 
     def cmd_delete(self, rest: str) -> None:
-        """DELETE <line> or DELETE <start>-<end> — remove program lines."""
+        """DELETE line | start-end — remove program lines."""
         if not rest:
             self.io.writeln("?USAGE: DELETE <line> or DELETE <start>-<end>")
             return
@@ -123,7 +135,7 @@ class EditingMixin(HostState):
         # DEF FN name(params) = expr — a user expression function, same as the
         # in-program form, so it works at the prompt too.
         if upper.startswith('FN'):
-            from qubasic_core.patterns import RE_DEF_FN
+            from qubasic_core.parser import RE_DEF_FN
             fm = RE_DEF_FN.match(f"DEF {rest}")
             if fm:
                 fparams = [p.strip() for p in fm.group(2).split(',') if p.strip()]
@@ -141,7 +153,7 @@ class EditingMixin(HostState):
         params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
         body = [s.strip() for s in m.group(3).split(':') if s.strip()]
         if name in GATE_TABLE:
-            from qubasic_core.errors import QBasicSyntaxError
+            from qubasic_core.engine import QBasicSyntaxError
             raise QBasicSyntaxError(f"CANNOT REDEFINE BUILT-IN GATE {name}")
         self.subroutines[name] = {'body': body, 'params': params}
         if params:
@@ -158,7 +170,7 @@ class EditingMixin(HostState):
         name = m.group(1).upper()
         params = [p.strip() for p in m.group(2).split(',')] if m.group(2) else []
         if name in GATE_TABLE:
-            from qubasic_core.errors import QBasicSyntaxError
+            from qubasic_core.engine import QBasicSyntaxError
             raise QBasicSyntaxError(f"CANNOT REDEFINE BUILT-IN GATE {name}")
 
         body = []
@@ -180,8 +192,8 @@ class EditingMixin(HostState):
         """TYPE name — define a named record type.
 
         Usage: TYPE Point
-                 x AS FLOAT
-                 y AS FLOAT
+                 x AS SINGLE
+                 y AS SINGLE
                END TYPE
         Then: DIM p AS Point
               LET p.x = 3.14
@@ -190,7 +202,7 @@ class EditingMixin(HostState):
         In non-interactive mode, subsequent lines are routed through process()
         which delegates to _accumulate_type_field until END TYPE is seen.
         """
-        from qubasic_core.engine import RE_TYPE_BEGIN
+        from qubasic_core.parser import RE_TYPE_BEGIN
         m = RE_TYPE_BEGIN.match(f"TYPE {rest}")
         if not m:
             self.io.writeln("?USAGE: TYPE <name>")
@@ -204,7 +216,7 @@ class EditingMixin(HostState):
 
     def _accumulate_type_field(self, line: str) -> None:
         """Accumulate a field for a pending TYPE definition, or finalize on END TYPE."""
-        from qubasic_core.engine import RE_TYPE_FIELD, RE_END_TYPE
+        from qubasic_core.parser import RE_END_TYPE, RE_TYPE_FIELD
         assert self._pending_type is not None  # only called while a TYPE is open
         stripped = line.strip()
         if RE_END_TYPE.match(stripped):
@@ -266,7 +278,7 @@ class EditingMixin(HostState):
         # Allocate starting after existing registers
         start = sum(s for _, s in self.registers.values())
         if start + size > self.num_qubits:
-            from qubasic_core.errors import QBasicRangeError
+            from qubasic_core.engine import QBasicRangeError
             raise QBasicRangeError(f"NOT ENOUGH QUBITS (need {start+size}, have {self.num_qubits})")
 
         self.registers[name] = (start, size)
@@ -276,7 +288,7 @@ class EditingMixin(HostState):
         """LET <var> = <expr> — assign a variable at the prompt, typed as in a
         program: strings (s$), typed names (n% rounds), record fields (p.x)
         and array elements (a(0), m(i, j))."""
-        from qubasic_core.statements import LetArrayStmt, LetStmt, LetStrStmt
+        from qubasic_core.parser import LetArrayStmt, LetStmt, LetStrStmt
         parsed = parse_stmt(f"LET {rest.strip()}")
         try:
             if isinstance(parsed, LetArrayStmt):
@@ -301,3 +313,803 @@ class EditingMixin(HostState):
     def cmd_undo(self) -> None:
         """UNDO — undo the last program edit, showing what changes."""
         return self.cmd_undo_preview()
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC program management — AUTO, EDIT, COPY, MOVE, FIND, REPLACE, slots, CHECKSUM, CHAIN, MERGE, LIST+.
+# ---------------------------------------------------------------------------
+
+class ProgramMgmtMixin(HostState):
+    """Program management commands for QBasicTerminal.
+
+    Requires: TerminalProtocol — uses self.program, self.variables,
+    self.num_qubits, self.shots, self.process(), self.cmd_new(),
+    self._sanitize_path().
+    """
+
+    def _init_program_mgmt(self) -> None:
+        self._program_slots: dict[int, dict[int, str]] = {}
+        self._current_slot: int = 0
+        self._auto_mode: bool = False
+        self._auto_line: int = 10
+        self._auto_step: int = 10
+
+    # ── AUTO ───────────────────────────────────────────────────────────
+
+    def cmd_auto(self, rest: str = '') -> None:
+        """AUTO [start][, step] — auto-generate line numbers."""
+        parts = rest.replace(',', ' ').split()
+        if parts:
+            self._auto_line = int(parts[0])
+        if len(parts) > 1:
+            self._auto_step = int(parts[1])
+        self._auto_mode = True
+        self.io.writeln(f"AUTO {self._auto_line}, {self._auto_step} — type . to stop")
+        while self._auto_mode:
+            try:
+                line = self.io.read_line(f'{self._auto_line} ').rstrip()
+                if line == '.':
+                    self._auto_mode = False
+                    break
+                if line:
+                    self.process(f'{self._auto_line} {line}')
+                self._auto_line += self._auto_step
+            except (KeyboardInterrupt, EOFError):
+                self._auto_mode = False
+                self.io.writeln('')
+                break
+
+    # ── EDIT ───────────────────────────────────────────────────────────
+
+    def cmd_edit(self, rest: str) -> None:
+        """EDIT <line> — edit a specific line."""
+        if not rest.strip():
+            self.io.writeln("?USAGE: EDIT <line>")
+            return
+        num = int(rest.strip())
+        if num not in self.program:
+            self.io.writeln(f"?LINE {num} NOT FOUND")
+            return
+        current = self.program[num]
+        self.io.writeln(f"  {num} {current}")
+        try:
+            new_content = self.io.read_line(f'{num} ').rstrip()
+            if new_content:
+                self.process(f"{num} {new_content}")     # as typed: parsed, and UNDO can revert it
+                self.io.writeln(f"  UPDATED {num}")
+            else:
+                self.io.writeln("  (unchanged)")
+        except (KeyboardInterrupt, EOFError):
+            self.io.writeln("\n  (cancelled)")
+
+    # ── LIST enhancements ──────────────────────────────────────────────
+
+    def cmd_list_subs(self) -> None:
+        """LIST SUBS — list all SUB/FUNCTION definitions."""
+        found = False
+        for ln in sorted(self.program.keys()):
+            stmt = self.program[ln].strip().upper()
+            if stmt.startswith('SUB ') or stmt.startswith('FUNCTION '):
+                self.io.writeln(f"  {ln:5d}  {self.program[ln]}")
+                found = True
+        if self.subroutines:
+            for name, sub in self.subroutines.items():
+                if isinstance(sub, dict):
+                    params = f"({', '.join(sub['params'])})" if sub['params'] else ""
+                    self.io.writeln(f"  DEF  {name}{params} ({len(sub['body'])} gates)")
+                found = True
+        if not found:
+            self.io.writeln("  No subroutines defined")
+
+    def cmd_list_vars(self) -> None:
+        """LIST VARS — alias for VARS with types."""
+        if not self.variables:
+            self.io.writeln("  No variables")
+            return
+        for name, val in sorted(self.variables.items()):
+            typ = type(val).__name__
+            self.io.writeln(f"  {name} = {val}  ({typ})")
+
+    def cmd_list_arrays(self) -> None:
+        """LIST ARRAYS — list all arrays with sizes."""
+        if not self.arrays:
+            self.io.writeln("  No arrays")
+            return
+        for name, data in sorted(self.arrays.items()):
+            if isinstance(data, list):
+                self.io.writeln(f"  {name}({len(data)}) = {data[:5]}{'...' if len(data) > 5 else ''}")
+            elif isinstance(data, dict):
+                self.io.writeln(f"  {name}({len(data)} dims)")
+
+    # ── Program slots (BANK) ──────────────────────────────────────────
+
+    def cmd_bank(self, rest: str) -> None:
+        """BANK <n> — switch to program slot n."""
+        if not rest.strip():
+            self.io.writeln(f"  Current slot: {self._current_slot}")
+            self.io.writeln(f"  Slots in use: {sorted(self._program_slots.keys())}")
+            return
+        slot = int(rest.strip())
+        # Save current
+        self._program_slots[self._current_slot] = dict(self.program)
+        # Load target
+        self._current_slot = slot
+        if slot in self._program_slots:
+            self.program = dict(self._program_slots[slot])
+            self.io.writeln(f"BANK {slot} ({len(self.program)} lines)")
+        else:
+            self.program = {}
+            self.io.writeln(f"BANK {slot} (empty)")
+
+    # ── COPY / MOVE ────────────────────────────────────────────────────
+
+    def cmd_copy(self, rest: str) -> None:
+        """COPY <start>-<end> TO <dest> — copy line range."""
+        m = self._parse_range_to(rest)
+        if not m:
+            self.io.writeln("?USAGE: COPY <start>-<end> TO <dest>")
+            return
+        start, end, dest = m
+        offset = dest - start
+        for ln in sorted(self.program.keys()):
+            if start <= ln <= end:
+                self.program[ln + offset] = self.program[ln]
+        self.io.writeln(f"COPIED {start}-{end} TO {dest}-{end + offset}")
+
+    def cmd_move(self, rest: str) -> None:
+        """MOVE <start>-<end> TO <dest> — move line range."""
+        m = self._parse_range_to(rest)
+        if not m:
+            self.io.writeln("?USAGE: MOVE <start>-<end> TO <dest>")
+            return
+        start, end, dest = m
+        offset = dest - start
+        lines = {ln: self.program[ln] for ln in sorted(self.program.keys())
+                 if start <= ln <= end}
+        for ln in lines:
+            del self.program[ln]
+        for ln, stmt in lines.items():
+            self.program[ln + offset] = stmt
+        self.io.writeln(f"MOVED {start}-{end} TO {dest}-{end + offset}")
+
+    @staticmethod
+    def _parse_range_to(rest: str) -> tuple[int, int, int] | None:
+        m = re.match(r'(\d+)\s*-\s*(\d+)\s+TO\s+(\d+)', rest, re.IGNORECASE)
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+    # ── FIND / REPLACE ─────────────────────────────────────────────────
+
+    def cmd_find(self, rest: str) -> None:
+        """FIND "text" — search program lines."""
+        text = rest.strip().strip('"').strip("'")
+        if not text:
+            self.io.writeln("?USAGE: FIND \"text\"")
+            return
+        found = 0
+        for ln in sorted(self.program.keys()):
+            if text.upper() in self.program[ln].upper():
+                self.io.writeln(f"  {ln:5d}  {self.program[ln]}")
+                found += 1
+        self.io.writeln(f"  {found} match(es)")
+
+    def cmd_replace(self, rest: str) -> None:
+        """REPLACE "old" WITH "new" — find and replace in program."""
+        m = re.match(r'"([^"]+)"\s+WITH\s+"([^"]*)"', rest, re.IGNORECASE)
+        if not m:
+            self.io.writeln('?USAGE: REPLACE "old" WITH "new"')
+            return
+        old, new = m.group(1), m.group(2)
+        count = 0
+        for ln in sorted(self.program.keys()):
+            if old in self.program[ln]:
+                self.program[ln] = self.program[ln].replace(old, new)
+                self.io.writeln(f"  {ln:5d}  {self.program[ln]}")
+                count += 1
+        self.io.writeln(f"  {count} replacement(s)")
+
+    # ── CHECKSUM ───────────────────────────────────────────────────────
+
+    def cmd_checksum(self) -> None:
+        """CHECKSUM — hash of program listing for verification."""
+        if not self.program:
+            self.io.writeln("?EMPTY PROGRAM")
+            return
+        content = '\n'.join(f'{ln} {self.program[ln]}'
+                           for ln in sorted(self.program.keys()))
+        h = hashlib.md5(content.encode()).hexdigest()[:8].upper()
+        self.io.writeln(f"CHECKSUM: {h} ({len(self.program)} lines)")
+
+    # ── CHAIN / MERGE ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_lines_with_defs(lines: list[str], process_fn: Callable[[str], Any]) -> int:
+        """Iterate stripped lines, handling DEF BEGIN...DEF END blocks.
+
+        Skips blank lines and # comments. For each DEF BEGIN block, collects
+        the body lines and calls process_fn with a synthesized single-line DEF
+        command. For all other lines, calls process_fn directly.
+
+        Returns the count of logical lines/blocks processed (excluding skips).
+        """
+        count = 0
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line or line.startswith('#'):
+                i += 1
+                continue
+            if re.match(r'DEF\s+BEGIN\s+', line, re.IGNORECASE):
+                dm = RE_DEF_BEGIN.match(line)
+                if dm:
+                    name = dm.group(1).upper()
+                    params = [p.strip() for p in dm.group(2).split(',')] if dm.group(2) else []
+                    body = []
+                    i += 1
+                    while i < len(lines):
+                        bl = lines[i].strip()
+                        if bl.upper() in ('DEF END', 'END'):
+                            break
+                        if bl and not bl.startswith('#'):
+                            body.append(bl)
+                        i += 1
+                    body_str = ' : '.join(body)
+                    param_str = f"({', '.join(params)})" if params else ""
+                    process_fn(f"DEF {name}{param_str} = {body_str}")
+                    count += 1
+            else:
+                process_fn(line)
+                count += 1
+            i += 1
+        return count
+
+    def cmd_chain(self, rest: str) -> None:
+        """CHAIN "file" — load and run a program, preserving variables."""
+        m = RE_CHAIN.match(f"CHAIN {rest}")
+        if not m:
+            self.io.writeln('?USAGE: CHAIN "filename"')
+            return
+        path = m.group(1).strip()
+        try:
+            path = self._sanitize_path(path)
+        except ValueError as e:
+            self.io.writeln(f"?CHAIN ERROR: {e}")
+            return
+        path = self._find_qb_file(path)
+        if not os.path.isfile(path):
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
+            return
+        saved_vars = dict(self.variables)
+        saved_arrays = {k: list(v) if isinstance(v, list) else v
+                        for k, v in self.arrays.items()}
+        self.program.clear()
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            lines = [l.rstrip('\n\r') for l in f.readlines()]
+        self._load_lines_with_defs(
+            lines, lambda line: self.process(line, track_undo=False))
+        self.variables.update(saved_vars)
+        self.arrays.update(saved_arrays)
+        self.io.writeln(f"CHAINED {path}")
+        if self.program:
+            self.cmd_run()
+
+    def cmd_merge(self, rest: str) -> None:
+        """MERGE "file" — merge lines from another file without clearing."""
+        m = RE_MERGE.match(f"MERGE {rest}")
+        if not m:
+            self.io.writeln('?USAGE: MERGE "filename"')
+            return
+        path = m.group(1).strip()
+        try:
+            path = self._sanitize_path(path)
+        except ValueError as e:
+            self.io.writeln(f"?MERGE ERROR: {e}")
+            return
+        path = self._find_qb_file(path)
+        if not os.path.isfile(path):
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
+            return
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            lines = [l.rstrip('\n\r') for l in f.readlines()]
+        existing_before = set(self.program.keys())
+        count = self._load_lines_with_defs(
+            lines, lambda line: self.process(line, track_undo=False))
+        # Detect lines that existed before the merge and were overwritten by
+        # the loaded file.  Re-parse the raw file for numbered lines and
+        # intersect with the set of line numbers that existed beforehand.
+        merged_nums: set[int] = set()
+        for raw in lines:
+            m = re.match(r'^\s*(\d+)\s', raw)
+            if m:
+                merged_nums.add(int(m.group(1)))
+        n_overwritten = len(existing_before & merged_nums)
+        if n_overwritten:
+            self.io.writeln(f"  WARNING: {n_overwritten} line(s) overwritten by merge")
+        self.io.writeln(f"MERGED {path} ({count} lines)")
+
+    # ── Introspection ─────────────────────────────────────────────────
+
+    def cmd_defs(self) -> None:
+        """DEFS — list the DEF subroutines and the program's SUB and FUNCTION blocks."""
+        found = False
+        if self.subroutines:
+            for name, sub in self.subroutines.items():
+                if isinstance(sub, list):
+                    self.io.writeln(f"  {name} = {' : '.join(sub)}")
+                else:
+                    params = f"({', '.join(sub['params'])})" if sub['params'] else ""
+                    self.io.writeln(f"  {name}{params} = {' : '.join(sub['body'])}")
+                found = True
+        # Also show SUB/FUNCTION blocks in the program
+        from qubasic_core.parser import RE_FUNCTION, RE_SUB
+        for ln in sorted(self.program.keys()):
+            stmt = self.program[ln].strip()
+            m = RE_SUB.match(stmt)
+            if m:
+                self.io.writeln(f"  SUB {m.group(1).upper()}({m.group(2) or ''}) at line {ln}")
+                found = True
+            m = RE_FUNCTION.match(stmt)
+            if m:
+                self.io.writeln(f"  FUNCTION {m.group(1).upper()}({m.group(2) or ''}) at line {ln}")
+                found = True
+        if not found:
+            self.io.writeln("NO SUBROUTINES DEFINED")
+
+    def cmd_regs(self) -> None:
+        """REGS — list the named registers and their qubit ranges."""
+        if not self.registers:
+            self.io.writeln("NO REGISTERS DEFINED")
+            return
+        for name, (start, size) in self.registers.items():
+            self.io.writeln(f"  {name}[0:{size}] -> qubits {start}-{start+size-1}")
+
+    def cmd_vars(self) -> None:
+        """VARS — list the variables and their values."""
+        if not self.variables:
+            self.io.writeln("NO VARIABLES SET")
+            return
+        for name, val in self.variables.items():
+            self.io.writeln(f"  {name} = {val}")
+
+    def cmd_clear(self, rest: str) -> None:
+        """CLEAR var | ARRAYS — remove a variable or array, or every array."""
+        name = rest.strip()
+        if not name:
+            self.io.writeln("?USAGE: CLEAR <var> or CLEAR ARRAYS")
+            return
+        if name.upper() == 'ARRAYS':
+            self.arrays.clear()
+            self.io.writeln("ARRAYS CLEARED")
+        elif name in self.variables:
+            del self.variables[name]
+            self.io.writeln(f"CLEARED {name}")
+        elif name in self.arrays:
+            del self.arrays[name]
+            self.io.writeln(f"CLEARED array {name}")
+        else:
+            self.io.writeln(f"?{name} NOT FOUND")
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC program files: SAVE and LOAD (.qb sessions and .bas source),
+# INCLUDE, IMPORT, DIR and the library search path.
+# ---------------------------------------------------------------------------
+
+def _record_leaves(rec: Record, prefix: str = '') -> list[tuple[str, Any]]:
+    """(field path, value) for every non-record field of a record."""
+    out: list[tuple[str, Any]] = []
+    for key, val in rec.items():
+        path = f"{prefix}{key}"
+        if isinstance(val, Record):
+            out.extend(_record_leaves(val, path + '.'))
+        else:
+            out.append((path, val))
+    return out
+
+
+def _literal(val: Any) -> str:
+    """A value as a BASIC literal for SAVE."""
+    if isinstance(val, str):
+        return '"' + val.replace('"', '" + CHR$(34) + "') + '"'
+    return str(val)
+
+
+def number_source(lines: list[str]) -> list[tuple[int, str]]:
+    """(line number, text) for QBASIC source lines. Blank lines are skipped;
+    a line that starts with a number keeps it, and runs of unnumbered lines
+    are numbered in steps of up to 10 that fit before the next numbered line."""
+    entries: list[tuple[int | None, str]] = []
+    for raw in lines:
+        text = raw.rstrip()
+        if not text.strip():
+            continue
+        m = re.match(r'\s*(\d+)(?:\s+(.*))?$', text)
+        if m:
+            if m.group(2):
+                entries.append((int(m.group(1)), m.group(2).strip()))
+            continue
+        entries.append((None, text.strip()))
+    out: list[tuple[int, str]] = []
+    prev = 0
+    i = 0
+    while i < len(entries):
+        num, text = entries[i]
+        if num is not None:
+            if num <= prev:
+                raise ValueError(f"line {num} is out of order (after {prev})")
+            out.append((num, text))
+            prev = num
+            i += 1
+            continue
+        j = i
+        while j < len(entries) and entries[j][0] is None:
+            j += 1
+        count = j - i
+        nxt = entries[j][0] if j < len(entries) else None
+        step = 10 if nxt is None else min(10, (nxt - prev) // (count + 1))
+        if step < 1:
+            raise ValueError(f"no room to number {count} line(s) between {prev} and {nxt}")
+        for k in range(count):
+            out.append((prev + (k + 1) * step, entries[i + k][1]))
+        prev = out[-1][0]
+        i = j
+    return out
+
+
+class PersistenceMixin(HostState):
+    """Programs and session settings on disk."""
+
+    def cmd_save(self, rest: str) -> None:
+        """SAVE <filename> — write program, config, and definitions to a .qb file."""
+        if not rest:
+            self.io.writeln("?USAGE: SAVE <filename>")
+            return
+        try:
+            path = self._sanitize_path(rest)
+        except ValueError as e:
+            self.io.writeln(f"?SAVE ERROR: {e}")
+            return
+        checked = self._check_agent_path(path, "SAVE")
+        if checked is None:
+            return
+        path = checked
+        if path.lower().endswith('.bas'):
+            imported_bas: set[int] = getattr(self, '_imported_lines', set())
+            lines = [n for n in sorted(self.program) if n not in imported_bas]
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    for num in lines:
+                        f.write(f"{num} {self.program[num]}\n")
+                self.io.writeln(f"SAVED {len(lines)} lines to {path}")
+            except OSError as e:
+                self.io.writeln(f"?SAVE ERROR: {e}")
+            return
+        if not path.endswith('.qb'):
+            path += '.qb'
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                # Save config
+                f.write(f"QUBITS {self.num_qubits}\n")
+                f.write(f"SHOTS {self.shots}\n")
+                if self.sim_method != 'automatic':
+                    f.write(f"METHOD {self.sim_method}\n")
+                if self.sim_device != 'CPU':
+                    f.write(f"METHOD {self.sim_device}\n")
+                if self.sim_precision != 'double':
+                    f.write(f"PRECISION {self.sim_precision.upper()}\n")
+                if getattr(self, '_screen_mode', 0):
+                    f.write(f"DISPLAY {self._screen_mode}\n")
+                if getattr(self, '_option_base', 0):
+                    f.write(f"OPTION BASE {self._option_base}\n")
+                if getattr(self, '_endian_big', False):
+                    f.write("OPTION ENDIAN BIG\n")
+                if getattr(self, '_seed', None) is not None:
+                    f.write(f"SEED {self._seed}\n")
+                for line in self._device_lines():
+                    f.write(line + "\n")
+                # Save LOCC config if active
+                if self.locc_mode and self.locc:
+                    mode = "JOINT" if self.locc.joint else "SPLIT"
+                    sizes = ' '.join(str(s) for s in self.locc.sizes)
+                    f.write(f"LOCC {mode} {sizes}\n")
+                # Save user-defined TYPEs (multi-line block, re-read on LOAD)
+                for tname, fields in getattr(self, '_user_types', {}).items():
+                    f.write(f"TYPE {tname}\n")
+                    for fname, ftype in fields:
+                        f.write(f"  {fname} AS {ftype}\n")
+                    f.write("END TYPE\n")
+                # Save DEF FN user functions
+                for fname, fdef in getattr(self, '_user_fns', {}).items():
+                    short = fname[2:] if fname.upper().startswith('FN') else fname
+                    params = ', '.join(fdef['params'])
+                    f.write(f"DEF FN {short}({params}) = {fdef['body']}\n")
+                # Save custom gates as executable UNITARY commands
+                for name, matrix in self._custom_gates.items():
+                    rows = matrix.tolist()
+                    mat_str = '[' + ','.join(
+                        '[' + ','.join(str(v) for v in row) + ']'
+                        for row in rows
+                    ) + ']'
+                    f.write(f"UNITARY {name} = {mat_str}\n")
+                # Save subroutines
+                for name, sub in self.subroutines.items():
+                    if isinstance(sub, list):
+                        f.write(f"DEF {name} = {' : '.join(sub)}\n")
+                    else:
+                        params = f"({', '.join(sub['params'])})" if sub['params'] else ""
+                        f.write(f"DEF {name}{params} = {' : '.join(sub['body'])}\n")
+                # Save registers
+                for name, (start, size) in self.registers.items():
+                    f.write(f"REG {name} {size}\n")
+                # Save variables (internal _vars skipped; a record as its DIM
+                # and one LET per field)
+                for name, val in self.variables.items():
+                    if name.startswith('_'):
+                        continue
+                    if isinstance(val, Record):
+                        f.write(f"DIM {name} AS {val.type_name}\n")
+                        for path, leaf in _record_leaves(val):
+                            f.write(f"LET {name}.{path} = {_literal(leaf)}\n")
+                        continue
+                    if not isinstance(val, (int, float, str)):
+                        continue        # arrays of results, matrices, records of other kinds
+                    f.write(f"LET {name} = {_literal(val)}\n")
+                # Save program (exclude lines injected by IMPORT)
+                imported: set[int] = getattr(self, '_imported_lines', set())
+                saved = [n for n in sorted(self.program.keys()) if n not in imported]
+                for num in saved:
+                    f.write(f"{num} {self.program[num]}\n")
+            self.io.writeln(f"SAVED {len(saved)} lines to {path}")
+        except Exception as e:
+            self.io.writeln(f"?SAVE ERROR: {e}")
+
+    def _device_lines(self) -> list[str]:
+        """The session lines that rebuild the noise model, device model and
+        logical-qubit mode on LOAD (SAVE writes them after QUBITS and METHOD)."""
+        lines: list[str] = []
+        lm = self._logical_mode
+        edges = ', '.join(f"{a}-{b}" for a, b in
+                          sorted({tuple(sorted(e)) for e in self._coupling_map or ()}))
+        if self._device_spec:
+            lines.append(f"DEVICE {self._device_spec}")
+            if edges:
+                lines.append(f"COUPLING {edges}")
+            elif self._device_spec.split()[0] not in ('all', 'full'):
+                lines.append("COUPLING OFF")
+        else:
+            spec = (lm.get('saved_noise') or (None, None))[1] if lm else self._noise_spec
+            if spec:
+                lines.append(f"NOISE {spec}")
+            if edges:
+                lines.append(f"COUPLING {edges}")
+        if self._basis_gates:
+            lines.append("BASIS " + ', '.join(self._basis_gates))
+        if lm:
+            if lm['code'] == 'STEANE':
+                lines.append(f"LQUBITS {lm['n']} CODE STEANE PHYS {lm['p']:g}")
+            else:
+                mode = (' ENCODED' if lm.get('force_encoded')
+                        else '' if lm.get('encoded') else ' MODEL')
+                lines.append(f"LQUBITS {lm['n']} CODE {lm['code']} {lm['d']} "
+                             f"PHYS {lm['p']:g}{mode}")
+        return lines
+
+    def _load_bas(self, path: str) -> int:
+        """Load QBASIC source (.bas): every non-blank line is a program line;
+        numbered lines keep their numbers and the rest are numbered to fit
+        around them. Returns the number of lines loaded."""
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            numbered = number_source(f.read().splitlines())
+        self.cmd_new(silent=True)
+        for num, text in numbered:
+            self.process(f"{num} {text}", track_undo=False)
+        return len(numbered)
+
+    def cmd_load(self, rest: str) -> None:
+        """LOAD <filename> — clear state and load a .qb program file (or QBASIC
+        source, .bas, whose unnumbered lines are numbered)."""
+        if not rest:
+            self.io.writeln("?USAGE: LOAD <filename>")
+            return
+        try:
+            path = self._sanitize_path(rest)
+        except ValueError as e:
+            self.io.writeln(f"?LOAD ERROR: {e}")
+            return
+        if os.path.isdir(path):
+            self.io.writeln(f"?{path} is a directory, not a file")
+            return
+        if not path.endswith('.qb') and not os.path.isfile(path):
+            path += '.qb'
+        if not os.path.isfile(path):
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
+            return
+        if path.lower().endswith('.bas'):
+            try:
+                count = self._load_bas(path)
+            except (ValueError, OSError) as e:
+                self.io.writeln(f"?LOAD ERROR: {e}")
+                return
+            self.io.writeln(f"LOADED {path} ({count} lines)")
+            return
+        try:
+            prev_qubits = self.num_qubits
+            prev_shots = self.shots
+            self.cmd_new(silent=True)
+            with open(path, 'r', encoding='utf-8-sig') as f:
+                for line in f:
+                    line = line.rstrip('\n\r')
+                    if line and not line.startswith('#'):
+                        self.process(line, track_undo=False)
+            self.io.writeln(f"LOADED {path} ({len(self.program)} lines)")
+            if self.num_qubits != prev_qubits:
+                self.io.writeln(f"  (QUBITS changed: {prev_qubits} -> {self.num_qubits})")
+            if self.shots != prev_shots:
+                self.io.writeln(f"  (SHOTS changed: {prev_shots} -> {self.shots})")
+        except Exception as e:
+            self.io.writeln(f"?LOAD ERROR: {e}")
+
+    def cmd_include(self, rest: str) -> None:
+        """INCLUDE file.qb — merge another program's lines into current.
+
+        Depth-limited to MAX_INCLUDE_DEPTH to prevent infinite recursion.
+        Cycle detection via _include_stack prevents A->B->A loops.
+        SAVE, LOAD, and INCLUDE are blocked inside included files so that
+        an included script cannot write arbitrary files or recurse further
+        without the user's direct interaction.
+        """
+        if self._include_depth >= MAX_INCLUDE_DEPTH:
+            self.io.writeln(f"?INCLUDE DEPTH LIMIT ({MAX_INCLUDE_DEPTH}) — possible recursion")
+            return
+        try:
+            path = self._sanitize_path(rest)
+        except ValueError as e:
+            self.io.writeln(f"?INCLUDE ERROR: {e}")
+            return
+        path = self._find_qb_file(path)
+        if not os.path.isfile(path):
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
+            return
+        resolved = os.path.realpath(path)
+        if resolved in self._include_stack:
+            self.io.writeln(f"?INCLUDE CYCLE: {path} already in include chain")
+            return
+        count = 0
+        self._include_depth += 1
+        self._include_stack.append(resolved)
+        try:
+            with open(path, 'r', encoding='utf-8-sig') as f:
+                for line in f:
+                    line = line.rstrip('\n\r')
+                    if not line or line.startswith('#'):
+                        continue
+                    # Block file-writing commands inside includes
+                    first_word = line.split(None, 1)[0].upper() if line.strip() else ''
+                    if first_word in ('SAVE', 'LOAD', 'EXPORT', 'CSV'):
+                        self.io.writeln(f"  ?BLOCKED IN INCLUDE: {first_word}")
+                        continue
+                    self.process(line, track_undo=False)
+                    count += 1
+        finally:
+            self._include_stack.pop()
+            self._include_depth -= 1
+        self.io.writeln(f"INCLUDED {path} ({count} lines)")
+
+    def cmd_import(self, rest: str) -> None:
+        """IMPORT "file.qb" — load subroutine definitions with namespace prefix.
+
+        DEFs in the imported file are prefixed with the module name.
+        E.g., IMPORT "math.qb" makes DEF ROT available as MATH.ROT.
+        """
+        path = rest.strip().strip('"').strip("'")
+        if not path:
+            self.io.writeln('?USAGE: IMPORT "filename"')
+            return
+        try:
+            path = self._sanitize_path(path)
+        except ValueError as e:
+            self.io.writeln(f"?IMPORT ERROR: {e}")
+            return
+        path = self._find_qb_file(path)
+        if not os.path.isfile(path):
+            self.io.writeln(f"?FILE NOT FOUND: {path}")
+            return
+        # Module name from filename (without extension)
+        mod_name = os.path.splitext(os.path.basename(path))[0].upper()
+        # Parse the file for DEF statements
+        import_count = 0
+        # Reserved high range for injected SUB/FUNCTION lines, tracked so SAVE
+        # and listings can exclude them.
+        _import_line_counter = 900000
+        in_procedure = False
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            for line in f:
+                line = line.rstrip('\n\r').strip()
+                if not line or line.startswith('#'):
+                    continue
+                # Look for DEF name = body
+                upper = line.upper()
+                if in_procedure and not upper.startswith(('END SUB', 'END FUNCTION')):
+                    ln = _import_line_counter          # a SUB or FUNCTION body line
+                    while ln in self.program:
+                        ln += 10
+                    _import_line_counter = ln + 10
+                    self.process(f"{ln} {line}", track_undo=False)
+                    self._imported_lines.add(ln)
+                    continue
+                if upper.startswith('DEF ') and '=' in line and not upper.startswith('DEF BEGIN'):
+                    from qubasic_core.parser import RE_DEF_SINGLE
+                    dm = RE_DEF_SINGLE.match(line[4:].strip())
+                    if dm:
+                        name = dm.group(1).upper()
+                        params = [p.strip() for p in dm.group(2).split(',')] if dm.group(2) else []
+                        body = [s.strip() for s in dm.group(3).split(':') if s.strip()]
+                        qualified = f"{mod_name}.{name}"
+                        self.subroutines[qualified] = {'body': body, 'params': params}
+                        import_count += 1
+                # SUB/FUNCTION must live in self.program for _scan_subs and CALL
+                # to find them, so inject into a reserved high range and record
+                # the line numbers as imported (excluded from SAVE).
+                elif upper.startswith(('SUB ', 'FUNCTION ', 'END SUB', 'END FUNCTION')):
+                    ln = _import_line_counter
+                    while ln in self.program:
+                        ln += 10
+                    _import_line_counter = ln + 10
+                    self.process(f"{ln} {line}", track_undo=False)
+                    self._imported_lines.add(ln)
+                    in_procedure = not upper.startswith('END')
+                    import_count += in_procedure
+        self.io.writeln(f"IMPORTED {mod_name} ({import_count} definitions from {path})")
+
+    def cmd_dir(self, rest: str = '') -> None:
+        """DIR [path] — list the .qb files in a directory."""
+        if rest.strip():
+            path = self._sanitize_path(rest)
+        else:
+            path = '.'
+        try:
+            files = [f for f in os.listdir(path) if f.endswith('.qb')]
+            if files:
+                for f in sorted(files):
+                    size = os.path.getsize(os.path.join(path, f))
+                    self.io.writeln(f"  {f:<30} {size:>6} bytes")
+            else:
+                self.io.writeln("  No .qb files found")
+        except Exception as e:
+            self.io.writeln(f"?DIR ERROR: {e}")
+
+    def _qb_search_dirs(self) -> list[str]:
+        """Directories searched for .qb files: cwd then QUBASIC_PATH entries."""
+        dirs = ['.']
+        env = os.environ.get('QUBASIC_PATH', '')
+        if env:
+            dirs += [d for d in env.split(os.pathsep) if d]
+        return dirs
+
+    def _find_qb_file(self, path: str) -> str:
+        """Resolve a sanitized relative .qb path against cwd then the library
+        search path. Returns the first existing match, else the cwd candidate."""
+        candidates = [path] + ([path + '.qb'] if not path.endswith('.qb') else [])
+        for d in self._qb_search_dirs():
+            for c in candidates:
+                full = c if d == '.' else os.path.join(d, c)
+                if os.path.isfile(full):
+                    return full
+        return candidates[-1]
+
+    def _check_agent_path(self, path: str, cmd: str) -> str | None:
+        """In agent mode, restrict paths to cwd. Returns resolved path or None on error.
+
+        Uses pathlib is_relative_to for safe containment check instead of
+        string prefix matching, which can be bypassed via symlinks or
+        crafted path components that share a common prefix string.
+        """
+        if not self.agent_mode:
+            return path
+        resolved = Path(os.path.realpath(os.path.join(os.getcwd(), path)))
+        cwd_real = Path(os.path.realpath(os.getcwd()))
+        if not resolved.is_relative_to(cwd_real):
+            self.io.writeln(f"?{cmd} BLOCKED: path escapes working directory in agent mode")
+            return None
+        return str(resolved)

@@ -1,35 +1,33 @@
-"""QUBASIC engine — constants and limits, the exec-result sentinels, and one
-import point for the parser patterns, gate tables and LOCC engine (the names
-in __all__ are re-exported from patterns.py, gates.py and locc_engine.py)."""
+"""QUBASIC core: limits and defaults, execution outcomes, the error
+hierarchy, the I/O port protocol, the protocols the mixins and backends
+satisfy, the execution context and the progress spinner.
+"""
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import MutableMapping
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any
-from qubasic_core.patterns import (
-    RE_LINE_NUM, RE_DEF_SINGLE, RE_DEF_BEGIN, RE_REG_INDEX,
-    RE_AT_REG, RE_AT_REG_LINE, RE_SEND, RE_SHARE, RE_MEAS, RE_RESET,
-    RE_UNITARY, RE_DIM, RE_REDIM, RE_ERASE, RE_GET, RE_INPUT,
-    RE_CTRL, RE_INV, RE_LET_ARRAY, RE_LET_VAR, RE_PRINT,
-    RE_GOTO, RE_GOSUB, RE_FOR, RE_NEXT, RE_WHILE, RE_IF_THEN,
-    RE_GOTO_GOSUB_TARGET, RE_MEASURE_BASIS, RE_SYNDROME,
-    RE_DATA, RE_READ, RE_ON_GOTO, RE_ON_GOSUB,
-    RE_SELECT_CASE, RE_CASE, RE_DO, RE_LOOP_STMT, RE_EXIT,
-    RE_SUB, RE_END_SUB, RE_FUNCTION, RE_END_FUNCTION, RE_CALL,
-    RE_LOCAL, RE_STATIC_DECL, RE_SHARED,
-    RE_ON_ERROR, RE_RESUME, RE_ERROR_STMT, RE_ASSERT,
-    RE_SWAP, RE_POKE, RE_SYS, RE_OPEN, RE_CLOSE,
-    RE_PRINT_FILE, RE_INPUT_FILE, RE_LINE_INPUT, RE_OPTION_BASE,
-    RE_IMPORT, RE_SAVE_EXPECT, RE_SAVE_PROBS, RE_SAVE_AMPS,
-    RE_SET_STATE, RE_TYPE_BEGIN, RE_TYPE_FIELD, RE_END_TYPE, RE_DIM_TYPE,
-    RE_CHAIN, RE_MERGE, RE_DEF_FN, RE_PRINT_USING,
-    RE_COLOR, RE_LOCATE, RE_SCREEN, RE_LPRINT,
-    RE_ON_MEASURE, RE_ON_TIMER, RE_DIM_MULTI, RE_LET_STR,
-)
+from typing import Any, Protocol, runtime_checkable
 
-# ═══════════════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════════════
+import numpy as np
+
+try:
+    from rich.console import Console as _RichConsole
+    from rich.table import Table as _RichTable
+    _RICH = True
+    _console: Any = _RichConsole(highlight=False)
+except ImportError:
+    _RICH = False
+    _RichTable = None  # type: ignore[assignment,misc]
+    _console = None
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC engine constants: limits and defaults, the exec-result sentinels,
+# and the optional rich console.
+# ---------------------------------------------------------------------------
 
 # ═══════════════════════════════════════════════════════════════════════
 # Limits and defaults
@@ -60,9 +58,6 @@ MAX_BLOCH_DISPLAY = 8
 HISTOGRAM_BAR_WIDTH = 35
 AMPLITUDE_THRESHOLD = 1e-8
 MAX_INCLUDE_DEPTH = 8
-# Peak memory of an Aer statevector run relative to the raw state; the full
-# model (state capture, single precision, numpy engines) is in capacity.py.
-from qubasic_core.capacity import AER_FACTOR as OVERHEAD_FACTOR  # noqa: E402
 RAM_BUDGET_FRACTION = 0.8
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -86,84 +81,220 @@ ExecOutcome = ExecResult | int
 # Optional rich-terminal packages
 # ═══════════════════════════════════════════════════════════════════════
 
-try:
-    from rich.console import Console as _RichConsole
-    from rich.table import Table as _RichTable
-    _RICH = True
-    _console: Any = _RichConsole(highlight=False)
-except ImportError:
-    _RICH = False
-    _RichTable = None  # type: ignore[assignment,misc]
-    _console = None
+
+# ---------------------------------------------------------------------------
+# QUBASIC structured error hierarchy.
+# ---------------------------------------------------------------------------
+
+class QBasicError(Exception):
+    """Base for all QUBASIC errors."""
+
+    def __init__(self, message: str, *, code: int = 0, line: int | None = None) -> None:
+        self.message = message
+        self.code = code
+        self.line = line
+        super().__init__(message)
 
 
-
-def _estimate_gb(n_qubits: int, precision: str = 'double') -> float:
-    """Peak memory (GB) of an n-qubit statevector run that returns counts."""
-    from qubasic_core.capacity import aer_peak_bytes
-    return (aer_peak_bytes(n_qubits, 'statevector', precision) or 0) / 1e9
+class QBasicSyntaxError(QBasicError):
+    """Parse-time or syntax error."""
 
 
-def _get_ram_gb() -> tuple[float, float] | None:
-    """Return (total_gb, available_gb) or None if psutil is unavailable."""
-    try:
-        import psutil
-        mem = psutil.virtual_memory()
-        return mem.total / 1e9, mem.available / 1e9
-    except ImportError:
-        return None
+class QBasicRuntimeError(QBasicError):
+    """Execution-time error."""
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Gate matrices, builders, and simulation primitives (re-exported from gates.py)
-# ═══════════════════════════════════════════════════════════════════════
+class QBasicBuildError(QBasicError):
+    """Circuit/program build error."""
 
-from qubasic_core.gates import (
-    GATE_TABLE, GATE_ALIASES, _np_gate_matrix, _apply_gate_np,
-    _measure_np, _sample_np, _sample_one_np, _GATE_BUILDERS,
-    _MAT_CX, _MAT_CY, _MAT_CH, _MAT_CCX, _MAT_CSWAP,
-    _MAT_H, _MAT_X, _MAT_Y, _MAT_Z, _MAT_S, _MAT_T,
-    _MAT_SDG, _MAT_TDG, _MAT_SX, _MAT_ID, _MAT_CZ,
-    _MAT_SWAP, _MAT_DCX, _MAT_ISWAP,
-)
 
-# ═══════════════════════════════════════════════════════════════════════
-# LOCC engine and constants (re-exported from locc_engine.py)
-# ═══════════════════════════════════════════════════════════════════════
+class QBasicRangeError(QBasicError):
+    """Value out of range."""
 
-from qubasic_core.locc_engine import (
-    LOCCEngine,
-    LOCC_MAX_JOINT_QUBITS, LOCC_MAX_SPLIT_QUBITS, LOCC_MAX_REGISTERS,
-    LOCC_SEND_SHOT_CAP, LOCC_SEND_QUBIT_THRESHOLD,
-)
 
-__all__ = [
-    'RE_LINE_NUM', 'RE_DEF_SINGLE', 'RE_DEF_BEGIN', 'RE_REG_INDEX', 'RE_AT_REG',
-    'RE_AT_REG_LINE', 'RE_SEND', 'RE_SHARE', 'RE_MEAS', 'RE_RESET', 'RE_UNITARY',
-    'RE_DIM', 'RE_REDIM', 'RE_ERASE', 'RE_GET', 'RE_INPUT', 'RE_CTRL', 'RE_INV',
-    'RE_LET_ARRAY', 'RE_LET_VAR', 'RE_PRINT', 'RE_GOTO', 'RE_GOSUB', 'RE_FOR',
-    'RE_NEXT', 'RE_WHILE', 'RE_IF_THEN', 'RE_GOTO_GOSUB_TARGET', 'RE_MEASURE_BASIS',
-    'RE_SYNDROME', 'RE_DATA', 'RE_READ', 'RE_ON_GOTO', 'RE_ON_GOSUB', 'RE_SELECT_CASE',
-    'RE_CASE', 'RE_DO', 'RE_LOOP_STMT', 'RE_EXIT', 'RE_SUB', 'RE_END_SUB',
-    'RE_FUNCTION', 'RE_END_FUNCTION', 'RE_CALL', 'RE_LOCAL', 'RE_STATIC_DECL',
-    'RE_SHARED', 'RE_ON_ERROR', 'RE_RESUME', 'RE_ERROR_STMT', 'RE_ASSERT', 'RE_SWAP',
-    'RE_POKE', 'RE_SYS', 'RE_OPEN', 'RE_CLOSE', 'RE_PRINT_FILE', 'RE_INPUT_FILE',
-    'RE_LINE_INPUT', 'RE_OPTION_BASE', 'RE_IMPORT', 'RE_SAVE_EXPECT', 'RE_SAVE_PROBS',
-    'RE_SAVE_AMPS', 'RE_SET_STATE', 'RE_TYPE_BEGIN', 'RE_TYPE_FIELD', 'RE_END_TYPE',
-    'RE_DIM_TYPE', 'RE_CHAIN', 'RE_MERGE', 'RE_DEF_FN', 'RE_PRINT_USING', 'RE_COLOR',
-    'RE_LOCATE', 'RE_SCREEN', 'RE_LPRINT', 'RE_ON_MEASURE', 'RE_ON_TIMER',
-    'RE_DIM_MULTI', 'RE_LET_STR', 'MAX_QUBITS', 'METHOD_MAX_QUBITS', 'DEFAULT_QUBITS',
-    'DEFAULT_SHOTS', 'MAX_UNDO_STACK', 'MAX_LOOP_ITERATIONS', 'MAX_HISTOGRAM_STATES',
-    'MAX_DISPLAY_AMPLITUDES', 'MAX_BLOCH_DISPLAY', 'HISTOGRAM_BAR_WIDTH',
-    'AMPLITUDE_THRESHOLD', 'MAX_INCLUDE_DEPTH', 'OVERHEAD_FACTOR',
-    'RAM_BUDGET_FRACTION', 'ExecResult', 'ExecOutcome', '_estimate_gb', '_get_ram_gb',
-    '_RICH', '_RichTable', '_console',
-    'GATE_TABLE', 'GATE_ALIASES', '_np_gate_matrix', '_apply_gate_np', '_measure_np',
-    '_sample_np', '_sample_one_np', '_GATE_BUILDERS', '_MAT_CX', '_MAT_CY', '_MAT_CH',
-    '_MAT_CCX', '_MAT_CSWAP', '_MAT_H', '_MAT_X', '_MAT_Y', '_MAT_Z', '_MAT_S',
-    '_MAT_T', '_MAT_SDG', '_MAT_TDG', '_MAT_SX', '_MAT_ID', '_MAT_CZ', '_MAT_SWAP',
-    '_MAT_DCX', '_MAT_ISWAP', 'LOCCEngine', 'LOCC_MAX_JOINT_QUBITS',
-    'LOCC_MAX_SPLIT_QUBITS', 'LOCC_MAX_REGISTERS', 'LOCC_SEND_SHOT_CAP',
-    'LOCC_SEND_QUBIT_THRESHOLD',
+class QBasicIOError(QBasicError):
+    """File or I/O error."""
+
+
+class QBasicUndefinedError(QBasicError):
+    """Reference to undefined name."""
+
+
+class MidCircuitRead(ValueError):
+    """A mid-circuit measurement bit was read as a number during a circuit
+    build; the program runs live instead."""
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC I/O protocol — decouples execution engine from print/input.
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class IOPort(Protocol):
+    """Abstract I/O port for execution output and user input."""
+
+    def write(self, text: str) -> None: ...
+    def writeln(self, text: str) -> None: ...
+    def read_line(self, prompt: str) -> str: ...
+
+
+class NullIO:
+    """Discards output and reads end-of-input: the IO of an inner run whose
+    output is not shown (COMPARE, PLOT, ANIMATE, MINIMIZE, STATS)."""
+
+    def write(self, text: str) -> None:
+        pass
+
+    def writeln(self, text: str) -> None:
+        pass
+
+    def read_line(self, prompt: str) -> str:
+        return ''
+
+
+class StdIOPort:
+    """Default I/O: stdout/stdin."""
+
+    def write(self, text: str) -> None:
+        try:
+            print(text, end='', flush=True)
+        except UnicodeEncodeError:
+            print(text.encode('ascii', 'replace').decode('ascii'), end='', flush=True)
+
+    def writeln(self, text: str) -> None:
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            print(text.encode('ascii', 'replace').decode('ascii'))
+
+    def read_line(self, prompt: str) -> str:
+        return input(prompt)
+
+
+# ---------------------------------------------------------------------------
+# The terminal's public surface as a runtime-checkable Protocol.
+#
+# TerminalProtocol names the state and methods an embedding or a front end
+# (the web REPL, the Jupyter kernel, qubasic_core.api) relies on, so
+# ``isinstance(obj, TerminalProtocol)`` tells whether an object can stand in
+# for a QBasicTerminal. The full contract between the mixins themselves, every
+# shared attribute and method, is HostState in qubasic_core/host.py, which
+# mypy checks.
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class TerminalProtocol(Protocol):
+    """Attributes and methods that mixins expect on the host terminal."""
+
+    # ── State ──────────────────────────────────────────────────────────
+
+    program: dict[int, str]
+    num_qubits: int
+    shots: int
+    subroutines: dict[str, Any]
+    registers: OrderedDict[str, tuple[int, int]]
+    variables: dict[str, Any]
+    arrays: dict[str, list[float]]
+    last_counts: dict[str, int] | None
+    last_sv: np.ndarray | None
+    last_circuit: Any | None
+    step_mode: bool
+    sim_method: str
+    sim_device: str
+    locc: Any | None
+    locc_mode: bool
+
+    _undo_stack: list[dict[int, str]]
+    _gosub_stack: list[int]
+    _custom_gates: dict[str, np.ndarray]
+    _noise_model: Any | None
+    _max_iterations: int
+    _include_depth: int
+    _parsed: dict[int, Any]
+    _circuit_cache_key: Any | None
+    _circuit_cache: Any | None
+    io: Any  # IOPort
+
+    # ── Methods mixins call on the host ────────────────────────────────
+
+    def _get_parsed(self, line_num: int) -> Any: ...
+    def eval_expr(self, expr: str) -> float: ...
+    def _safe_eval(self, expr: str, extra_ns: dict[str, Any] | None = None) -> Any: ...
+    def _eval_with_vars(self, expr: str, run_vars: MutableMapping[str, Any]) -> float: ...
+    def _eval_condition(self, cond: str, run_vars: MutableMapping[str, Any]) -> bool: ...
+    def _gate_info(self, name: str) -> tuple[int, int] | None: ...
+    def _resolve_qubit(self, arg: str) -> int: ...
+    def _expand_statement(self, stmt: str) -> list[str]: ...
+    def _tokenize_gate(self, stmt: str) -> list[str]: ...
+    def _parse_syndrome(self, stmt: str, run_vars: MutableMapping[str, Any]) -> tuple[str, list[int], str] | None: ...
+    def _split_colon_stmts(self, stmt: str) -> list[str]: ...
+    def _print_statevector(self, sv: np.ndarray, n_qubits: int | None = None) -> None: ...
+    def _print_bloch_single(self, sv: np.ndarray, qubit: int, n_qubits: int | None = None) -> None: ...
+    def print_histogram(self, counts: dict[str, int]) -> None: ...
+    def cmd_new(self, *, silent: bool = False) -> None: ...
+    def cmd_run(self) -> None: ...
+    def cmd_list(self, rest: str = '') -> None: ...
+    def cmd_locc(self, rest: str) -> None: ...
+    def process(self, line: str) -> None: ...
+
+
+class QuantumBackend(Protocol):
+    """Abstract quantum backend for gate application."""
+
+    def apply_gate(self, gate_name: str, params: tuple[float, ...],
+                   qubits: list[int]) -> None: ...
+    def barrier(self) -> None: ...
+    def reset(self, qubit: int) -> None: ...
+
+
+class CircuitBackend(Protocol):
+    """What the circuit builder needs of its backend: the circuit it adds to,
+    gate application, barriers and controlled operations (QiskitBackend, and
+    LiveBackend for a live shot)."""
+
+    @property
+    def qc(self) -> Any: ...
+
+    def apply_gate(self, gate_name: str, params: tuple[float, ...],
+                   qubits: list[int]) -> None: ...
+
+    def barrier(self) -> None: ...
+
+    def append_controlled(self, gate: Any, qubits: list[int]) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC execution context — unified mutable state for program execution.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExecContext:
+    """Mutable execution state passed through the entire call tree."""
+
+    sorted_lines: Any  # the CompiledProgram (indexing gives line numbers)
+    ip: int
+    run_vars: MutableMapping[str, Any]  # a dict, or a Scope over the variables
+    loop_stack: list[dict[str, Any]] = field(default_factory=list)
+    iteration_count: int = 0
+    max_iterations: int = 100_000
+
+    # Qiskit circuit-build path (None in LOCC path)
+    qc: Any = None
+
+    # Backend abstraction (QiskitBackend or LOCCRegBackend)
+    backend: Any = None
+
+
+# ---------------------------------------------------------------------------
+# Progress indication for long runs: spinner frames drawn from quantum states.
+# ---------------------------------------------------------------------------
+
+_QUANTUM_SPINNER = [
+    '|0\u27E9', '|+\u27E9', '|1\u27E9', '|-\u27E9',
+    '|i\u27E9', '|\u03C8\u27E9', '|0\u27E9', '|\u03D5\u27E9',
 ]
 
+
+def quantum_spin(step: int) -> str:
+    """Return the spinner frame for the given step."""
+    return _QUANTUM_SPINNER[step % len(_QUANTUM_SPINNER)]

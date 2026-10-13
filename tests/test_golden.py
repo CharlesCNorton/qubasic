@@ -1,11 +1,10 @@
 """Golden-script and metamorphic tests — whole programs, end to end.
 
-The unit suites exercise components; every defect the 0.15.0 audit found was
-correct units composed wrongly. These tests run complete .qb programs through
-the same path the CLI uses and assert on physics identities (an operation
-followed by its inverse is the identity, teleportation preserves states,
-EXPORT round-trips through LOADQASM) and on the audited regressions (RESUME,
-$D014, SWEEP restore, XEB normalization). Real Aer throughout — no mock.
+These tests run complete .qb programs through the same path the CLI uses and
+assert on physics identities (an operation followed by its inverse is the
+identity, teleportation preserves states, EXPORT round-trips through LOADQASM)
+and on whole-program behaviour (RESUME, $D014, SWEEP's restore, XEB's
+normalization, OPTION ENDIAN), all on real Aer simulations.
 """
 
 import io
@@ -14,8 +13,8 @@ import unittest
 
 import numpy as np
 
+from qubasic_core.editing import ProgramMgmtMixin
 from qubasic_core.terminal import QBasicTerminal
-from qubasic_core.program_mgmt import ProgramMgmtMixin
 
 
 def _has(*mods):
@@ -111,7 +110,7 @@ class TestQuantumIdentities(unittest.TestCase):
                 os.chdir(old_cwd)
 
     def test_molecule_h2_fci_energy(self):
-        from qubasic_core.qchem import h2_hamiltonian
+        from qubasic_core.physics import h2_hamiltonian
         op = h2_hamiltonian(0.7414)
         w = np.linalg.eigvalsh(np.asarray(op.to_matrix()))
         self.assertAlmostEqual(float(w[0]), -1.13727, places=4)
@@ -160,7 +159,7 @@ class TestQuantumIdentities(unittest.TestCase):
         self.assertAlmostEqual(t.variables['_RHO1'], np.exp(-1.0), delta=0.06)
 
 
-class TestAuditRegressions(unittest.TestCase):
+class TestProgramBehaviour(unittest.TestCase):
     def test_resume_next_resumes(self):
         _, out = run_script([
             '10 ON ERROR GOTO 100',
@@ -257,7 +256,7 @@ class TestAuditRegressions(unittest.TestCase):
 
 class TestResearchQEC(unittest.TestCase):
     def test_bb_code_parameters(self):
-        from qubasic_core.qec2 import _bb_code
+        from qubasic_core.qec import _bb_code
         code = _bb_code(6, 6)
         self.assertEqual(code['n'], 72)
         self.assertEqual(code['k'], 12)
@@ -277,9 +276,9 @@ class TestResearchQEC(unittest.TestCase):
 
     @unittest.skipUnless(_has('stim', 'pymatching'), 'needs stim + pymatching')
     def test_circuit_level_distance_suppression(self):
-        t3, _ = run_script(['LOGICAL_ERROR_RATE REP 3 0.02 CIRCUIT 20000'])
+        t3, _ = run_script(['LOGICAL_ERROR_RATE REP 3 0.02 CIRCUIT STIM 20000'])
         ler3 = t3.variables['_LER']
-        t7, _ = run_script(['LOGICAL_ERROR_RATE REP 7 0.02 CIRCUIT 20000'])
+        t7, _ = run_script(['LOGICAL_ERROR_RATE REP 7 0.02 CIRCUIT STIM 20000'])
         ler7 = t7.variables['_LER']
         self.assertGreater(ler3, 0.0)
         self.assertLess(ler7, ler3)

@@ -1,24 +1,37 @@
-"""QUBASIC frontier benchmarking and verification.
-
-Cross-entropy benchmarking, quantum volume, interleaved and mirror randomized
-benchmarking, a linear-inversion 1-qubit gate-set tomography, and entanglement
-measures. All offline on Qiskit/Aer/numpy.
-
-  XEB [n] [depth] [trials]   Linear cross-entropy benchmarking fidelity
-  QVOLUME [n]                Quantum volume heavy-output test at width n
-  RBINT <gate> [maxlen]      Interleaved RB: fidelity of a specific Clifford gate
-  MIRROR [maxlen] [samples]  Mirror-circuit benchmarking (scalable)
-  GST                        1-qubit linear-inversion gate-set-style process estimate
-  CONCURRENCE [a b]          Two-qubit concurrence of a qubit pair
-  NEGATIVITY [qubits]        Entanglement negativity across a bipartition
+"""QUBASIC benchmarking and characterization (RB, XEB, QVOLUME,
+MIRROR, GST, CONCURRENCE, NEGATIVITY) and fault-tolerant resource estimates.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
-from qubasic_core.host import HostState
 
+from qubasic_core.host import HostState
+from qubasic_core.simtools import heavy_hex_edges
+
+if TYPE_CHECKING:
+    from qiskit import QuantumCircuit
+    from qiskit_aer import AerSimulator
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC frontier benchmarking and verification.
+#
+# Cross-entropy benchmarking, quantum volume, interleaved and mirror randomized
+# benchmarking, a linear-inversion 1-qubit gate-set tomography, and entanglement
+# measures. All offline on Qiskit/Aer/numpy.
+#
+#   XEB [n] [depth] [trials]   Linear cross-entropy benchmarking fidelity
+#   QVOLUME [n]                Quantum volume heavy-output test at width n
+#   RBINT <gate> [maxlen]      Interleaved RB: fidelity of a specific Clifford gate
+#   MIRROR [maxlen] [samples]  Mirror-circuit benchmarking (scalable)
+#   GST                        1-qubit linear-inversion gate-set-style process estimate
+#   CONCURRENCE [a b]          Two-qubit concurrence of a qubit pair
+#   NEGATIVITY [qubits]        Entanglement negativity across a bipartition
+# ---------------------------------------------------------------------------
 
 class BenchmarkingMixin(HostState):
     """XEB, quantum volume, RB variants, GST, and entanglement measures.
@@ -29,11 +42,11 @@ class BenchmarkingMixin(HostState):
 
     # ── helpers ──────────────────────────────────────────────────────────
 
-    def _bench_backend(self):
+    def _bench_backend(self) -> AerSimulator:
         from qiskit_aer import AerSimulator
         return AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
 
-    def _random_circuit(self, n: int, depth: int, rng):
+    def _random_circuit(self, n: int, depth: int, rng: np.random.Generator) -> QuantumCircuit:
         """Brickwork random circuit: random U3 layer + CZ entangling layer."""
         from qiskit import QuantumCircuit
         qc = QuantumCircuit(n)
@@ -72,7 +85,8 @@ class BenchmarkingMixin(HostState):
             for _ in range(trials):
                 qc = self._random_circuit(n, depth, rng)
                 probs = np.abs(Statevector(qc).data) ** 2
-                qcm = qc.copy(); qcm.measure_all()
+                qcm = qc.copy()
+                qcm.measure_all()
                 kw = {'shots': shots}
                 if self._seed is not None:
                     kw['seed_simulator'] = int(rng.integers(1 << 30))
@@ -122,7 +136,8 @@ class BenchmarkingMixin(HostState):
                         qc.append(random_unitary(4, seed=int(rng.integers(1 << 30))), [a, b])
                 probs = np.abs(Statevector(qc).data) ** 2
                 median = float(np.median(probs))
-                qcm = qc.copy(); qcm.measure_all()
+                qcm = qc.copy()
+                qcm.measure_all()
                 counts = backend.run(transpile(qcm, backend), shots=shots).result().get_counts()
                 hop = sum(c for b, c in counts.items() if probs[int(b, 2)] > median) / shots
                 hops.append(hop)
@@ -138,7 +153,7 @@ class BenchmarkingMixin(HostState):
 
     # ── Interleaved RB ─────────────────────────────────────────────────────
 
-    def _rb_survival(self, lengths, samples, interleave, rng):
+    def _rb_survival(self, lengths: list[int], samples: int, interleave: tuple[list[str], np.ndarray] | None, rng: np.random.Generator) -> list[float]:
         """Mean survival per length for single-qubit RB, optionally interleaving
         a fixed gate-word after each random Clifford."""
         from qiskit import QuantumCircuit, transpile
@@ -175,7 +190,7 @@ class BenchmarkingMixin(HostState):
         return out
 
     @staticmethod
-    def _fit_decay(lengths, survival, fit_fn):
+    def _fit_decay(lengths: Sequence[int], survival: Sequence[float], fit_fn: Callable[..., tuple[list[float], float]]) -> float:
         if max(survival) - min(survival) < 0.02:
             return 1.0
         best, _ = fit_fn(
@@ -203,7 +218,8 @@ class BenchmarkingMixin(HostState):
         lengths = []
         m = 1
         while m <= max_len:
-            lengths.append(m); m *= 2
+            lengths.append(m)
+            m *= 2
         rng = np.random.default_rng(self._seed)
         try:
             ref = self._rb_survival(lengths, 10, None, rng)
@@ -234,7 +250,8 @@ class BenchmarkingMixin(HostState):
         lengths = []
         m = 1
         while m <= max_len:
-            lengths.append(m); m *= 2
+            lengths.append(m)
+            m *= 2
         try:
             self.io.writeln(f"\n  Mirror benchmarking ({n} qubits):")
             self.io.writeln(f"  {'length':>8}  {'return P':>9}")
@@ -247,9 +264,11 @@ class BenchmarkingMixin(HostState):
                         layer = []
                         for q in range(n):
                             gate = ('h', 's', 'x', 'id')[int(rng.integers(4))]
-                            getattr(qc, gate)(q); layer.append((gate, q))
+                            getattr(qc, gate)(q)
+                            layer.append((gate, q))
                         for q in range(0, n - 1, 2):
-                            qc.cx(q, q + 1); layer.append(('cx', q))
+                            qc.cx(q, q + 1)
+                            layer.append(('cx', q))
                         layers.append(layer)
                     qc.barrier()
                     qc2 = qc.inverse()
@@ -280,6 +299,7 @@ class BenchmarkingMixin(HostState):
             self.io.writeln(f"?NOTHING TO CHARACTERIZE — enter a {n}-qubit program")
             return
         import itertools as _it
+
         from qiskit import QuantumCircuit, transpile
         preps1 = {'Z+': [], 'Z-': [('x',)], 'X+': [('h',)], 'Y+': [('h',), ('s',)]}
         meas1 = {'Z': [], 'X': [('h',)], 'Y': [('sdg',), ('h',)]}
@@ -363,7 +383,7 @@ class BenchmarkingMixin(HostState):
         parts = rest.replace(',', ' ').split()
         a, b = (int(parts[0]), int(parts[1])) if len(parts) >= 2 else (0, 1)
         try:
-            from qubasic_core import statetools as st
+            from qubasic_core import simtools as st
             if a == b or not (0 <= a < n and 0 <= b < n):
                 raise ValueError(f"need two different qubits in 0-{n - 1}")
             c = st.concurrence(st.subsystem_rdm(sv, [a, b], n))
@@ -384,7 +404,7 @@ class BenchmarkingMixin(HostState):
         n = self._active_nqubits
         A = [int(x) for x in rest.replace(',', ' ').split()] if rest.strip() else [0]
         try:
-            from qubasic_core import statetools as st
+            from qubasic_core import simtools as st
             for q in A:
                 if q < 0 or q >= n:
                     raise ValueError(f"qubit {q} out of range (0-{n - 1})")
@@ -396,3 +416,199 @@ class BenchmarkingMixin(HostState):
             self.variables['_NEGATIVITY'] = float(neg)
         except Exception as e:
             self.io.writeln(f"?NEGATIVITY ERROR: {e}")
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC compilation and resource estimation.
+#
+# Fault-tolerant resource estimation under the surface code, calibrated offline
+# device models (per-qubit T1/T2 plus a topology), and a transpiler pass that
+# reports circuit optimization. All offline.
+#
+#   RESOURCES <target_pL> <phys_p>   Estimate surface-code distance and qubit/time cost
+#   DEVICE linear|ring|heavyhex [n] [T1us] [T2us]   Load a calibrated device noise model
+#   OPTIMIZE [level]                 Transpile the program and report the reduction
+# ---------------------------------------------------------------------------
+
+# Surface-code logical error rate per code cycle, p_L = A (p / p_th)^((d+1)/2)
+# with A = 0.1 and p_th = 0.01 (Litinski, "A Game of Surface Codes", 2019),
+# shared by RESOURCES and the LQUBITS model.
+SC_A = 0.1
+SC_THRESHOLD = 0.01
+
+
+def surface_logical_rate(p: float, d: int) -> float:
+    """Logical error rate of a distance-d surface code at physical rate p."""
+    return SC_A * (p / SC_THRESHOLD) ** ((d + 1) / 2)
+
+
+class ResourceMixin(HostState):
+    """Resource estimation, calibrated device models, and circuit optimization.
+
+    Requires: TerminalProtocol — uses self.num_qubits, self.program,
+    self.build_circuit(), self._noise_model, self._coupling_map, self.io.
+    """
+
+    _SC_THRESHOLD = SC_THRESHOLD
+    _SC_A = SC_A
+
+    def cmd_resources(self, rest: str) -> None:
+        """RESOURCES <target_logical_error> <physical_error> — surface-code distance, physical qubits and runtime for a target logical error rate.
+
+        Finds the smallest surface-code distance d reaching the target logical
+        error rate at the given physical error rate, then estimates physical
+        qubits (2 d^2 - 1 per logical patch), the program's T-count, T-factory
+        overhead, and an approximate code-cycle / runtime figure."""
+        parts = rest.split()
+        if len(parts) < 2:
+            self.io.writeln("?USAGE: RESOURCES <target_logical_error> <physical_error>")
+            return
+        try:
+            target = float(self._eval_with_vars(parts[0], {}))
+            p = float(self._eval_with_vars(parts[1], {}))
+            if p >= self._SC_THRESHOLD:
+                self.io.writeln(f"?physical error {p} is above the surface-code threshold "
+                                f"~{self._SC_THRESHOLD}; error correction cannot help")
+                return
+            # Smallest odd d with A (p/p_th)^((d+1)/2) <= target.
+            d = 1
+            while surface_logical_rate(p, d) > target and d < 99:
+                d += 2
+            pL = surface_logical_rate(p, d)
+            n_logical = self.num_qubits
+            phys_per_logical = 2 * d * d - 1
+            data_qubits = n_logical * phys_per_logical
+            # T-count and logical depth from the program circuit, if any.
+            t_count = depth = 0
+            if self.program:
+                try:
+                    qc, _ = self.build_circuit()
+                    ops = qc.count_ops()
+                    t_count = ops.get('t', 0) + ops.get('tdg', 0)
+                    depth = qc.depth()
+                except Exception:
+                    t_count = depth = 0
+            # 15-to-1 T factory footprint and a parallelism assumption.
+            factory_qubits = 15 * phys_per_logical
+            n_factories = max(1, min(t_count, 8)) if t_count else 0
+            total_qubits = data_qubits + n_factories * factory_qubits
+            cycle_us = 1.0   # ~1 microsecond per surface-code cycle (typical SC qubit)
+            runtime_us = depth * d * cycle_us + t_count * d * cycle_us
+            self.io.writeln("\n  Fault-tolerant resource estimate (surface code):")
+            self.io.writeln(f"    target logical error : {target:g}")
+            self.io.writeln(f"    physical error       : {p:g}  (threshold ~{self._SC_THRESHOLD})")
+            self.io.writeln(f"    code distance        : d = {d}  (achieves p_L ~ {pL:.2e})")
+            self.io.writeln(f"    logical qubits       : {n_logical}")
+            self.io.writeln(f"    physical / logical   : {phys_per_logical}")
+            self.io.writeln(f"    data qubits          : {data_qubits:,}")
+            if t_count:
+                self.io.writeln(f"    T-count              : {t_count}")
+                self.io.writeln(f"    T-factories (15-to-1): {n_factories} x {factory_qubits:,} qubits")
+            self.io.writeln(f"    total physical qubits: ~{total_qubits:,}")
+            self.io.writeln(f"    est. runtime         : ~{runtime_us:.0f} us "
+                            f"({depth} logical depth, ~{cycle_us} us/cycle)")
+            self.variables['_FT_DISTANCE'] = d
+            self.variables['_FT_QUBITS'] = total_qubits
+        except Exception as e:
+            self.io.writeln(f"?RESOURCES ERROR: {e}")
+
+    def cmd_device(self, rest: str) -> None:
+        """DEVICE <topology> [n] [T1us] [T2us] — load a calibrated offline device model.
+
+        Builds a NoiseModel with per-qubit thermal relaxation (T1/T2 and gate
+        times) and a coupling map for the chosen topology (linear, ring, heavyhex,
+        all), so RUN simulates a realistic hardware device with no network. DEVICE
+        OFF clears it."""
+        parts = rest.split()
+        if not parts:
+            coupling = 'set' if self._coupling_map else 'none'
+            self.io.writeln(f"DEVICE: noise={'on' if self._noise_model else 'off'}, "
+                            f"coupling={coupling}")
+            return
+        if parts[0].upper() in ('OFF', 'NONE'):
+            self._noise_model = None
+            self._noise_spec = None
+            self._device_spec = None
+            self._coupling_map = None
+            self._circuit_cache_key = None
+            self.io.writeln("DEVICE OFF")
+            return
+        topo = parts[0].lower()
+        n = int(parts[1]) if len(parts) > 1 else self.num_qubits
+        t1 = float(parts[2]) * 1e-6 if len(parts) > 2 else 100e-6
+        t2 = float(parts[3]) * 1e-6 if len(parts) > 3 else 80e-6
+        try:
+            from qiskit_aer.noise import NoiseModel, thermal_relaxation_error
+            nm = NoiseModel()
+            t_1q, t_2q = 50e-9, 300e-9   # typical gate durations
+            _1q = ['h', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'sx', 'rx', 'ry', 'rz', 'p', 'u', 'id']
+            _2q = ['cx', 'cy', 'cz', 'ch', 'swap', 'dcx', 'iswap', 'crx', 'cry', 'crz', 'cp', 'rxx', 'ryy', 'rzz']
+            for q in range(n):
+                nm.add_quantum_error(thermal_relaxation_error(t1, t2, t_1q), _1q, [q])
+            err2 = thermal_relaxation_error(t1, t2, t_2q).expand(
+                thermal_relaxation_error(t1, t2, t_2q))
+            for a in range(n):
+                for b in range(n):
+                    if a != b:
+                        nm.add_quantum_error(err2, _2q, [a, b])
+            if topo == 'linear':
+                cm = [[i, i + 1] for i in range(n - 1)]
+            elif topo == 'ring':
+                cm = [[i, (i + 1) % n] for i in range(n)]
+            elif topo in ('heavyhex', 'heavy-hex'):
+                cm = heavy_hex_edges(n)
+            elif topo in ('all', 'full'):
+                cm = [[i, j] for i in range(n) for j in range(n) if i < j]
+            else:
+                raise ValueError(f"unknown topology '{topo}' (linear, ring, heavyhex, all)")
+            if n != self.num_qubits:
+                self.io.writeln(f"  (device has {n} qubits; QUBITS is {self.num_qubits})")
+            # 2-qubit noise only on coupled pairs: routing keeps every 2-qubit
+            # gate on an edge of the coupling map.
+            if topo not in ('all', 'full'):
+                nm = NoiseModel()
+                for q in range(n):
+                    nm.add_quantum_error(thermal_relaxation_error(t1, t2, t_1q), _1q, [q])
+                for a, b in cm:
+                    nm.add_quantum_error(err2, _2q, [a, b])
+                    nm.add_quantum_error(err2, _2q, [b, a])
+            edges = []
+            for a, b in cm:
+                edges += [[a, b], [b, a]]
+            self._noise_model = nm
+            self._coupling_map = edges if topo not in ('all', 'full') else None
+            self._noise_spec = None
+            self._device_spec = f"{topo} {n} {t1 * 1e6:g} {t2 * 1e6:g}"
+            self._circuit_cache_key = None
+            self.io.writeln(f"DEVICE {topo}: {n} qubits, T1={t1 * 1e6:.0f}us T2={t2 * 1e6:.0f}us, "
+                            f"thermal noise + coupling map loaded")
+        except Exception as e:
+            self.io.writeln(f"?DEVICE ERROR: {e}")
+
+    def cmd_optimize(self, rest: str = '') -> None:
+        """OPTIMIZE [level] — transpile the program and report the reduction.
+
+        Runs the Qiskit transpiler at the given optimization level (default 3)
+        against the active basis/coupling model and reports the depth and gate
+        count before and after."""
+        if not self.program:
+            self.io.writeln("?NOTHING TO OPTIMIZE — enter a program first")
+            return
+        level = int(rest.strip()) if rest.strip() else 3
+        try:
+            from qiskit_aer import AerSimulator
+            qc, _ = self.build_circuit()
+            backend = AerSimulator()
+            opt = self._transpile_routed(qc, backend, level=level)
+            self._last_transpiled = opt
+            self.io.writeln(f"\n  OPTIMIZE (level {level}):")
+            self.io.writeln(f"    before: depth {qc.depth()}, gates {qc.size()}")
+            self.io.writeln(f"    after : depth {opt.depth()}, gates {opt.size()}")
+            dd = qc.depth() - opt.depth()
+            if dd >= 0:
+                self.io.writeln(f"    reduced depth by {dd} ({100 * dd / max(1, qc.depth()):.0f}%)")
+            else:
+                self.io.writeln(f"    increased depth by {-dd} (basis/routing constraints outweigh the gains)")
+            self.variables['_OPT_DEPTH'] = opt.depth()
+        except Exception as e:
+            self.io.writeln(f"?OPTIMIZE ERROR: {e}")

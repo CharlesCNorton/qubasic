@@ -52,13 +52,11 @@ qubasic = "qubasic_core.cli:main"
 [tool.setuptools]
 packages = ["qubasic_core"]
 
-[tool.setuptools.package-data]
-
 [tool.setuptools.data-files]
 "share/qubasic/examples" = ["examples/*.qb", "examples/*.bas"]
 
 [tool.pytest.ini_options]
-markers = ["real_sim: test requires real Qiskit Aer simulation (no mock)"]
+markers = ["real_sim: runs larger Qiskit Aer simulations"]
 
 [tool.coverage.run]
 source = ["qubasic_core"]
@@ -73,14 +71,27 @@ python_version = "3.10"
 ignore_missing_imports = true
 warn_unused_configs = true
 warn_redundant_casts = true
-# QBasicTerminal composes its mixins over one shared set of attributes and
-# methods; qubasic_core/host.py declares them (HostState, the base of every
-# mixin), so attribute access is checked. The codebase is gradually typed:
-# the strict per-method settings stay off.
-disallow_untyped_defs = false
-check_untyped_defs = false
-warn_return_any = false
-warn_unused_ignores = false
-# has-type: types behind the lazy __getattr__ re-exports cannot be inferred.
-# misc/union-attr: mixin base-class attribute overlap and optional access.
-disable_error_code = ["has-type", "misc", "union-attr"]
+warn_unused_ignores = true
+# Every function is annotated and every body is checked. QBasicTerminal's
+# mixins share attributes and methods through HostState (qubasic_core/host.py),
+# which declares each with its type or signature.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W6", "I"]
+# `l` names a logical-qubit or level index throughout the QEC code.
+ignore = ["E731", "E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["qubasic_core"]
+
+[tool.ruff.lint.per-file-ignores]
+# terminal.py filters a dependency warning before its imports run.
+"qubasic_core/terminal.py" = ["E402"]
+"tests/*" = ["E402", "E701", "E702", "F541"]

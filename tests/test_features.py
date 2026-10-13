@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Consolidated test suite for QBASIC features not covered by test_qubasic.py.
-
-Covers: DO/LOOP, PEEK/POKE, SYS, USR, WAIT, DUMP, MAP, CATALOG,
+Interpreter features beyond the core suite in test_qubasic.py: DO/LOOP,
+PEEK/POKE, SYS, USR, WAIT, DUMP, MAP, CATALOG,
 string functions, screen commands, SUB/FUNCTION, LOCAL/STATIC/SHARED,
 error handling, breakpoints, watches, trace, profiling, STATS,
 AUTO, EDIT, COPY/MOVE, FIND/REPLACE, BANK, CHECKSUM, CHAIN, MERGE,
@@ -12,41 +11,57 @@ LET string, LINE INPUT, POKE/SYS during execution, ON MEASURE/TIMER,
 SCREEN auto-display, COLOR ANSI, LOCATE, hex/binary literals,
 bitwise operators, EXIT FOR/WHILE/DO, SYS INSTALL, UNITARY multi-qubit,
 CTRL custom gate, INV parametric, MEASURE_X/Y, SYNDROME, LOCC MEAS/CTRL,
-parser Stmt types, errors hierarchy, IOPort protocol.
-
-Run: python test_features.py
+the parser's statement types, the error hierarchy and the IOPort protocol.
 """
 
-import sys
-import os
-import io
-import math
-import unittest
-import tempfile
 import builtins
+import io
+import os
+import sys
+import tempfile
+import unittest
 
 import pytest
+from conftest import ScriptIO, capture
 
 # Repo root is one level up from tests/; put it on the path for imports and
 # use it for subprocess working directories and example file paths.
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
-from qubasic_core.terminal import QBasicTerminal
-from qubasic_core.errors import (
-    QBasicError, QBasicSyntaxError, QBasicRuntimeError,
-    QBasicBuildError, QBasicRangeError, QBasicIOError,
+
+from qubasic_core.engine import (
+    IOPort,
+    QBasicBuildError,
+    QBasicError,
+    QBasicIOError,
+    QBasicRangeError,
+    QBasicRuntimeError,
+    QBasicSyntaxError,
     QBasicUndefinedError,
+    StdIOPort,
 )
-from qubasic_core.io_protocol import IOPort, StdIOPort
-from qubasic_core.parser import parse_stmt
-from qubasic_core.statements import (
-    Stmt, RawStmt, RemStmt, MeasureStmt, EndStmt, ReturnStmt,
-    BarrierStmt, WendStmt, GotoStmt, GosubStmt, ForStmt, NextStmt,
-    WhileStmt, IfThenStmt, LetStmt, LetArrayStmt, PrintStmt,
-    MeasStmt, ResetStmt, SendStmt, ShareStmt, AtRegStmt,
+from qubasic_core.parser import (
+    BarrierStmt,
     CompoundStmt,
+    EndStmt,
+    ForStmt,
+    GosubStmt,
+    GotoStmt,
+    IfThenStmt,
+    LetArrayStmt,
+    LetStmt,
+    MeasureStmt,
+    NextStmt,
+    PrintStmt,
+    RawStmt,
+    RemStmt,
+    ReturnStmt,
+    Stmt,
+    WendStmt,
+    WhileStmt,
+    parse_stmt,
 )
-from conftest import capture
+from qubasic_core.terminal import QBasicTerminal
 
 
 # =====================================================================
@@ -214,13 +229,13 @@ class TestClassicBasic(unittest.TestCase):
 
     def test_exit_statements(self):
         """EXIT FOR, EXIT WHILE, EXIT DO handler logic."""
-        from qubasic_core.engine import ExecResult
 
         # EXIT FOR
         self.t.program = {10: 'FOR i = 1 TO 10', 20: 'EXIT FOR', 30: 'NEXT i', 40: 'PRINT i'}
         sorted_lines = [10, 20, 30, 40]
         loop_stack = [{'var': 'i', 'current': 1, 'end': 10, 'step': 1, 'return_ip': 0}]
-        result = self.t._cf_exit('EXIT FOR', loop_stack, sorted_lines, 1)
+        result = self.t._cf_exit('EXIT FOR', loop_stack, sorted_lines, 1,
+                                 parsed=parse_stmt('EXIT FOR'))
         self.assertIsNotNone(result)
         handled, ip = result
         self.assertTrue(handled)
@@ -231,7 +246,8 @@ class TestClassicBasic(unittest.TestCase):
         t2.program = {10: 'WHILE 1', 20: 'EXIT WHILE', 30: 'WEND', 40: 'PRINT "done"'}
         sorted_lines = [10, 20, 30, 40]
         loop_stack = [{'type': 'while', 'cond': '1', 'return_ip': 0}]
-        result = t2._cf_exit('EXIT WHILE', loop_stack, sorted_lines, 1)
+        result = t2._cf_exit('EXIT WHILE', loop_stack, sorted_lines, 1,
+                                 parsed=parse_stmt('EXIT WHILE'))
         handled, ip = result
         self.assertTrue(handled)
         self.assertEqual(ip, 3)
@@ -241,7 +257,8 @@ class TestClassicBasic(unittest.TestCase):
         t3.program = {10: 'DO', 20: 'EXIT DO', 30: 'LOOP', 40: 'PRINT "done"'}
         sorted_lines = [10, 20, 30, 40]
         loop_stack = [{'type': 'do', 'return_ip': 0, 'kind': None, 'cond': None}]
-        result = t3._cf_exit('EXIT DO', loop_stack, sorted_lines, 1)
+        result = t3._cf_exit('EXIT DO', loop_stack, sorted_lines, 1,
+                                 parsed=parse_stmt('EXIT DO'))
         handled, ip = result
         self.assertTrue(handled)
         self.assertEqual(ip, 3)
@@ -426,7 +443,7 @@ class TestMemoryMap(unittest.TestCase):
         self.assertNotIn('TIMEOUT', out)
 
         # Timeout via monkey-patched time
-        import qubasic_core.memory as mem_mod
+        import qubasic_core.machine as mem_mod
         orig = mem_mod.time.time
         call_count = [0]
         def fast_time():
@@ -467,9 +484,18 @@ class TestMemoryMap(unittest.TestCase):
 class TestStrings(unittest.TestCase):
     def test_string_functions(self):
         """LEFT, RIGHT, MID, CHR, ASC, INSTR, HEX, BIN, STR, VAL, LEN."""
-        from qubasic_core.strings import (
-            _left, _right, _mid, _chr_fn, _asc, _instr,
-            _hex_fn, _bin_fn, _str_fn, _val_fn, _len_fn,
+        from qubasic_core.expression import (
+            _asc,
+            _bin_fn,
+            _chr_fn,
+            _hex_fn,
+            _instr,
+            _left,
+            _len_fn,
+            _mid,
+            _right,
+            _str_fn,
+            _val_fn,
         )
         self.assertEqual(_left("HELLO", 3), "HEL")
         self.assertEqual(_right("HELLO", 3), "LLO")
@@ -496,12 +522,16 @@ class TestScreenAndDisplay(unittest.TestCase):
         self.t = QBasicTerminal()
 
     def test_screen_mode_set_get(self):
-        """SCREEN mode set/get, CLS, PLAY, PROMPT."""
-        _, out = capture(self.t.cmd_screen, '2')
-        self.assertIn('SCREEN 2', out)
+        """DISPLAY set/get, SCREEN graphics modes, CLS, PLAY, PROMPT."""
+        _, out = capture(self.t.cmd_display, 'STATE')
+        self.assertIn('DISPLAY statevector', out)
         self.assertEqual(self.t._screen_mode, 2)
-        _, out = capture(self.t.cmd_screen, '')
+        _, out = capture(self.t.cmd_display, '')
         self.assertIn('statevector', out)
+        _, out = capture(self.t.cmd_screen, '12')
+        self.assertIn('640x480', out)
+        _, out = capture(self.t.cmd_screen, '0')
+        self.assertIsNone(self.t._canvas)
 
         # CLS
         _, out = capture(self.t.cmd_cls)
@@ -635,13 +665,13 @@ class TestSubsAndScope(unittest.TestCase):
         from qubasic_core.engine import ExecResult
 
         # ON ERROR GOTO sets target
-        result = self.t._cf_on_error('ON ERROR GOTO 100')
+        result = self.t._cf_on_error('ON ERROR GOTO 100', parsed=parse_stmt('ON ERROR GOTO 100'))
         self.assertIsNotNone(result)
         self.assertEqual(result, (True, ExecResult.ADVANCE))
         self.assertEqual(self.t._error_target, 100)
 
         # ON ERROR GOTO 0 clears
-        self.t._cf_on_error('ON ERROR GOTO 0')
+        self.t._cf_on_error('ON ERROR GOTO 0', parsed=parse_stmt('ON ERROR GOTO 0'))
         self.assertIsNone(self.t._error_target)
 
         # _handle_error routes correctly
@@ -658,7 +688,7 @@ class TestSubsAndScope(unittest.TestCase):
         self.t._in_error_handler = True
         sorted_lines = [10, 20, 30]
         self.t.program = {10: 'X', 20: 'Y', 30: 'Z'}
-        result = self.t._cf_resume('RESUME NEXT', sorted_lines)
+        result = self.t._cf_resume('RESUME NEXT', sorted_lines, parsed=parse_stmt('RESUME NEXT'))
         self.assertIsNotNone(result)
         self.assertEqual(result[1], 2)
 
@@ -835,18 +865,19 @@ class TestDebugAndProfile(unittest.TestCase):
         t._on_timer_target = 100
         t._on_timer_interval = 1.0
         t._on_timer_last = 1000.0  # fake "last fire" time
+        t._timer_state = 'ON'      # events are trapped after TIMER ON
         t._gosub_stack = []
         t.program = {100: 'PRINT "timer"', 110: 'RETURN'}
         sorted_lines = [100, 110]
 
         # Time hasn't elapsed enough
-        with patch('qubasic_core.debug.time') as mock_time:
+        with patch('qubasic_core.interpreter.time') as mock_time:
             mock_time.time.return_value = 1000.5  # only 0.5s elapsed
             result = t._check_timer_callback(sorted_lines, 0)
             self.assertIsNone(result)  # should not fire
 
         # Time has elapsed
-        with patch('qubasic_core.debug.time') as mock_time:
+        with patch('qubasic_core.interpreter.time') as mock_time:
             mock_time.time.return_value = 1001.5  # 1.5s elapsed > 1.0 interval
             result = t._check_timer_callback(sorted_lines, 0)
             self.assertIsNotNone(result)  # should fire, returning ip to jump to
@@ -1175,8 +1206,6 @@ class TestQuantumOps(unittest.TestCase):
         _, out = capture(t2.dispatch, '@A CTRL X 0, 1')
         self.assertNotIn('ERROR', out.upper())
 
-        # CONNECT/DISCONNECT stubs removed — no longer exposed as commands
-
     def test_save_expect_set_state(self):
         """SAVE_EXPECT and SET_STATE (named + explicit) parse into program."""
         # SAVE_EXPECT
@@ -1208,14 +1237,14 @@ class TestQuantumOps(unittest.TestCase):
         from qubasic_core.engine import ExecResult
 
         # ON MEASURE
-        result = self.t._cf_on_measure('ON MEASURE GOSUB 100')
+        result = self.t._cf_on_measure('ON MEASURE GOSUB 100', parsed=parse_stmt('ON MEASURE GOSUB 100'))
         self.assertIsNotNone(result)
         self.assertEqual(result, (True, ExecResult.ADVANCE))
         self.assertEqual(self.t._on_measure_target, 100)
 
         # ON TIMER
         t2 = QBasicTerminal()
-        result = t2._cf_on_timer('ON TIMER(5) GOSUB 200')
+        result = t2._cf_on_timer('ON TIMER(5) GOSUB 200', parsed=parse_stmt('ON TIMER(5) GOSUB 200'))
         self.assertIsNotNone(result)
         self.assertEqual(result, (True, ExecResult.ADVANCE))
         self.assertEqual(t2._on_timer_target, 200)
@@ -1241,8 +1270,8 @@ class TestQuantumOps(unittest.TestCase):
 
     def test_locc_3party_ghz(self):
         """3-party GHZ via LOCCEngine."""
-        from qubasic_core.locc_engine import LOCCEngine
-        from qubasic_core.gates import _apply_gate_np, _MAT_CX
+        from qubasic_core.locc import LOCCEngine
+        from qubasic_core.simtools import _MAT_CX, _apply_gate_np
         eng = LOCCEngine([1, 1, 1], joint=True)
         eng.apply('A', 'H', (), [0])
         eng.sv = _apply_gate_np(eng.sv, _MAT_CX, [0, 1], 3)
@@ -1433,7 +1462,8 @@ class TestFuzz(unittest.TestCase):
 
     def test_parser_fuzz(self):
         """Random strings return Stmt subclass; known keywords parse to subclasses."""
-        import random, string
+        import random
+        import string
         for _ in range(200):
             length = random.randint(0, 50)
             s = ''.join(random.choices(string.ascii_letters + string.digits + ' ,.:+-*/', k=length))
@@ -1450,7 +1480,8 @@ class TestFuzz(unittest.TestCase):
 
     def test_process_fuzz(self):
         """Random dispatch and numbered lines do not crash."""
-        import random, string
+        import random
+        import string
         t = QBasicTerminal()
         for _ in range(100):
             length = random.randint(1, 40)
@@ -1477,7 +1508,8 @@ class TestFuzz(unittest.TestCase):
 class TestIntegration(unittest.TestCase):
     def test_cli_json(self):
         """CLI --json bell.qb and grover3.qb end-to-end."""
-        import subprocess, json
+        import json
+        import subprocess
 
         # bell.qb
         r = subprocess.run(
@@ -1500,7 +1532,8 @@ class TestIntegration(unittest.TestCase):
 
     def test_real_bell_state(self):
         """Integration test with real Qiskit Aer (not mocked) via subprocess."""
-        import subprocess, json
+        import json
+        import subprocess
         r = subprocess.run(
             [sys.executable, '-X', 'utf8', '-c',
              'import json; from qubasic_core.terminal import QBasicTerminal; '
@@ -1672,7 +1705,8 @@ class TestStabilizerFallback(unittest.TestCase):
 # =====================================================================
 # Property-based tests
 # =====================================================================
-from hypothesis import given, strategies as st, settings
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 
 class TestPropertyBased(unittest.TestCase):
@@ -2036,7 +2070,7 @@ class TestMethodDevicePrecheck(unittest.TestCase):
 # 12. TestGapCoverage
 # =====================================================================
 class TestGapCoverage(unittest.TestCase):
-    """Tests for previously untested features."""
+    """Command-line flags, commands and helpers outside the classes above."""
 
     def setUp(self):
         self.t = QBasicTerminal()
@@ -2045,6 +2079,7 @@ class TestGapCoverage(unittest.TestCase):
     def test_cli_help_output(self):
         """--help prints usage and exits with 0."""
         from unittest.mock import patch
+
         from qubasic_core.cli import main
         with patch('sys.argv', ['qubasic', '--help']):
             _, out = capture(lambda: None)  # reset
@@ -2090,6 +2125,7 @@ class TestGapCoverage(unittest.TestCase):
         """--json flag produces valid JSON with expected keys."""
         import json as _json
         from unittest.mock import patch
+
         from qubasic_core.cli import main
         with tempfile.NamedTemporaryFile(mode='w', suffix='.qb', delete=False) as f:
             f.write('10 QUBITS 1\n20 H 0\n30 MEASURE\n40 END\n')
@@ -2221,17 +2257,20 @@ class TestGapCoverage(unittest.TestCase):
 
     # 11 SCREEN modes
     def test_screen_modes(self):
-        """SCREEN 0-5 sets _screen_mode correctly."""
+        """DISPLAY 0-5 sets _screen_mode; SCREEN 3-5 still choose it."""
         mode_names = {0: 'text', 1: 'histogram', 2: 'statevector',
                       3: 'Bloch', 4: 'density', 5: 'circuit'}
         for mode in range(6):
-            _, out = capture(self.t.cmd_screen, str(mode))
+            _, out = capture(self.t.cmd_display, str(mode))
             self.assertEqual(self.t._screen_mode, mode)
             self.assertIn(mode_names[mode], out)
-        # Invalid mode
-        _, out_bad = capture(self.t.cmd_screen, '9')
-        self.assertIn('?SCREEN 0-5', out_bad)
+        _, out_bad = capture(self.t.cmd_display, '9')
+        self.assertIn('?USAGE: DISPLAY', out_bad)
         self.assertEqual(self.t._screen_mode, 5)  # unchanged from last valid
+        capture(self.t.cmd_screen, '3')
+        self.assertEqual(self.t._screen_mode, 3)
+        _, out = capture(self.t.cmd_screen, '6')
+        self.assertIn('?SCREEN 6', out)
 
     # 12 PROMPT command
     def test_prompt_command(self):
@@ -2323,7 +2362,9 @@ class TestGapCoverage(unittest.TestCase):
 # Hypothesis property-based tests
 # =====================================================================
 
-from hypothesis import given, strategies as st, settings as hyp_settings
+from hypothesis import given
+from hypothesis import settings as hyp_settings
+from hypothesis import strategies as st
 
 
 class TestPropertyBasedExtended(unittest.TestCase):
@@ -2388,9 +2429,9 @@ class TestCLIIntegration(unittest.TestCase):
 
     def test_dispatch_unknown_command_no_crash(self):
         """Unknown commands should produce error, not crash."""
-        buf = _capture_io(self.t)
+        self.t.io = buf = ScriptIO()
         self.t.dispatch('XYZZY')
-        output = buf.get_output()
+        output = buf.text
         self.assertIn('?', output)
 
     def test_dispatch_empty_line(self):
@@ -2411,22 +2452,23 @@ class TestCLIIntegration(unittest.TestCase):
 
     def test_locc_non_numeric_args(self):
         """LOCC with non-numeric args should not crash."""
-        buf = _capture_io(self.t)
+        self.t.io = buf = ScriptIO()
         self.t.cmd_locc('4 banana')
-        output = buf.get_output()
+        output = buf.text
         self.assertIn('integer', output.lower())
 
     def test_method_no_args_no_crash(self):
         """METHOD with no args should not crash."""
-        buf = _capture_io(self.t)
-        # This exercises the GPU probe path that had the _pqc bug
+        self.t.io = buf = ScriptIO()
+        # This exercises the GPU probe path
         self.t.cmd_method('')
-        output = buf.get_output()
+        output = buf.text
         self.assertIn('METHOD', output)
 
     def test_cli_seed_flag(self):
         """--seed flag should be accepted by CLI."""
-        import subprocess, json
+        import json
+        import subprocess
         result = subprocess.run(
             [sys.executable, '-m', 'qubasic_core',
              '--seed', '42', '--json',
@@ -2445,14 +2487,6 @@ class TestCLIIntegration(unittest.TestCase):
             capture_output=True, text=True, cwd=_ROOT, timeout=10)
         self.assertEqual(result.returncode, 0)
         self.assertIn('QUBASIC', result.stdout)
-
-
-def _capture_io(terminal):
-    """Attach a BufferIOPort to a terminal and return it."""
-    from conftest import BufferIOPort
-    buf = BufferIOPort()
-    terminal.io = buf
-    return buf
 
 
 @pytest.mark.real_sim
@@ -2583,8 +2617,9 @@ class TestCommandSurfaceCoverage(unittest.TestCase):
             capture(t.cmd_quiz)
         finally:
             builtins.input = orig
-        from qubasic_core.qol import (tip_of_the_day, did_you_mean,
-                                      quantum_spin, braille_bloch)
+        from qubasic_core.analysis import did_you_mean, tip_of_the_day
+        from qubasic_core.display import braille_bloch
+        from qubasic_core.engine import quantum_spin
         self.assertIsInstance(tip_of_the_day(), str)
         self.assertIsNone(did_you_mean('BLOCH'))
         self.assertIsInstance(did_you_mean('BLASCH'), (str, type(None)))
@@ -2595,8 +2630,9 @@ class TestCommandSurfaceCoverage(unittest.TestCase):
 
     def test_bloch_vector_axes(self):
         """_bloch_vector and the $0100 By field carry the right sign on every
-        axis. Regression: the Y component was inverted (|+i> read as -Y)."""
+        axis, with |+i> reading as +Y."""
         import numpy as np
+
         from qubasic_core.terminal import QBasicTerminal
         t = QBasicTerminal()
         r2 = 1.0 / np.sqrt(2)
@@ -2646,6 +2682,7 @@ class TestCommandSurfaceCoverage(unittest.TestCase):
 
     def test_debug_screen_memory_surface(self):
         import builtins
+
         import numpy as np
         t = self._ready()
         capture(t.cmd_profile, 'ON')
@@ -2668,7 +2705,7 @@ class TestCommandSurfaceCoverage(unittest.TestCase):
         capture(t.cmd_rewind, '1')
         capture(t.cmd_forward, '1')
         for m in range(6):
-            capture(t.cmd_screen, str(m))
+            capture(t.cmd_display, str(m))
         capture(t.cmd_color, 'green')
         capture(t.cmd_color, 'red, blue')
         capture(t.cmd_cls)

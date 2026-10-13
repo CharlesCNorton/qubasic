@@ -1,10 +1,10 @@
-"""QUBASIC terminal: QBasicTerminal, the REPL and the command dispatcher.
+"""QUBASIC terminal: Engine (the program and session state) and
+QBasicTerminal, the REPL and the command dispatcher.
 
-QBasicTerminal is Engine (the program and session state, engine_state.py)
-plus one mixin per subsystem; host.py declares the attributes and methods
-they share, so mypy checks every cross-mixin reference. A program runs
-through one of three execution paths, all driven by the statement list
-program.py compiles:
+QBasicTerminal is Engine plus one mixin per subsystem; host.py declares the
+attributes and methods they share, so mypy checks every cross-mixin
+reference. A program runs through one of three execution paths, all driven
+by the statement list parser.py compiles:
 
     circuit build   RunPipelineMixin.cmd_run -> ExecutorMixin.build_circuit
                     -> a Qiskit circuit on Aer (dynamic IF on MEAS bits)
@@ -13,77 +13,271 @@ program.py compiles:
     LOCC            LOCCExecutionMixin: numpy registers with SEND and SHARE
 
 Control flow, assignments and the keyword statements are shared by all
-three (control_flow.py, classic.py, subs.py, stmt_handlers.py); only gate
-application differs. LQUBITS adds the encoded paths (logical.py,
-encoded.py).
+three (interpreter.py); only gate application differs. LQUBITS adds the
+encoded paths (logical.py).
 """
 
-import sys
-import os
-import time
+from __future__ import annotations
+
 import warnings as _warnings
-from typing import Any
 
 # Quiet the third-party dependency-version notice (urllib3/chardet) that
 # qiskit's transitive imports emit, so it doesn't precede the banner.
 _warnings.filterwarnings('ignore', message=r".*match a supported version.*")
 
+import os
+import sys
+import time
+from collections import OrderedDict
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Callable, Iterator
+
+import numpy as np
 from qiskit import transpile
 from qiskit_aer import AerSimulator
-import numpy as np
 
+from qubasic_core.algorithms import (
+    EstimationMixin,
+    FactoringMixin,
+    HHLMixin,
+    OptimizeMixin,
+    OracleMixin,
+    PhaseMixin,
+    PrimitivesMixin,
+    QMLMixin,
+    VariationalMixin,
+)
+from qubasic_core.analysis import AnalysisMixin, AssistMixin, DemoMixin, ExportMixin, tip_of_the_day
+from qubasic_core.benchmarking import BenchmarkingMixin, ResourceMixin
+from qubasic_core.devices import FileIOMixin, GraphicsMixin, ScreenMixin, SoundMixin
+from qubasic_core.display import BANNER_ART, HELP_TEXT, DisplayMixin, StateDisplayMixin, SweepMixin, VisualizeMixin
+from qubasic_core.editing import EditingMixin, PersistenceMixin, ProgramMgmtMixin
 from qubasic_core.engine import (
-    GATE_TABLE, GATE_ALIASES,
-    _get_ram_gb, MAX_UNDO_STACK,
-    RE_LINE_NUM,
+    DEFAULT_QUBITS,
+    DEFAULT_SHOTS,
+    MAX_LOOP_ITERATIONS,
+    MAX_UNDO_STACK,
+    IOPort,
+    NullIO,
+    QBasicError,
+    StdIOPort,
 )
-from qubasic_core.executor import ExecutorMixin
-from qubasic_core.expression import ExpressionMixin
-from qubasic_core.display import DisplayMixin
-from qubasic_core.demos import DemoMixin
+from qubasic_core.expression import ExpressionMixin, StringMixin, VariableMixin
+from qubasic_core.host import HostState
+from qubasic_core.interpreter import (
+    ClassicMixin,
+    ControlFlowMixin,
+    DebugMixin,
+    StatementMixin,
+    SubroutineMixin,
+)
 from qubasic_core.locc import LOCCMixin
-from qubasic_core.control_flow import ControlFlowMixin
-from qubasic_core.file_io import FileIOMixin
-from qubasic_core.analysis import AnalysisMixin
-from qubasic_core.sweep import SweepMixin
-from qubasic_core.memory import MemoryMixin
-from qubasic_core.strings import StringMixin
-from qubasic_core.screen import ScreenMixin
-from qubasic_core.classic import ClassicMixin
-from qubasic_core.subs import SubroutineMixin
-from qubasic_core.debug import DebugMixin
-from qubasic_core.program_mgmt import ProgramMgmtMixin
-from qubasic_core.profiler import ProfilerMixin
-from qubasic_core.noise_mixin import NoiseMixin
-from qubasic_core.state_display import StateDisplayMixin
-from qubasic_core.qol import QoLMixin, tip_of_the_day
-from qubasic_core.algorithms import AlgorithmsMixin
-from qubasic_core.dynamics import DynamicsMixin
-from qubasic_core.qec import QECMixin
-from qubasic_core.qec2 import QEC2Mixin
-from qubasic_core.logical import LogicalMixin
-from qubasic_core.benchmarking import BenchmarkingMixin
-from qubasic_core.algos2 import Algorithms2Mixin
-from qubasic_core.pauliprop import PauliPropMixin
-from qubasic_core.qudits import QuditMixin
-from qubasic_core.bosonic import BosonicMixin
-from qubasic_core.resources import ResourceMixin
-from qubasic_core.live import LiveMixin
-from qubasic_core.run_pipeline import RunPipelineMixin, _has_channel, _circuit_fingerprint  # noqa: F401
-from qubasic_core.stmt_handlers import (  # noqa: F401
-    StatementMixin, _resolve_named_state, _named_state_fits,
-)
-from qubasic_core.config_commands import ConfigMixin
-from qubasic_core.editing import EditingMixin
-from qubasic_core.variables import VariableMixin
-from qubasic_core.variational import VariationalMixin
-from qubasic_core.oracles import OracleMixin
-from qubasic_core.lattice import LatticeMixin
-from qubasic_core.encoded import EncodedMixin
-from qubasic_core.errors import QBasicError
-from qubasic_core.parser import parse_stmt
-from qubasic_core.engine_state import Engine
-from qubasic_core.help_text import HELP_TEXT, BANNER_ART
+from qubasic_core.logical import EncodedMixin, LatticeMixin, LogicalMixin
+from qubasic_core.machine import ConfigMixin, MemoryMixin, ProfilerMixin
+from qubasic_core.noise import MitigationMixin, NoiseMixin
+from qubasic_core.parser import GATE_ALIASES, GATE_TABLE, RE_LINE_NUM, parse_stmt, strip_comment
+from qubasic_core.physics import BosonicMixin, DynamicsMixin, PauliPropMixin, QuditMixin
+from qubasic_core.qec import CodesMixin, DecodingMixin, RatesMixin
+from qubasic_core.simtools import ram_gb
+from qubasic_core.simulator import ExecutorMixin, LiveMixin, RunPipelineMixin
+
+if TYPE_CHECKING:
+    from qiskit import QuantumCircuit
+    from qiskit_aer.noise import NoiseModel
+
+    from qubasic_core.locc import LOCCEngine
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC engine state: the interpreter's state container.
+#
+# Engine initializes the program store, variables, arrays, run settings and
+# caches. QBasicTerminal inherits it together with the mixins that run
+# programs and commands, so programs run on a QBasicTerminal (or through
+# qubasic_core.api); Engine alone holds state.
+# ---------------------------------------------------------------------------
+
+class Engine(HostState):
+    """The interpreter's state: program, variables, arrays, run settings
+    and caches (the mixins' _init_* methods add their own)."""
+
+    def __init__(self, *, io: IOPort | None = None) -> None:
+        # Program
+        self.program: dict[int, str] = {}
+        self._parsed: dict[int, Any] = {}
+        self._undo_stack: list[dict[int, str]] = []
+
+        # Configuration
+        self.num_qubits: int = DEFAULT_QUBITS
+        self.shots: int = DEFAULT_SHOTS
+        self.sim_method: str = 'automatic'
+        self.sim_device: str = 'CPU'
+        # Amplitude precision for Aer and the numpy engines: 'double'
+        # (complex128) or 'single' (complex64, half the memory).
+        self.sim_precision: str = 'double'
+        self._noise_model: NoiseModel | None = None
+        self._noise_depol_p: float = 0.0
+        # Noise channel propagated to the numpy LOCC engine (depolarizing,
+        # amplitude_damping, or phase_flip; 'none' if unsupported there).
+        self._noise_locc_type: str = 'none'
+        self._noise_locc_param: float = 0.0
+        # The NOISE model as its command arguments, and the DEVICE that built
+        # the model (topology, qubits, T1, T2), for SAVE round-tripping.
+        self._noise_spec: str | None = None
+        self._device_spec: str | None = None
+        self._seed: int | None = None
+        self._max_iterations: int = MAX_LOOP_ITERATIONS
+        self._include_depth: int = 0
+
+        # Variables and arrays
+        self.variables: dict[str, Any] = {}
+        self.arrays: dict[str, Any] = {}
+        self._array_dims: dict[str, list[int]] = {}
+        # Arrays declared with DIM/REDIM enforce their bounds on write;
+        # arrays created implicitly by first assignment keep auto-growing.
+        self._dimmed_arrays: set[str] = set()
+        # Density matrix (and the measure-free circuit to solve it lazily)
+        # for a run with SET_DENSITY, computed on demand by DENSITY.
+        self._last_density: np.ndarray | None = None
+        self._last_density_qc: QuantumCircuit | None = None
+
+        # Subroutines and registers
+        self.subroutines: dict[str, Any] = {}
+        self.registers: OrderedDict[str, tuple[int, int]] = OrderedDict()
+
+        # Custom gates
+        self._custom_gates: dict[str, Any] = {}
+
+        # Execution state
+        self._gosub_stack: list[int] = []
+        self.step_mode: bool = False
+        self.last_counts: dict[str, int] | None = None
+        # The last run's statevector. A run that does not keep the state in
+        # memory leaves a zero-argument source that computes it on first read
+        # (see the last_sv property).
+        self._last_sv: Any = None
+        self._state_source: Callable[[], Any] | None = None
+        self.last_circuit: QuantumCircuit | None = None
+        self._circuit_cache_key: Any = None
+        self._circuit_cache: tuple[QuantumCircuit, AerSimulator] | None = None
+        self._pending_set_state: np.ndarray | None = None  # immediate SET_STATE for next RUN
+        self._poke_state_prep: dict[Any, Any] = {}  # qubit prep from POKE $0100
+
+        # LOCC
+        self.locc: LOCCEngine | None = None
+        self.locc_mode: bool = False
+
+        # I/O
+        self.io: IOPort = io or StdIOPort()
+
+        # Security
+        self.agent_mode: bool = False
+        self._include_stack: list[str] = []
+
+        # User-defined types
+        self._user_types: dict[str, list[tuple[str, str]]] = {}
+        self._pending_type: dict | None = None
+
+        # Timing
+        self._start_time: float = time.time()
+
+    @property
+    def last_sv(self) -> Any:
+        """The last run's statevector, computed on first read when the run
+        deferred it (a deferred source runs at most once)."""
+        if self._last_sv is None and self._state_source is not None:
+            source, self._state_source = self._state_source, None
+            self._last_sv = source()
+        return self._last_sv
+
+    @last_sv.setter
+    def last_sv(self, value: Any) -> None:
+        self._last_sv = value
+        self._state_source = None
+
+    def _defer_state(self, source: Any) -> None:
+        """Record a zero-argument callable that produces the state on demand."""
+        self._last_sv = None
+        self._state_source = source
+
+    @contextmanager
+    def _silenced(self) -> Iterator[None]:
+        """Run a block with its output discarded (the inner runs of COMPARE,
+        PLOT, ANIMATE, MINIMIZE, GRADIENT and STATS)."""
+        old, self.io = self.io, NullIO()
+        try:
+            yield
+        finally:
+            self.io = old
+
+    def _get_parsed(self, line_num: int) -> Any:
+        """Get parsed Stmt for a line, lazily parsing if needed.
+
+        Re-parses if the program text has changed since the last parse.
+        """
+        raw = self.program.get(line_num, '')
+        p = self._parsed.get(line_num)
+        if p is None or p.raw != raw:
+            p = parse_stmt(raw)
+            self._parsed[line_num] = p
+        return p
+
+    def clear(self) -> None:
+        """Reset all state (equivalent to cmd_new)."""
+        self.program.clear()
+        self._parsed.clear()
+        self.subroutines.clear()
+        self.registers.clear()
+        self.variables.clear()
+        self.arrays.clear()
+        self._array_dims.clear()
+        self._dimmed_arrays.clear()
+        self._last_density = None
+        self._last_density_qc = None
+        self.last_counts = None
+        self.last_sv = None
+        self.last_circuit = None
+        self._circuit_cache_key = None
+        self._circuit_cache = None
+        self._pending_set_state = None
+        self._pending_set_density: Any = None
+        self._poke_state_prep = {}
+
+    def _invalidate_run_state(self) -> None:
+        """Drop cached results that describe a now-stale configuration.
+
+        Called when the qubit count changes: last_sv, last_counts,
+        last_circuit, and the transpile cache all assume the previous
+        num_qubits, so reading them afterwards would mislabel (or, for
+        the reshape in _peek_qubit/_bloch_vector, crash) the state.
+        """
+        self.last_counts = None
+        self.last_sv = None
+        self.last_circuit = None
+        self._circuit_cache_key = None
+        self._circuit_cache = None
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC terminal: QBasicTerminal, the REPL and the command dispatcher.
+#
+# QBasicTerminal is Engine (the program and session state, engine_state.py)
+# plus one mixin per subsystem; host.py declares the attributes and methods
+# they share, so mypy checks every cross-mixin reference. A program runs
+# through one of three execution paths, all driven by the statement list
+# program.py compiles:
+#
+#     circuit build   RunPipelineMixin.cmd_run -> ExecutorMixin.build_circuit
+#                     -> a Qiskit circuit on Aer (dynamic IF on MEAS bits)
+#     live            LiveMixin: shot by shot on a numpy state, for programs
+#                     that read measurement results as numbers
+#     LOCC            LOCCExecutionMixin: numpy registers with SEND and SHARE
+#
+# Control flow, assignments and the keyword statements are shared by all
+# three (control_flow.py, classic.py, subs.py, stmt_handlers.py); only gate
+# application differs. LQUBITS adds the encoded paths (logical.py,
+# encoded.py).
+# ---------------------------------------------------------------------------
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -92,12 +286,12 @@ from qubasic_core.help_text import HELP_TEXT, BANNER_ART
 
 class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixin, EditingMixin,
                      Engine, ExecutorMixin, ExpressionMixin, DisplayMixin, DemoMixin,
-                     LOCCMixin, ControlFlowMixin, FileIOMixin, AnalysisMixin,
-                     SweepMixin, MemoryMixin, StringMixin, ScreenMixin, ClassicMixin,
+                     LOCCMixin, ControlFlowMixin, FileIOMixin, PersistenceMixin, ExportMixin, AnalysisMixin,
+                     SweepMixin, MemoryMixin, StringMixin, ScreenMixin, GraphicsMixin, SoundMixin, ClassicMixin,
                      SubroutineMixin, DebugMixin, ProgramMgmtMixin, ProfilerMixin,
-                     NoiseMixin, StateDisplayMixin, QoLMixin, AlgorithmsMixin,
-                     DynamicsMixin, QECMixin, QEC2Mixin, LogicalMixin,
-                     BenchmarkingMixin, Algorithms2Mixin,
+                     NoiseMixin, MitigationMixin, StateDisplayMixin, VisualizeMixin, AssistMixin,
+                     PrimitivesMixin, OptimizeMixin, DynamicsMixin, CodesMixin, DecodingMixin, RatesMixin, LogicalMixin,
+                     BenchmarkingMixin, EstimationMixin, PhaseMixin, QMLMixin, FactoringMixin, HHLMixin,
                      PauliPropMixin, QuditMixin, BosonicMixin, ResourceMixin, LiveMixin,
                      VariationalMixin, OracleMixin, LatticeMixin, EncodedMixin):
     """The QUBASIC session: program, state, REPL and command dispatch.
@@ -105,16 +299,19 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
     Mixins, by subsystem (each module's docstring describes its own):
 
         language     EditingMixin, VariableMixin, ExpressionMixin, StringMixin,
+                     GraphicsMixin, SoundMixin,
                      ControlFlowMixin, ClassicMixin, SubroutineMixin,
-                     StatementMixin, DebugMixin, ProgramMgmtMixin, FileIOMixin
+                     StatementMixin, DebugMixin, ProgramMgmtMixin, FileIOMixin, PersistenceMixin
         execution    RunPipelineMixin, ExecutorMixin, LiveMixin, LOCCMixin,
-                     NoiseMixin, ConfigMixin, MemoryMixin, ProfilerMixin
-        display      DisplayMixin, StateDisplayMixin, ScreenMixin, QoLMixin,
-                     DemoMixin, AnalysisMixin, SweepMixin
-        quantum      AlgorithmsMixin, Algorithms2Mixin, VariationalMixin,
-                     OracleMixin, DynamicsMixin, PauliPropMixin, BenchmarkingMixin,
+                     NoiseMixin, MitigationMixin, ConfigMixin, MemoryMixin, ProfilerMixin
+        display      DisplayMixin, StateDisplayMixin, ScreenMixin, VisualizeMixin,
+                     AssistMixin, ExportMixin, DemoMixin, AnalysisMixin, SweepMixin
+        quantum      PrimitivesMixin, OptimizeMixin, EstimationMixin, PhaseMixin, QMLMixin,
+                     FactoringMixin, HHLMixin, VariationalMixin, OracleMixin,
+                     DynamicsMixin, PauliPropMixin, BenchmarkingMixin,
                      ResourceMixin, QuditMixin, BosonicMixin
-        QEC          QECMixin, QEC2Mixin, LatticeMixin, LogicalMixin, EncodedMixin
+        QEC          CodesMixin, DecodingMixin, RatesMixin, LatticeMixin,
+                     LogicalMixin, EncodedMixin
 
     This class keeps the REPL, the command tables, HELP, PROBE and the banner.
     """
@@ -171,6 +368,8 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         # Subsystem initialization (mixin state)
         self._init_memory()
         self._init_screen()
+        self._init_graphics()
+        self._init_sound()
         self._init_classic()
         self._init_variables()
         self._init_subs()
@@ -178,8 +377,9 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         self._init_program_mgmt()
         self._init_profiler()
         self._init_file_handles()
-        self._init_qol()
+        self._init_assist()
         self._init_dynamics()
+        self._init_mitigation()
         self._init_qudits()
         self._init_bosonic()
         self._init_logical()
@@ -231,59 +431,54 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
 
     # ── REPL ──────────────────────────────────────────────────────────
 
+    _FILE_COMMANDS = ('SAVE', 'LOAD', 'INCLUDE', 'IMPORT', 'CHAIN', 'MERGE', 'LOADQASM')
+
+    def _completions(self, text: str, line: str = '') -> list[str]:
+        """Tab completions for `text` on input `line`: .qb file names after a
+        command that reads or writes one, otherwise the commands, gates,
+        statement keywords, DEF names, variables and registers it begins."""
+        words = line.split()
+        naming_a_file = (bool(words) and words[0].upper() in self._FILE_COMMANDS
+                         and (len(words) > 1 or line.endswith(' ')))
+        if naming_a_file:
+            import glob
+            pattern = text + '*' if text.lower().endswith(('.qb', '.bas')) else text + '*.qb'
+            return sorted(glob.glob(pattern))
+        from qubasic_core.parser import STATEMENTS
+        up = text.upper()
+        keywords = set(self._CMD_WITH_ARG) | set(self._CMD_NO_ARG) | set(GATE_TABLE)
+        keywords |= {kw.split()[0] for _, kw, _, _ in STATEMENTS if kw[:1].isalpha()}
+        names = [k for k in sorted(keywords) if k.startswith(up)]
+        names += sorted(s for s in self.subroutines if s.startswith(up))
+        names += sorted(v for v in self.variables if v.upper().startswith(up) and not v.startswith('_'))
+        names += sorted(r for r in self.registers if r.upper().startswith(up))
+        return names
+
     def _setup_readline(self) -> None:
-        """Set up command history and tab completion."""
+        """Set up command history and tab completion (readline, or pyreadline3
+        on Windows); without either the REPL reads plain lines."""
         import importlib
         try:
-            # (readline is POSIX-only; pyreadline3 provides it on Windows)
             readline: Any = importlib.import_module('readline')
-            commands = list(GATE_TABLE.keys()) + [
-                'RUN', 'LIST', 'NEW', 'SAVE', 'LOAD', 'QUBITS', 'SHOTS',
-                'METHOD', 'DEF', 'REG', 'LET', 'STEP', 'STATE', 'HIST',
-                'BLOCH', 'PROBS', 'DEMO', 'DELETE', 'RENUM', 'DEFS', 'REGS',
-                'VARS', 'HELP', 'CIRCUIT', 'LOCC', 'SEND', 'SHARE',
-                'SWEEP', 'INCLUDE', 'EXPORT', 'DECOMPOSE', 'NOISE', 'EXPECT',
-                'DENSITY', 'ENTROPY', 'CSV', 'FOR', 'NEXT', 'IF', 'THEN',
-                'ELSE', 'WHILE', 'WEND', 'GOTO', 'GOSUB', 'RETURN', 'END',
-                'MEASURE', 'BARRIER', 'REM', 'PRINT', 'INPUT', 'DIM', 'UNITARY',
-                'LOCCINFO', 'RAM', 'BYE', 'QUIT', 'EXIT',
-            ]
-            def completer(text, state):
-                t = text.upper()
-                matches = [c for c in commands if c.startswith(t)]
-                matches += [s for s in self.subroutines if s.startswith(t)]
-                matches += [v for v in self.variables if v.upper().startswith(t)]
-                matches += [r for r in self.registers if r.upper().startswith(t)]
-                # File path completion for SAVE/LOAD/INCLUDE
-                try:
-                    line_buf = readline.get_line_buffer()
-                    first = line_buf.split()[0].upper() if line_buf.split() else ''
-                    if first in ('SAVE', 'LOAD', 'INCLUDE', 'IMPORT', 'CHAIN', 'MERGE'):
-                        import glob as _glob
-                        pattern = text + '*.qb' if not text.endswith('.qb') else text + '*'
-                        matches = _glob.glob(pattern)
-                except Exception:
-                    pass
-                return matches[state] + ' ' if state < len(matches) else None
-            readline.set_completer(completer)
-            readline.parse_and_bind('tab: complete')
-            readline.set_completer_delims(' \t\n')
-            # Bind F1-F3 to load demos (terminal permitting)
-            try:
-                readline.parse_and_bind('"\\eOP": "DEMO BELL\\n"')
-                readline.parse_and_bind('"\\eOQ": "DEMO GHZ\\n"')
-                readline.parse_and_bind('"\\eOR": "DEMO GROVER\\n"')
-            except Exception:
-                pass
         except ImportError:
-            # On Windows, readline is not bundled; try pyreadline3 as fallback
-            if sys.platform == 'win32':
-                try:
-                    import pyreadline3  # noqa: F401 — registers as readline
-                    readline = importlib.import_module('readline')
-                    readline.parse_and_bind('tab: complete')
-                except ImportError:
-                    pass  # no readline available — tab completion disabled
+            return
+
+        def completer(text: str, state: int) -> str | None:
+            try:
+                matches = self._completions(text, readline.get_line_buffer())
+            except Exception:
+                return None
+            return matches[state] + ' ' if state < len(matches) else None
+
+        readline.set_completer(completer)
+        readline.parse_and_bind('tab: complete')
+        readline.set_completer_delims(' \t\n')
+        try:                                  # F1-F3 load demos, terminal permitting
+            readline.parse_and_bind('"\\eOP": "DEMO BELL\\n"')
+            readline.parse_and_bind('"\\eOQ": "DEMO GHZ\\n"')
+            readline.parse_and_bind('"\\eOR": "DEMO GROVER\\n"')
+        except Exception:
+            pass
 
     def repl(self) -> None:
         # Enable VT100 escape sequences on Windows console
@@ -335,8 +530,8 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
                     self._parsed.pop(num, None)
                     self.io.writeln(f"DELETED {num}")
             return
-        # Immediate command
-        self.dispatch(line)
+        # Immediate command (a trailing ' comment is dropped, as in a program)
+        self.dispatch(strip_comment(line))
 
     _CMD_NO_ARG = {
         'RUN': 'cmd_run', 'NEW': 'cmd_new', 'STEP': 'cmd_step',
@@ -380,6 +575,8 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         'PEEK': 'cmd_peek', 'POKE': 'cmd_poke', 'SYS': 'cmd_sys', 'DUMP': 'cmd_dump', 'WAIT': 'cmd_wait',
         # Screen
         'SCREEN': 'cmd_screen', 'COLOR': 'cmd_color', 'LOCATE': 'cmd_locate',
+        'DISPLAY': 'cmd_display', 'SHOW': 'cmd_show', 'SAVEWAV': 'cmd_savewav',
+        'FILES': 'cmd_files',
         'PROMPT': 'cmd_prompt',
         # Debug
         'BREAK': 'cmd_breakpoint', 'WATCH': 'cmd_watch', 'PROFILE': 'cmd_profile',
@@ -410,6 +607,8 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         'IQPE': 'cmd_iqpe', 'AMPEST': 'cmd_ampest', 'QWALK': 'cmd_qwalk',
         'QKERNEL': 'cmd_qkernel', 'SHOR': 'cmd_shor', 'HHL': 'cmd_hhl',
         'QAOA': 'cmd_qaoa', 'VQE': 'cmd_vqe', 'GROVER': 'cmd_grover', 'SIMON': 'cmd_simon',
+        'QPE': 'cmd_qpe', 'QCOUNT': 'cmd_qcount', 'DJ': 'cmd_dj', 'BV': 'cmd_bv',
+        'MITIGATE': 'cmd_mitigate', 'ZNE': 'cmd_zne',
         'PAULIPROP': 'cmd_pauliprop',
         'QUDIT': 'cmd_qudit', 'QX': 'cmd_qx', 'QZ': 'cmd_qz', 'QF': 'cmd_qf',
         'QSUM': 'cmd_qsum', 'QMEASURE': 'cmd_qmeasure',
@@ -458,7 +657,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         else:
             # Implicit LET: a bare assignment (x = 5, s$ = "hi") routed to the
             # LET handler so it works without the keyword, as in every BASIC.
-            from qubasic_core.patterns import RE_IMPLICIT_ASSIGN
+            from qubasic_core.parser import RE_IMPLICIT_ASSIGN
             if RE_IMPLICIT_ASSIGN.match(line.strip()):
                 try:
                     self.cmd_let(line.strip())
@@ -491,7 +690,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
     })
 
     def cmd_help(self, rest: str = '') -> None:
-        """HELP [command | gate | STATUS] — the command reference, one entry, or the implementation status of every command."""
+        """HELP [command | statement | function | gate | STATUS] — the command reference, one entry, or the implementation status of every command."""
         arg = rest.strip().upper()
         if arg == 'STATUS':
             self.io.writeln("\n  Command Implementation Status:")
@@ -513,6 +712,14 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
                 method = getattr(type(self), method_name, None)
                 doc = (getattr(method, '__doc__', '') or '').strip()
                 self.io.writeln(f"\n  {arg}: {doc or '(no description)'}\n")
+                return
+            from qubasic_core.parser import functions_for, statements_for
+            entries = statements_for(arg) + functions_for(arg)
+            if entries:
+                self.io.writeln('')
+                for topic, _, syntax, desc in entries:
+                    self.io.writeln(f"  {syntax}\n      {desc} ({topic.lower()})")
+                self.io.writeln('')
                 return
             gate_key = GATE_ALIASES.get(arg, arg)
             if gate_key in GATE_TABLE:
@@ -605,7 +812,9 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         try:
             _b = AerSimulator(method='statevector', device='GPU')
             from qiskit import QuantumCircuit as _QC
-            _pqc = _QC(1); _pqc.h(0); _pqc.measure_all()
+            _pqc = _QC(1)
+            _pqc.h(0)
+            _pqc.measure_all()
             _b.run(transpile(_pqc, _b), shots=1).result()
             gpu_ok = True
         except Exception:
@@ -632,8 +841,8 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
             qver = qiskit.__version__
         except Exception:
             qver = '?'
-        from qubasic_core import capacity as cap
-        ram = _get_ram_gb()
+        from qubasic_core import simtools as cap
+        ram = ram_gb()
         ram_str = f"{ram[0]:.0f} GB RAM" if ram else "RAM unknown"
         max_d = cap.max_qubits('statevector', 'double')
         max_s = cap.max_qubits('statevector', 'single')
@@ -659,4 +868,3 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         config_line = (f"{self.num_qubits} qubits | {self.shots} shots | "
                        f"{width}, 4096 stabilizer")
         self.io.writeln(BANNER_ART.format(info_line=info_line, config_line=config_line))
-

@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 """
-Comprehensive test suite for QBASIC.
-
-Covers core language, gate correctness, expression evaluation,
-control flow, LOCC engine (2-party and N-party), display formatting,
-security boundaries, and edge cases.
-
-Run: python test_qbasic.py
+The core suite: the language, gate correctness, expression evaluation,
+control flow, the LOCC engine (2-party and N-party), display formatting,
+security boundaries and edge cases.
 """
 
-import sys
-import os
-import io
 import math
-import unittest
+import os
+import sys
 import tempfile
+import unittest
+
 import numpy as np
 
 # Ensure the package (one level up from tests/) is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from qubasic_core.engine import (
-    GATE_TABLE, GATE_ALIASES,
-    _np_gate_matrix, _apply_gate_np, _measure_np, _sample_np,
-)
-from qubasic_core.terminal import QBasicTerminal
-from qubasic_core.engine import LOCCEngine
-from qubasic_core.cli import run_script
+
 from conftest import capture
+
+from qubasic_core.cli import run_script
+from qubasic_core.locc import LOCCEngine
+from qubasic_core.parser import GATE_ALIASES, GATE_TABLE
+from qubasic_core.simtools import _apply_gate_np, _measure_np, _np_gate_matrix, _sample_np
+from qubasic_core.terminal import QBasicTerminal
 
 
 # ---------------------------------------------------------------------------
@@ -435,8 +431,8 @@ class TestCommands(unittest.TestCase):
 # 6. TestExecution
 # ---------------------------------------------------------------------------
 class TestExecution(unittest.TestCase):
-    """Circuit execution, control flow, colon splitter, double-exec fix,
-    FOR-loop floats, RENUM targets."""
+    """Circuit execution, control flow, the colon splitter, single execution of
+    each statement, FOR-loop floats, RENUM targets."""
 
     def setUp(self):
         self.t = QBasicTerminal()
@@ -541,7 +537,7 @@ class TestExecution(unittest.TestCase):
         capture(t2.cmd_run)
         self.assertAlmostEqual(t2.arrays['vals'][0], math.pi)
 
-    def test_double_execution_fix(self):
+    def test_statements_run_once(self):
         t = QBasicTerminal(); t.num_qubits = 1; t.variables['counter'] = 0
         t.program = {10: 'LET counter = counter + 1', 20: 'H 0', 30: 'MEASURE'}
         capture(t.cmd_run)
@@ -553,9 +549,6 @@ class TestExecution(unittest.TestCase):
 
     def test_cf_helpers(self):
         from qubasic_core.parser import parse_stmt
-        from qubasic_core.statements import (
-            LetArrayStmt, LetStmt, GotoStmt, ForStmt, NextStmt,
-        )
         self.t.arrays['data'] = [0.0, 0.0, 0.0]
         p = parse_stmt('LET data(1) = 42')
         self.assertIsNotNone(self.t._cf_let_array('LET data(1) = 42', {}, parsed=p))
@@ -1119,7 +1112,7 @@ class TestMeasurement(unittest.TestCase):
 # 12. TestMisc
 # ---------------------------------------------------------------------------
 class TestMisc(unittest.TestCase):
-    """Edge cases, fixes, DEF multiline, subroutine recursion, RAM, noise,
+    """Edge cases, DEF multiline, subroutine recursion, RAM, noise,
     sweep, benchmark, step mode, entropy comma, debug."""
 
     def setUp(self):
@@ -1284,16 +1277,16 @@ class TestMisc(unittest.TestCase):
         _, out = capture(t.cmd_entropy, '0, 1')
         self.assertIn('entropy', out)
 
-    def test_new_fixes(self):
+    def test_package_exports_and_dynamic_meas(self):
         import qubasic_core
         self.assertTrue(hasattr(qubasic_core, 'QBasicTerminal'))
         t = QBasicTerminal(); t.num_qubits = 2
         t.program = {10: 'X 0', 20: 'MEAS 0 -> r', 30: 'MEASURE'}
         capture(t.cmd_run)
         self.assertIsNotNone(t.last_counts)  # MEAS is a dynamic measurement, not an error
-        from qubasic_core.protocol import TerminalProtocol
+        from qubasic_core.engine import TerminalProtocol
         self.assertIsInstance(t, TerminalProtocol)
-        from qubasic_core.engine import ExecOutcome, ExecResult
+        from qubasic_core.engine import ExecResult
         self.assertIs(ExecResult.ADVANCE, ExecResult.ADVANCE)
 
 
@@ -1380,7 +1373,7 @@ class TestAdditionalCoverage(unittest.TestCase):
 
     def test_named_state_errors(self):
         # |GHZ3> with dim < 8 (fewer than 3 qubits) falls back to |0>
-        from qubasic_core.terminal import _resolve_named_state
+        from qubasic_core.interpreter import _resolve_named_state
         sv = _resolve_named_state('|GHZ3>', 2)  # 2 qubits -> dim=4 < 8
         self.assertAlmostEqual(sv[0], 1.0)  # fallback to |0>
         self.assertAlmostEqual(np.sum(np.abs(sv)**2), 1.0)
@@ -1451,10 +1444,11 @@ class TestAdditionalCoverage(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# TestBugFixes063 — regressions fixed in 0.6.3
+# TestPrintAndCompounds
 # ---------------------------------------------------------------------------
-class TestBugFixes063(unittest.TestCase):
-    """Regression tests for the 0.6.3 fixes."""
+class TestPrintAndCompounds(unittest.TestCase):
+    """PRINT separators and quoting, compound LOCC lines, SAVE_EXPECT across
+    reruns."""
 
     def _ghz3(self):
         v = np.zeros(8, dtype=complex)
@@ -1773,7 +1767,6 @@ class TestQEC(unittest.TestCase):
 
     def test_decoder_corrects_weight_one(self):
         # A distance-3 code's optimal decoder must correct every weight-1 error.
-        import itertools
         from qubasic_core.qec import _anticommute, _pmul
         t = QBasicTerminal()
         for name in ('REP', 'STEANE', 'SHOR'):
@@ -1965,9 +1958,8 @@ class TestResources(unittest.TestCase):
         self.assertIsNotNone(t.last_counts)
 
 
-class TestExpressionStringRegressions(unittest.TestCase):
-    """Regression coverage for the expression/string/PRINT fixes:
-    case-insensitive functions, bitwise/logical operators in every expression
+class TestExpressionsAndStrings(unittest.TestCase):
+    """Case-insensitive functions, bitwise/logical operators in every expression
     context, string-variable assignment, and PRINT surfacing errors."""
 
     def setUp(self):
@@ -1975,7 +1967,7 @@ class TestExpressionStringRegressions(unittest.TestCase):
         self.t.num_qubits = 1
 
     def test_math_functions_case_insensitive(self):
-        # Uppercase now resolves as well as lowercase, and they agree.
+        # Uppercase and lowercase names resolve to the same function.
         self.assertAlmostEqual(self.t.eval_expr('SQRT(2)'), math.sqrt(2))
         self.assertAlmostEqual(self.t.eval_expr('SQRT(2)'), self.t.eval_expr('sqrt(2)'))
         self.assertAlmostEqual(self.t.eval_expr('SIN(0)'), 0.0)
@@ -2034,23 +2026,22 @@ class TestExpressionStringRegressions(unittest.TestCase):
             self.t._eval_print_item('GARBAGEFUNC(3)', {})
 
 
-class TestConventionAndStateRegressions(unittest.TestCase):
-    """Convention-conformance and hidden-state fixes: INT floors, implicit LET,
+class TestConventions(unittest.TestCase):
+    """INT floors, implicit LET,
     MEAS/MEASURE disambiguation, reserved constants, STATUS, bit-order labels."""
 
     def setUp(self):
         self.t = QBasicTerminal()
         self.t.num_qubits = 2
 
-    def test_int_floors_fix_truncates(self):
+    def test_int_floors_and_fix_truncates(self):
         self.assertEqual(self.t.eval_expr('INT(-3.2)'), -4.0)
         self.assertEqual(self.t.eval_expr('INT(3.7)'), 3.0)
         self.assertEqual(self.t.eval_expr('FIX(-3.2)'), -3.0)
         self.assertEqual(self.t.eval_expr('FIX(3.7)'), 3.0)
 
     def test_implicit_let_parses_as_assignment(self):
-        from qubasic_core.parser import parse_stmt
-        from qubasic_core.statements import LetStmt, LetStrStmt, LetArrayStmt
+        from qubasic_core.parser import LetArrayStmt, LetStmt, LetStrStmt, parse_stmt
         self.assertIsInstance(parse_stmt('x = 5'), LetStmt)
         self.assertIsInstance(parse_stmt('s$ = "hi"'), LetStrStmt)
         self.assertIsInstance(parse_stmt('a(1) = 5'), LetArrayStmt)
@@ -2113,7 +2104,7 @@ class TestConventionAndStateRegressions(unittest.TestCase):
         self.assertIsNotNone(t.last_counts)  # ran; not blocked as a "command"
 
 
-class TestDeepFixRegressions(unittest.TestCase):
+class TestProgramState(unittest.TestCase):
     """SHARED writeback, RESTORE, array write bounds, string arrays,
     SET_DENSITY inspection, STATUS var count, immediate DEF FN."""
 
@@ -2171,7 +2162,7 @@ class TestDeepFixRegressions(unittest.TestCase):
         self.assertEqual(t.eval_expr('sq(5)'), 25.0)
 
 
-class TestConventionFixesV2(unittest.TestCase):
+class TestRoundingAndBounds(unittest.TestCase):
     """round half-away, chained-comparison guard, inclusive DIM, REDIM
     PRESERVE, MEAS print hint, DENSITY after MEASURE."""
 
@@ -2241,8 +2232,8 @@ class TestConventionFixesV2(unittest.TestCase):
         self.assertEqual(t._safe_eval('s$(1)'), '')
 
     def test_spec_statements_present(self):
-        from qubasic_core.cli import _SPEC_STATEMENTS
-        names = {n for (n, _s, _h) in _SPEC_STATEMENTS}
+        from qubasic_core.parser import STATEMENTS
+        names = {n for (_t, n, _s, _h) in STATEMENTS}
         for op in ('QFT', 'MEAS', 'SYNDROME', 'EVOLVE', 'QADD'):
             self.assertIn(op, names)
 

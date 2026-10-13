@@ -1,66 +1,78 @@
-"""Pytest configuration — provides fast mock for non-simulation tests."""
+"""Pytest configuration and the helpers the test modules share."""
 
+import io
+import os
 import sys
+import tempfile
+import unittest
 
-import pytest
+# Runs are sized against 2 GB however much memory the machine has, so the
+# suite behaves the same everywhere and leaves the rest of the machine free.
+os.environ.setdefault('QUBASIC_MEMORY_LIMIT', '2GB')
 
-
-class BufferIOPort:
-    """IOPort that captures output for testing."""
-    def __init__(self):
-        self.output = []
-
-    def write(self, text: str) -> None:
-        self.output.append(text)
-
-    def writeln(self, text: str) -> None:
-        self.output.append(text + '\n')
-
-    def read_line(self, prompt: str) -> str:
-        raise EOFError("BufferIOPort does not support input")
-
-    def get_output(self) -> str:
-        return ''.join(self.output)
-
-    def clear(self) -> None:
-        self.output.clear()
+from qubasic_core import api  # noqa: E402
+from qubasic_core.api import CaptureIO  # noqa: E402
+from qubasic_core.terminal import QBasicTerminal  # noqa: E402
 
 
-@pytest.fixture
-def fast_terminal():
-    """QBasicTerminal with minimal config for fast non-simulation tests."""
-    from qubasic_core.terminal import QBasicTerminal
+class ScriptIO:
+    """Collects output and answers INPUT from a list, recording each prompt."""
+
+    def __init__(self, answers=()):
+        self.parts = []
+        self.answers = list(answers)
+        self.prompts = []
+
+    def write(self, text):
+        self.parts.append(text)
+
+    def writeln(self, text):
+        self.parts.append(text + '\n')
+
+    def read_line(self, prompt):
+        self.prompts.append(prompt)
+        if not self.answers:
+            raise EOFError
+        return self.answers.pop(0)
+
+    @property
+    def reads(self):
+        return len(self.prompts)
+
+    @property
+    def text(self):
+        return ''.join(self.parts)
+
+
+def term(qubits=2, seed=5, inputs=(), shots=None, agent=False):
+    """A terminal writing to a CaptureIO, which echoes INPUT answers from `inputs`."""
     t = QBasicTerminal()
-    t.num_qubits = 2
-    t.shots = 10
+    t.io = CaptureIO(inputs)
+    t.num_qubits = qubits
+    t._seed = seed
+    if shots is not None:
+        t.shots = shots
+    t.agent_mode = agent
     return t
 
 
-@pytest.fixture
-def buffer_terminal():
-    """QBasicTerminal with captured output."""
-    from qubasic_core.terminal import QBasicTerminal
-    from qubasic_core.mock_backend import MockAerSimulator
-    buf = BufferIOPort()
-    t = QBasicTerminal()
-    t.io = buf
-    t.num_qubits = 2
-    t.shots = 10
-    return t, buf
+def feed(t, *lines):
+    """Enter each line as typed; return what the terminal wrote."""
+    start = len(t.io.parts)
+    for line in lines:
+        t.process(line, track_undo=False)
+    return ''.join(t.io.parts[start:])
 
 
-@pytest.fixture
-def mock_aer(monkeypatch):
-    """Patch AerSimulator with a fast mock — opt-in, for tests of REPL
-    plumbing that must not depend on simulation results."""
-    from qubasic_core.mock_backend import patch_aer
-    patch_aer(monkeypatch)
+def run_basic(source, **settings):
+    """Run QBASIC source through the Python API; return (output, error lines)."""
+    r = api.run(source, basic=True, **settings)
+    return r['output'], r['errors']
 
 
 def capture(func, *args, **kwargs):
-    """Capture stdout from a function call, return (result, output_str)."""
-    import io as _io
-    buf = _io.StringIO()
+    """Call func with stdout captured; return (result, what it printed)."""
+    buf = io.StringIO()
     old = sys.stdout
     sys.stdout = buf
     try:
@@ -68,3 +80,16 @@ def capture(func, *args, **kwargs):
     finally:
         sys.stdout = old
     return result, buf.getvalue()
+
+
+class InTempDir(unittest.TestCase):
+    """Each test runs in its own temporary working directory."""
+
+    def setUp(self):
+        self._cwd = os.getcwd()
+        self._dir = tempfile.TemporaryDirectory()
+        os.chdir(self._dir.name)
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        self._dir.cleanup()

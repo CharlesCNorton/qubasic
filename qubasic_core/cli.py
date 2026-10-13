@@ -1,15 +1,32 @@
-#!/usr/bin/env python3
-"""
-QUBASIC — command-line entry point.
-
-Usage:
-    qubasic                       Interactive REPL (installed console script)
-    python -m qubasic_core        Same, run as a module
-    qubasic script.qb             Run a script file
+"""QUBASIC command line (`qubasic`, `python -m qubasic_core`) and the
+browser REPL (`qubasic --web`).
 """
 
-import sys
+from __future__ import annotations
+
+import io
+import json
 import os
+import secrets
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+
+from qubasic_core.editing import ProgramMgmtMixin
+from qubasic_core.terminal import QBasicTerminal
+
+# ---------------------------------------------------------------------------
+# QUBASIC — command-line entry point.
+#
+# Usage:
+#     qubasic                       Interactive REPL (installed console script)
+#     python -m qubasic_core        Same, run as a module
+#     qubasic script.qb             Run a script file
+# ---------------------------------------------------------------------------
+
+#!/usr/bin/env python3
+
 
 # Force UTF-8 output on Windows
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -30,59 +47,6 @@ if sys.stdin and hasattr(sys.stdin, 'reconfigure'):
             sys.stdin.reconfigure(encoding='utf-8-sig')
     except Exception:
         pass
-
-from qubasic_core.terminal import QBasicTerminal
-from qubasic_core.program_mgmt import ProgramMgmtMixin
-
-# Statement-level operations that are parsed inline rather than dispatched as
-# REPL commands or gates, so they are absent from the command tables and the
-# gate table. Listed in --spec (name, signature, description) for agents.
-_SPEC_STATEMENTS = [
-    ('MEAS', 'MEAS <qubit> -> <bit>', 'mid-circuit measurement into a classical bit (IF feedforward; any other read runs the program live, shot by shot)'),
-    ('MEASURE', 'MEASURE [qubit list]', 'measure all qubits, or a subset, into the result histogram'),
-    ('MEASURE_X', 'MEASURE_X <qubit>', 'measure in the X basis (result in mx_<q>)'),
-    ('MEASURE_Y', 'MEASURE_Y <qubit>', 'measure in the Y basis (result in my_<q>)'),
-    ('MEASURE_Z', 'MEASURE_Z <qubit>', 'measure in the Z basis (result in mz_<q>)'),
-    ('SYNDROME', 'SYNDROME <paulis> <qubits> -> <var>', 'non-destructive stabilizer measurement via an ancilla'),
-    ('RESET', 'RESET <qubit>', 'reset a qubit to |0>'),
-    ('BARRIER', 'BARRIER', 'optimization barrier'),
-    ('QFT', 'QFT <lo>-<hi>', 'quantum Fourier transform over a qubit range'),
-    ('IQFT', 'IQFT <lo>-<hi>', 'inverse quantum Fourier transform'),
-    ('DIFFUSE', 'DIFFUSE <lo>-<hi>', 'Grover diffusion operator'),
-    ('MCX', 'MCX <ctrl,...>, <target>', 'multi-controlled X'),
-    ('MCZ', 'MCZ <ctrl,...>', 'multi-controlled Z'),
-    ('MCP', 'MCP <theta>, <ctrl,...>, <target>', 'multi-controlled phase'),
-    ('QADD', 'QADD <a-range>, <b-range>', 'in-place register add A += B (mod 2^n)'),
-    ('QADDC', 'QADDC <k>, <range>', 'in-place constant add A += k (mod 2^n)'),
-    ('QPE', 'QPE <range> <target> <UGATE>', 'quantum phase estimation of a unitary'),
-    ('AMPLIFY', 'AMPLIFY <marked>', 'one amplitude-amplification (Grover) step'),
-    ('GRAPHSTATE', 'GRAPHSTATE <a-b, b-c, ...>', 'prepare a graph/cluster state'),
-    ('FEATUREMAP', 'FEATUREMAP <x0> <x1> ...', 'ZZ feature-map data encoding'),
-    ('EVOLVE', 'EVOLVE <H>, <time>, <steps>', 'Trotterized Hamiltonian time evolution'),
-    ('APPLYCHANNEL', 'APPLYCHANNEL <name> <qubit>', 'apply a defined Kraus channel'),
-    ('SAVE_EXPECT', 'SAVE_EXPECT <obs> <qubits> -> <var>', 'record an expectation value into a variable after RUN (the mean over shots in a live run)'),
-    ('SAVE_PROBS', 'SAVE_PROBS <qubits> -> <array>', 'record a probability snapshot into an array after RUN (the mean over shots in a live run)'),
-    ('SAVE_AMPS', 'SAVE_AMPS <lo>,<hi> -> <array>', 'record amplitudes into an array after RUN'),
-    ('CTRL', 'CTRL <gate> <ctrl>, <target>', 'controlled version of any gate'),
-    ('INV', 'INV <gate> <args>', 'inverse/dagger of a gate'),
-    ('UNITARY', 'UNITARY <NAME> = [[...]]', 'define a custom gate from a unitary matrix'),
-    ('GOTO', 'GOTO <line>', 'jump to a line number'),
-    ('GOSUB', 'GOSUB <line>', 'call a line block; RETURN resumes'),
-    ('FOR', 'FOR <v> = <a> TO <b> [STEP <s>]', 'counted loop, closed by NEXT (zero-trip when the step cannot reach b)'),
-    ('WHILE', 'WHILE <cond>', 'pre-test loop, closed by WEND'),
-    ('DO', 'DO [WHILE|UNTIL <cond>]', 'loop, closed by LOOP [WHILE|UNTIL]'),
-    ('IF', 'IF <cond> THEN <stmt> [ELSE <stmt>]', 'conditional (single-line, or block ending in END IF)'),
-    ('SELECT', 'SELECT CASE <expr>', 'multi-way branch (CASE v1, v2 / CASE a TO b / CASE IS <op> v / CASE ELSE / END SELECT)'),
-    ('DATA', 'DATA <v1>, <v2>, ...', 'inline data consumed by READ'),
-    ('READ', 'READ <var>, ...', 'read the next DATA values'),
-    ('DEF', 'DEF <NAME>[(p)] = <gates>', 'define a gate-sequence subroutine (also DEF FN, DEF BEGIN)'),
-    ('SUB', 'SUB <name>(<args>)', 'structured subroutine (END SUB; LOCAL/STATIC/SHARED)'),
-    ('FUNCTION', 'FUNCTION <name>(<args>)', 'function returning a value (END FUNCTION)'),
-    ('DIM', 'DIM <name>(<size>[,...])', 'declare an array (name$ for strings; inclusive sizing)'),
-    ('REDIM', 'REDIM [PRESERVE] <name>(<size>)', 'resize an array; PRESERVE keeps existing data'),
-    ('OPTION', 'OPTION BASE 0|1 | OPTION ENDIAN BIG|LITTLE',
-     'array index base; bitstring display order (default LITTLE, qubit 0 rightmost)'),
-]
 
 
 def run_script(path: str, terminal: 'QBasicTerminal') -> None:
@@ -111,7 +75,7 @@ def run_script(path: str, terminal: 'QBasicTerminal') -> None:
         terminal.cmd_run()
 
 
-def main():
+def main() -> None:
     import json as _json
     os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 
@@ -179,17 +143,16 @@ def main():
         port = 8811
         if args and args[0].isdigit():
             port = int(args[0])
-        from qubasic_core.web_repl import serve
         serve(port)
         sys.exit(0)
 
     if spec_mode:
         # Machine-readable contract for agents: commands, gates, functions,
         # constants, and conventions for the installed version.
-        from qubasic_core.engine import GATE_TABLE
         from qubasic_core.expression import ExpressionMixin
+        from qubasic_core.parser import GATE_TABLE
 
-        def _doc_parts(mname):
+        def _doc_parts(mname: str) -> tuple[str, str]:
             doc = (getattr(getattr(QBasicTerminal, mname, None), '__doc__', '') or '').strip()
             line = doc.split('\n')[0].strip()
             # Docstrings format the first line as "SIGNATURE — description".
@@ -206,22 +169,21 @@ def main():
                 sig, hlp = _doc_parts(mname)
                 cmds.append({'name': cname, 'takes_arg': takes,
                              'signature': sig or cname, 'help': hlp})
-        statements = [{'name': n, 'signature': s, 'help': h}
-                      for (n, s, h) in _SPEC_STATEMENTS]
+        from qubasic_core.parser import FUNCTIONS, STATEMENTS
+        statements = [{'name': n, 'topic': t, 'signature': s, 'help': h}
+                      for (t, n, s, h) in STATEMENTS]
+        functions = [{'name': n, 'topic': t, 'signature': s, 'help': h}
+                     for (t, n, s, h) in FUNCTIONS]
         spec = {
             'name': 'qubasic',
             'version': __version__,
             'bit_order': 'little-endian (qubit 0 = rightmost bit)',
             'true_value': -1,
             'commands': sorted(cmds, key=lambda c: c['name']),
-            'statements': sorted(statements, key=lambda s: s['name']),
+            'statements': statements,
             'gates': sorted(GATE_TABLE.keys()),
-            'functions': sorted(
-                set(ExpressionMixin._SAFE_FUNCS)
-                | {'RND', 'TIMER', 'POS', 'PEEK', 'USR', 'EOF', 'FRE',
-                   'LEFT$', 'RIGHT$', 'MID$', 'CHR$', 'STR$', 'HEX$', 'BIN$',
-                   'ASC', 'VAL', 'INSTR', 'LEN'}),
-            'constants': sorted(ExpressionMixin._SAFE_CONSTS.keys()),
+            'functions': functions,
+            'constants': sorted({k.upper() for k in ExpressionMixin._SAFE_CONSTS}),
         }
         print(_json.dumps(spec, indent=2))
         sys.exit(0)
@@ -280,3 +242,174 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# ---------------------------------------------------------------------------
+# QUBASIC web REPL — a single-page terminal served by the standard library.
+#
+#     qubasic --web            Serve on http://127.0.0.1:8811/?t=<token>
+#     qubasic --web 9000       Custom port
+#     QUBASIC_WEB_HOST=0.0.0.0 qubasic --web    Expose on the LAN
+#
+# One QBasicTerminal per server (a session, like the REPL). The page POSTs each
+# line to /run and appends the output. A random URL token gates every request;
+# the server binds to localhost unless QUBASIC_WEB_HOST says otherwise. No
+# external assets, no dependencies beyond the standard library.
+# ---------------------------------------------------------------------------
+
+# Largest request body accepted (one REPL line plus JSON framing).
+MAX_BODY = 64 * 1024
+
+
+class BufferIO:
+    """IOPort collecting one request's output. There is no keyboard behind a
+    web request, so INPUT reads end-of-input (INPUT then assigns 0)."""
+
+    def __init__(self) -> None:
+        self.buf = io.StringIO()
+
+    def write(self, text: str) -> None:
+        self.buf.write(text)
+
+    def writeln(self, text: str) -> None:
+        self.buf.write(text + '\n')
+
+    def read_line(self, prompt: str) -> str:
+        self.buf.write(prompt)
+        raise EOFError
+
+
+def run_line(term: QBasicTerminal, line: str, port: BufferIO) -> str:
+    """Process one line on `term` with its output captured through `port`
+    (and stdout, for the few paths that print directly)."""
+    old_io, old_stdout = term.io, sys.stdout
+    term.io = port
+    sys.stdout = port.buf
+    try:
+        term.process(line, track_undo=False)
+    except Exception as e:
+        port.writeln(f"?ERROR: {e}")
+    finally:
+        term.io, sys.stdout = old_io, old_stdout
+    return port.buf.getvalue()
+
+
+_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QUBASIC</title>
+<style>
+  body { background:#0a0a12; color:#c8f0c8; font:14px/1.45 Consolas, monospace;
+         margin:0; display:flex; flex-direction:column; height:100vh; }
+  #out { flex:1; overflow-y:auto; padding:12px; white-space:pre-wrap;
+         word-break:break-all; }
+  #bar { display:flex; border-top:1px solid #2a2a3a; }
+  #in  { flex:1; background:#11111c; color:#e8ffe8; border:0; padding:10px 12px;
+         font:inherit; outline:none; }
+  .cmd { color:#7ec8ff; }
+  .err { color:#ff8080; }
+</style></head><body>
+<div id="out"></div>
+<div id="bar"><input id="in" autofocus autocomplete="off"
+     placeholder="] 10 H 0   (Enter to run; HELP for commands)"></div>
+<script>
+const out = document.getElementById('out'), inp = document.getElementById('in');
+const token = new URLSearchParams(location.search).get('t') || '';
+const hist = []; let hi = 0;
+function append(text, cls) {
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = text;
+  out.appendChild(d); out.scrollTop = out.scrollHeight;
+}
+append('QUBASIC web REPL — type HELP for commands, DEMO LIST for demos.');
+inp.addEventListener('keydown', async (e) => {
+  if (e.key === 'ArrowUp')   { if (hi > 0) inp.value = hist[--hi]; return; }
+  if (e.key === 'ArrowDown') { inp.value = (hi < hist.length - 1) ? hist[++hi] : ''; return; }
+  if (e.key !== 'Enter') return;
+  const line = inp.value; inp.value = '';
+  if (!line.trim()) return;
+  hist.push(line); hi = hist.length;
+  append('] ' + line, 'cmd');
+  try {
+    const r = await fetch('/run?t=' + encodeURIComponent(token), {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({line})});
+    const j = await r.json();
+    if (j.output) append(j.output.replace(/\\n$/, ''));
+  } catch (err) { append('?CONNECTION ERROR: ' + err, 'err'); }
+});
+</script></body></html>"""
+
+
+def make_server(port: int = 8811, host: str | None = None) -> tuple[ThreadingHTTPServer, str]:
+    """(server, token): a ready HTTP server with its own terminal. Port 0
+    picks a free port (server.server_address has it)."""
+    from qubasic_core.terminal import QBasicTerminal
+
+    term = QBasicTerminal()
+    term.agent_mode = True                     # confine file writes to the cwd
+    token = secrets.token_urlsafe(12)
+    host = host or os.environ.get('QUBASIC_WEB_HOST', '127.0.0.1')
+    # One terminal serves every request; requests run one at a time.
+    lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def _authed(self) -> bool:
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            return secrets.compare_digest(q.get('t', [''])[0], token)
+
+        def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            if not self._authed():
+                self._send(403, b'forbidden (token required)', 'text/plain')
+                return
+            self._send(200, _PAGE.encode('utf-8'), 'text/html; charset=utf-8')
+
+        def do_POST(self) -> None:
+            if not self._authed():
+                self._send(403, b'{}', 'application/json')
+                return
+            try:
+                length = int(self.headers.get('Content-Length', 0) or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_BODY:
+                self._send(413, b'{}', 'application/json')
+                return
+            try:
+                payload = json.loads(self.rfile.read(length) or b'{}')
+                line = str(payload.get('line', ''))[:4096]
+            except Exception:
+                self._send(400, b'{}', 'application/json')
+                return
+            with lock:
+                output = run_line(term, line, BufferIO())
+            body = json.dumps({'output': output}).encode('utf-8')
+            self._send(200, body, 'application/json')
+
+        def log_message(self, *args: Any) -> None:                       # quiet access log
+            pass
+
+    return ThreadingHTTPServer((host, port), Handler), token
+
+
+def serve(port: int = 8811) -> None:
+    from qubasic_core import __version__
+    httpd, token = make_server(port)
+    host = httpd.server_address[0]
+    if isinstance(host, bytes):
+        host = host.decode()
+    print(f"QUBASIC {__version__} web REPL: http://{host}:{port}/?t={token}")
+    print("(Ctrl+C to stop; set QUBASIC_WEB_HOST=0.0.0.0 to expose on the LAN)")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nBYE")
