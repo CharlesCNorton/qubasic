@@ -255,6 +255,16 @@ _MAT_CZ   = np.diag([1, 1, 1, -1]).astype(complex)
 _MAT_SWAP = np.array([[1,0,0,0],[0,0,1,0],[0,1,0,0],[0,0,0,1]], dtype=complex)
 _MAT_DCX  = np.array([[1,0,0,0],[0,0,0,1],[0,1,0,0],[0,0,1,0]], dtype=complex)
 _MAT_ISWAP = np.array([[1,0,0,0],[0,0,1j,0],[0,1j,0,0],[0,0,0,1]], dtype=complex)
+_MAT_SXDG = _MAT_SX.conj().T
+_MAT_CS   = np.diag([1, 1, 1, 1j]).astype(complex)
+_MAT_CSDG = np.diag([1, 1, 1, -1j]).astype(complex)
+_MAT_CSX  = np.eye(4, dtype=complex)
+_MAT_CSX[2:, 2:] = _MAT_SX
+_MAT_CCZ  = np.diag([1, 1, 1, 1, 1, 1, 1, -1]).astype(complex)
+# Echoed cross-resonance, IBM's native two-qubit gate (MSB-first: the first
+# qubit is the control side).
+_MAT_ECR  = np.array([[0, 0, 1, 1j], [0, 0, 1j, 1], [1, -1j, 0, 0], [-1j, 1, 0, 0]],
+                     dtype=complex) / np.sqrt(2)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -291,6 +301,12 @@ def _mat_rxx(p: Sequence[float]) -> np.ndarray:
     m[0,3] = m[3,0] = m[1,2] = m[2,1] = -1j*st
     return m
 
+def _mat_rzx(p: Sequence[float]) -> np.ndarray:
+    # exp(-i t/2 Z (x) X): Z on the first qubit, X on the second.
+    c, s = np.cos(p[0]/2), np.sin(p[0]/2)
+    return np.array([[c, -1j*s, 0, 0], [-1j*s, c, 0, 0],
+                     [0, 0, c, 1j*s], [0, 0, 1j*s, c]], dtype=complex)
+
 def _mat_ryy(p: Sequence[float]) -> np.ndarray:
     # RYY(t) = exp(-i * t/2 * YY).  The off-diagonal signs are asymmetric
     # because Y = [[0,-i],[i,0]] yields YY with sign pattern:
@@ -322,6 +338,7 @@ _GATE_BUILDERS = {
     'SDG':   lambda p: _MAT_SDG,
     'TDG':   lambda p: _MAT_TDG,
     'SX':    lambda p: _MAT_SX,
+    'SXDG':  lambda p: _MAT_SXDG,
     'ID':    lambda p: _MAT_ID,
     # 1-param, 1-qubit
     'RX':    lambda p: np.array([[np.cos(p[0]/2), -1j*np.sin(p[0]/2)],
@@ -344,6 +361,10 @@ _GATE_BUILDERS = {
     'SWAP':  lambda p: _MAT_SWAP,
     'DCX':   lambda p: _MAT_DCX,
     'ISWAP': lambda p: _MAT_ISWAP,
+    'ECR':   lambda p: _MAT_ECR,
+    'CS':    lambda p: _MAT_CS,
+    'CSDG':  lambda p: _MAT_CSDG,
+    'CSX':   lambda p: _MAT_CSX,
     # 1-param, 2-qubit
     'CRX':   _mat_crx,
     'CRY':   _mat_cry,
@@ -353,9 +374,11 @@ _GATE_BUILDERS = {
     'RYY':   _mat_ryy,
     'RZZ':   lambda p: np.diag([np.exp(-1j*p[0]/2), np.exp(1j*p[0]/2),
                                  np.exp(1j*p[0]/2), np.exp(-1j*p[0]/2)]),
+    'RZX':   _mat_rzx,
     # 0-param, 3-qubit
     'CCX':   lambda p: _MAT_CCX,
     'CSWAP': lambda p: _MAT_CSWAP,
+    'CCZ':   lambda p: _MAT_CCZ,
 }
 
 
@@ -383,8 +406,14 @@ _GATE_CONSTANTS: dict[str, np.ndarray] = {
     'SWAP':  _MAT_SWAP,
     'DCX':   _MAT_DCX,
     'ISWAP': _MAT_ISWAP,
+    'SXDG':  _MAT_SXDG,
+    'ECR':   _MAT_ECR,
+    'CS':    _MAT_CS,
+    'CSDG':  _MAT_CSDG,
+    'CSX':   _MAT_CSX,
     'CCX':   _MAT_CCX,
     'CSWAP': _MAT_CSWAP,
+    'CCZ':   _MAT_CCZ,
 }
 
 

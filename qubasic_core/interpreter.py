@@ -11,6 +11,7 @@ import re
 import sys
 import time
 from collections.abc import MutableMapping, Sequence
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
@@ -321,21 +322,21 @@ class ControlFlowMixin(LanguageHost):
     def _emit_text(self, text: str, newline: bool) -> None:
         """Write program output, keeping the cursor column that POS reads and
         TAB and the print zones count from."""
-        start = self._print_col
+        start = self.screen.col
         if newline:
             self.io.writeln(text)
-            self._print_col = 0
+            self.screen.col = 0
         else:
             self.io.write(text)
-            self._print_col = next_column(self._print_col, text)
-        if self._canvas is not None:
+            self.screen.col = next_column(self.screen.col, text)
+        if self.graphics.canvas is not None:
             self._gfx_print(text, newline)
         else:
             self._text_put(text, newline, start)
 
     def _cf_print(self, stmt: str, run_vars: MutableMapping[str, Any],
                   parsed: PrintStmt) -> tuple[bool, ExecOutcome]:
-        self._emit_text(*self._format_print(parsed.expr, run_vars, start=self._print_col))
+        self._emit_text(*self._format_print(parsed.expr, run_vars, start=self.screen.col))
         return True, ExecResult.ADVANCE
 
     def _format_print(self, expr: str, run_vars: Any, start: int = 0) -> tuple[str, bool]:
@@ -618,21 +619,28 @@ def _data_items(text: str) -> list[tuple[str, bool]]:
     return items
 
 
+@dataclass
+class DataState:
+    """DATA, READ and RESTORE: the program's DATA values in order, READ's
+    position, where each line's values start, and the program text they
+    were collected from."""
+
+    pool: list[Any] = field(default_factory=list)
+    ptr: int = 0
+    line_starts: list[tuple[int, int]] = field(default_factory=list)  # (line, first value's index)
+    cache_key: tuple | None = None
+
+
 class ClassicMixin(LanguageHost):
     """Classic BASIC features for QBasicTerminal."""
 
     def _init_classic(self) -> None:
-        self._data_pool: list[Any] = []
-        self._data_ptr: int = 0
-        self._data_cache_key: tuple | None = None
-        self._option_base: int = 0
+        self.data = DataState()
         # OPTION ENDIAN BIG shows bitstrings with qubit 0 leftmost.
         self._endian_big: bool = False
-        self._user_fns: dict[str, dict[str, Any]] = {}
         # RND draws from this generator; RANDOMIZE and SEED reseed it.
         self._rng = random.Random()
         self._rnd_last: float = 0.0
-        self._data_line_starts: list[tuple[int, int]] = []
 
     # ── RND / RANDOMIZE ────────────────────────────────────────────────
 
@@ -675,22 +683,22 @@ class ClassicMixin(LanguageHost):
         prog = self._compiled()
         data = tuple((prog.lines[ip], st.values) for ip, st in enumerate(prog.stmts)
                      if isinstance(st, DataStmt))
-        self._data_ptr = 0
-        if data == self._data_cache_key:
+        self.data.ptr = 0
+        if data == self.data.cache_key:
             return
-        self._data_pool = []
-        self._data_line_starts = []
+        self.data.pool = []
+        self.data.line_starts = []
         for line, values in data:
-            self._data_line_starts.append((line, len(self._data_pool)))
+            self.data.line_starts.append((line, len(self.data.pool)))
             for item, quoted in _data_items(values):
                 if quoted:
-                    self._data_pool.append(item)
+                    self.data.pool.append(item)
                 elif item in self._QUANTUM_STATES:
-                    self._data_pool.append(f"QSTATE:{self._QUANTUM_STATES[item]}")
+                    self.data.pool.append(f"QSTATE:{self._QUANTUM_STATES[item]}")
                 else:
                     num = _parse_input_number(item) if item else 0
-                    self._data_pool.append(num if num is not None else item)
-        self._data_cache_key = data
+                    self.data.pool.append(num if num is not None else item)
+        self.data.cache_key = data
 
     # ── DATA / READ / RESTORE ──────────────────────────────────────────
 
@@ -701,10 +709,10 @@ class ClassicMixin(LanguageHost):
     def _cf_read(self, stmt: str, run_vars: MutableMapping[str, Any], *, parsed: ReadStmt) -> tuple[bool, ExecOutcome]:
         var_names = [v.strip() for v in parsed.var_list.split(',')]
         for vname in var_names:
-            if self._data_ptr >= len(self._data_pool):
+            if self.data.ptr >= len(self.data.pool):
                 raise RuntimeError("OUT OF DATA")
-            val = self._data_pool[self._data_ptr]
-            self._data_ptr += 1
+            val = self.data.pool[self.data.ptr]
+            self.data.ptr += 1
             lv = self._lvalue(vname, run_vars)
             stringy = is_string_kind(self._lvalue_kind(lv))
             if stringy and not isinstance(val, str):
@@ -721,14 +729,14 @@ class ClassicMixin(LanguageHost):
     def _restore_to(self, line: int | None) -> None:
         """RESTORE [line]: READ continues from the first DATA at or after line."""
         if line is None:
-            self._data_ptr = 0
+            self.data.ptr = 0
             return
-        self._data_ptr = next((start for ln, start in self._data_line_starts if ln >= line),
-                              len(self._data_pool))
+        self.data.ptr = next((start for ln, start in self.data.line_starts if ln >= line),
+                              len(self.data.pool))
 
     def cmd_restore(self, rest: str = '') -> None:
         """RESTORE — reset DATA pointer to beginning."""
-        self._data_ptr = 0
+        self.data.ptr = 0
 
     # ── ON expr GOTO / GOSUB ──────────────────────────────────────────
 
@@ -839,7 +847,7 @@ class ClassicMixin(LanguageHost):
             idx -= 1
         if idx < 0:
             # Outside a DO block a bare LOOP calls a SUB or DEF named LOOP.
-            if loop_kind is None and ('LOOP' in self._sub_defs or 'LOOP' in self.subroutines):
+            if loop_kind is None and ('LOOP' in self.procs.subs or 'LOOP' in self.subroutines):
                 return False, None
             raise ValueError("LOOP without DO")
         del loop_stack[idx + 1:]
@@ -908,7 +916,7 @@ class ClassicMixin(LanguageHost):
 
     def _cf_def_fn(self, stmt: str, run_vars: MutableMapping[str, Any], *, parsed: DefFnStmt) -> tuple[bool, ExecOutcome]:
         params = [p.strip() for p in parsed.params.split(',') if p.strip()]
-        self._user_fns['FN' + parsed.name.upper()] = {'params': params, 'body': parsed.body.strip()}
+        self.symbols.fns['FN' + parsed.name.upper()] = {'params': params, 'body': parsed.body.strip()}
         return True, ExecResult.ADVANCE
 
     # ── OPTION BASE ───────────────────────────────────────────────────
@@ -916,7 +924,7 @@ class ClassicMixin(LanguageHost):
     def _cf_option_base(self, stmt: str, *, parsed: OptionBaseStmt) -> tuple[bool, ExecOutcome]:
         """OPTION BASE 0|1 — the lower bound of arrays declared with an upper
         bound only (VariableMixin)."""
-        self._option_base = parsed.base
+        self.symbols.option_base = parsed.base
         return True, ExecResult.ADVANCE
 
     def _cf_option_endian(self, stmt: str, *, parsed: OptionEndianStmt) -> tuple[bool, ExecOutcome]:
@@ -992,34 +1000,41 @@ def _names_storage(text: str) -> bool:
     return False
 
 
+@dataclass
+class ProcedureState:
+    """SUB and FUNCTION: their definitions, the call stack, STATIC values, and
+    per scope level the names whose changes survive the return, the caller's
+    declared types, the arrays that existed before the call and the arrays
+    bound to array parameters."""
+
+    subs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    functions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    depth: int = 0
+    statics: dict[str, dict[str, Any]] = field(default_factory=lambda: {'_GLOBAL': {}})
+    scopes: list[dict[str, Any]] = field(default_factory=list)
+    shared_scopes: list[set[str]] = field(default_factory=list)
+    type_scopes: list[dict[str, str]] = field(default_factory=list)
+    array_scopes: list[set[str]] = field(default_factory=list)
+    alias_scopes: list[list[tuple[str, str, Any]]] = field(default_factory=list)
+
+
 class SubroutineMixin(LanguageHost):
     """SUB/FUNCTION procedures with local scope, typed and array parameters,
     by-reference arguments and LOCAL/STATIC/SHARED declarations (see the
     module docstring)."""
 
     def _init_subs(self) -> None:
-        self._sub_defs: dict[str, dict[str, Any]] = {}
-        self._func_defs: dict[str, dict[str, Any]] = {}
-        self._scope_stack: list[dict[str, Any]] = []
-        self._static_vars: dict[str, dict[str, Any]] = {'_GLOBAL': {}}
-        self._call_stack: list[dict[str, Any]] = []
-        self._func_call_depth: int = 0
-        # Per scope level: the names whose changes survive _pop_scope, the
-        # caller's declared types, the arrays that existed before the call,
-        # and the arrays bound to array parameters.
-        self._shared_stack: list[set[str]] = []
-        self._type_stack: list[dict[str, str]] = []
-        self._array_stack: list[set[str]] = []
-        self._alias_stack: list[list[tuple[str, str, Any]]] = []
+        self.procs = ProcedureState()
 
     def _scan_subs(self, prog: Any = None) -> None:
         """Index the program's SUB and FUNCTION blocks (statement indices of
         the compiled program)."""
         prog = prog if hasattr(prog, 'subs') else self._compiled()
-        self._sub_defs.clear()
-        self._func_defs.clear()
+        self.procs.subs.clear()
+        self.procs.functions.clear()
         statics: set[str] = getattr(prog, 'static_routines', set())
-        for table, out in ((prog.subs, self._sub_defs), (prog.funcs, self._func_defs)):
+        for table, out in ((prog.subs, self.procs.subs), (prog.funcs, self.procs.functions)):
             for name, (start, end, params) in table.items():
                 out[name] = {'params': params, 'start_ip': start, 'end_ip': end,
                              'static': name in statics}
@@ -1029,19 +1044,19 @@ class SubroutineMixin(LanguageHost):
     def _module_wide(self, name: str) -> bool:
         """Whether a caller's variable stays visible inside a procedure."""
         base = name.split('.', 1)[0]
-        return (name in self._global_shared or base in self._global_shared
-                or name in self._consts or name.startswith('_')
+        return (name in self.symbols.shared or base in self.symbols.shared
+                or name in self.symbols.consts or name.startswith('_')
                 or name in ('ERR', 'ERL'))
 
     def _push_scope(self) -> None:
         """Enter a procedure: keep the caller's variables, declared types and
         arrays for _pop_scope and leave only the module-wide variables visible."""
         caller = dict(self.variables)
-        self._scope_stack.append(caller)
-        self._shared_stack.append(set(n for n in caller if self._module_wide(n)))
-        self._type_stack.append(dict(self._var_types))
-        self._array_stack.append(set(self.arrays))
-        self._alias_stack.append([])
+        self.procs.scopes.append(caller)
+        self.procs.shared_scopes.append(set(n for n in caller if self._module_wide(n)))
+        self.procs.type_scopes.append(dict(self.symbols.var_types))
+        self.procs.array_scopes.append(set(self.arrays))
+        self.procs.alias_scopes.append([])
         self.variables.clear()
         self.variables.update({k: v for k, v in caller.items() if self._module_wide(k)})
 
@@ -1050,36 +1065,36 @@ class SubroutineMixin(LanguageHost):
         parameters, drop its local arrays, restore the caller's variables and
         declared types, and carry back the SHARED and module-wide variables
         it changed."""
-        if frame is None and self._call_stack:
-            frame = self._call_stack[-1]
+        if frame is None and self.procs.calls:
+            frame = self.procs.calls[-1]
         if frame is not None:
             name = frame.get('sub_name') or frame.get('func_name') or ''
             if frame.get('static'):
                 params = set(frame.get('params', ()))
-                keep = self._shared_stack[-1] if self._shared_stack else set()
-                self._static_vars[name] = {k: v for k, v in self.variables.items()
+                keep = self.procs.shared_scopes[-1] if self.procs.shared_scopes else set()
+                self.procs.statics[name] = {k: v for k, v in self.variables.items()
                                            if k not in params and k not in keep
                                            and not self._module_wide(k)}
-            elif name in self._static_vars:
-                for vname in list(self._static_vars[name]):
-                    self._static_vars[name][vname] = self.variables.get(vname, 0)
-        if self._alias_stack:
-            self._unbind_arrays(self._alias_stack.pop())
-        if self._array_stack:
-            before = self._array_stack.pop()
+            elif name in self.procs.statics:
+                for vname in list(self.procs.statics[name]):
+                    self.procs.statics[name][vname] = self.variables.get(vname, 0)
+        if self.procs.alias_scopes:
+            self._unbind_arrays(self.procs.alias_scopes.pop())
+        if self.procs.array_scopes:
+            before = self.procs.array_scopes.pop()
             for arr in list(self.arrays):
-                if arr not in before and arr not in self._global_shared:
+                if arr not in before and arr not in self.symbols.shared:
                     self._drop_array(arr)
-        if self._type_stack:
-            shared_types = {k: v for k, v in self._var_types.items() if k in self._global_shared}
-            self._var_types.clear()
-            self._var_types.update(self._type_stack.pop())
-            self._var_types.update(shared_types)
-        if self._scope_stack:
-            shared = self._shared_stack.pop() if self._shared_stack else set()
+        if self.procs.type_scopes:
+            shared_types = {k: v for k, v in self.symbols.var_types.items() if k in self.symbols.shared}
+            self.symbols.var_types.clear()
+            self.symbols.var_types.update(self.procs.type_scopes.pop())
+            self.symbols.var_types.update(shared_types)
+        if self.procs.scopes:
+            shared = self.procs.shared_scopes.pop() if self.procs.shared_scopes else set()
             shared_vals = {v: self.variables[v] for v in shared if v in self.variables}
             self.variables.clear()
-            self.variables.update(self._scope_stack.pop())
+            self.variables.update(self.procs.scopes.pop())
             self.variables.update(shared_vals)
 
     # ── Array parameters ───────────────────────────────────────────────
@@ -1087,8 +1102,8 @@ class SubroutineMixin(LanguageHost):
     def _array_entry(self, name: str) -> tuple | None:
         if name not in self.arrays:
             return None
-        return (self.arrays[name], self._array_dims.get(name), self._array_lb.get(name),
-                self._array_types.get(name), name in self._dimmed_arrays)
+        return (self.arrays[name], self.symbols.array_dims.get(name), self.symbols.array_lb.get(name),
+                self.symbols.array_types.get(name), name in self.symbols.dimmed)
 
     def _set_array_entry(self, name: str, entry: tuple | None) -> None:
         self._drop_array(name)
@@ -1097,13 +1112,13 @@ class SubroutineMixin(LanguageHost):
         data, dims, lows, typ, dimmed = entry
         self.arrays[name] = data
         if dims is not None:
-            self._array_dims[name] = dims
+            self.symbols.array_dims[name] = dims
         if lows is not None:
-            self._array_lb[name] = lows
+            self.symbols.array_lb[name] = lows
         if typ is not None:
-            self._array_types[name] = typ
+            self.symbols.array_types[name] = typ
         if dimmed:
-            self._dimmed_arrays.add(name)
+            self.symbols.dimmed.add(name)
 
     def _bind_array(self, param: str, source: str) -> None:
         """Make array parameter `param` the caller's array `source`."""
@@ -1111,7 +1126,7 @@ class SubroutineMixin(LanguageHost):
             raise ValueError(f"SUBSCRIPT OUT OF RANGE: array {source} is not dimensioned")
         if param == source:
             return
-        self._alias_stack[-1].append((param, source, self._array_entry(param)))
+        self.procs.alias_scopes[-1].append((param, source, self._array_entry(param)))
         self._set_array_entry(param, self._array_entry(source))
 
     def _unbind_arrays(self, aliases: list[tuple[str, str, Any]]) -> None:
@@ -1141,9 +1156,9 @@ class SubroutineMixin(LanguageHost):
                                  f"not the array {val.name}()")
             if p.type is not None:
                 self._check_type(p.type)
-                self._var_types[p.name] = p.type
+                self.symbols.var_types[p.name] = p.type
             self.variables[p.name] = self._coerce(p.name, val)
-        for k, v in self._static_vars.get(name, {}).items():
+        for k, v in self.procs.statics.get(name, {}).items():
             self.variables[k] = v
 
     def _call_args(self, params: list[str], arg_texts: list[str], run_vars: Any) -> list[Any]:
@@ -1167,13 +1182,13 @@ class SubroutineMixin(LanguageHost):
     def _cf_sub(self, stmt: str, sorted_lines: Sequence[int], ip: int, *, parsed: SubStmt) -> tuple[bool, ExecOutcome]:
         """SUB — skip the block during normal execution."""
         name = parsed.name
-        if name in self._sub_defs:
-            return True, self._sub_defs[name]['end_ip'] + 1
+        if name in self.procs.subs:
+            return True, self.procs.subs[name]['end_ip'] + 1
         return True, ExecResult.ADVANCE
 
     def _cf_end_sub(self, stmt: str, *, parsed: EndSubStmt) -> tuple[bool, ExecOutcome]:
-        if self._call_stack:
-            frame = self._call_stack.pop()
+        if self.procs.calls:
+            frame = self.procs.calls.pop()
             back = [(lv, self.variables.get(p)) for p, lv in frame.get('byref', ())]
             self._pop_scope(frame)
             for lv, value in back:
@@ -1185,8 +1200,8 @@ class SubroutineMixin(LanguageHost):
     def _cf_function(self, stmt: str, sorted_lines: Sequence[int], ip: int, *, parsed: FunctionStmt) -> tuple[bool, ExecOutcome]:
         """FUNCTION — skip the block during normal execution."""
         name = parsed.name
-        if name in self._func_defs:
-            return True, self._func_defs[name]['end_ip'] + 1
+        if name in self.procs.functions:
+            return True, self.procs.functions[name]['end_ip'] + 1
         return True, ExecResult.ADVANCE
 
     def _cf_end_function(self, stmt: str, *, parsed: EndFunctionStmt) -> tuple[bool, ExecOutcome]:
@@ -1195,12 +1210,12 @@ class SubroutineMixin(LanguageHost):
     def _cf_call(self, stmt: str, run_vars: MutableMapping[str, Any],
                  sorted_lines: Sequence[int], ip: int, *, parsed: CallStmt) -> tuple[bool, ExecOutcome]:
         name, arg_str = parsed.name, parsed.args
-        if name not in self._sub_defs:
+        if name not in self.procs.subs:
             if name in ('ABSOLUTE', 'INTERRUPT', 'INTERRUPTX'):
                 raise RuntimeError(f"ILLEGAL FUNCTION CALL: CALL {name} runs machine code, "
                                    f"which QUBASIC does not execute")
             raise RuntimeError(f"SUBPROGRAM NOT DEFINED: {name}")
-        sub = self._sub_defs[name]
+        sub = self.procs.subs[name]
         arg_texts = self._split_arg_list(arg_str) if arg_str.strip() else []
         args = self._call_args(sub['params'], arg_texts, run_vars)
         names = [parse_param(t).name for t in sub['params']]
@@ -1209,15 +1224,15 @@ class SubroutineMixin(LanguageHost):
             if isinstance(val, ArrayRef):
                 continue
             if (_names_storage(text) and not self._is_function_name(text)
-                    and text.strip() not in self._consts):
+                    and text.strip() not in self.symbols.consts):
                 byref.append((pname, self._lvalue(text, run_vars)))
         self._push_scope()
-        self._call_stack.append({'return_ip': ip + 1, 'sub_name': name, 'byref': byref,
+        self.procs.calls.append({'return_ip': ip + 1, 'sub_name': name, 'byref': byref,
                                  'params': names, 'static': sub.get('static')})
         try:
             self._bind_params(name, sub['params'], args)
         except Exception:
-            self._pop_scope(self._call_stack.pop())
+            self._pop_scope(self.procs.calls.pop())
             raise
         return True, sub['start_ip']
 
@@ -1230,23 +1245,23 @@ class SubroutineMixin(LanguageHost):
             return False
         if '(' not in text:
             return False
-        return (up in self._func_defs or up in self._user_fns or ('FN' + up) in self._user_fns
+        return (up in self.procs.functions or up in self.symbols.fns or ('FN' + up) in self.symbols.fns
                 or self._builtin(up) is not None)
 
     def _invoke_function(self, name: str, args: list[Any], prog: Any) -> Any:
         """Execute a FUNCTION block and return its value (called from the
         expression evaluator). Its statements run through control-flow
         dispatch, one compiled statement at a time."""
-        self._func_call_depth += 1
-        if self._func_call_depth > 100:
-            self._func_call_depth -= 1
+        self.procs.depth += 1
+        if self.procs.depth > 100:
+            self.procs.depth -= 1
             raise RuntimeError("FUNCTION CALL DEPTH LIMIT (100)")
         try:
             prog = self._as_program(prog)
             uname = name.upper()
-            if uname not in self._func_defs:
+            if uname not in self.procs.functions:
                 raise ValueError(f"FUNCTION NOT DEFINED: {name}")
-            func = self._func_defs[uname]
+            func = self.procs.functions[uname]
             self._push_scope()
             frame = {'func_name': uname, 'static': func.get('static'),
                      'params': [parse_param(t).name for t in func['params']]}
@@ -1263,13 +1278,13 @@ class SubroutineMixin(LanguageHost):
                 def _no_clause(s: str, ls: list[dict[str, Any]], sl: Sequence[int], i: int, rv: MutableMapping[str, Any]) -> None:
                     return None
 
-                self._call_stack.append(frame)
-                depth = len(self._call_stack)
+                self.procs.calls.append(frame)
+                depth = len(self.procs.calls)
                 try:
                     # Run to this FUNCTION's END FUNCTION; a SUB it calls runs
                     # wherever it sits and returns here.
                     while ctx.ip < len(prog) and not (
-                            ctx.ip == func['end_ip'] and len(self._call_stack) == depth):
+                            ctx.ip == func['end_ip'] and len(self.procs.calls) == depth):
                         ctx.iteration_count += 1
                         if ctx.iteration_count > ctx.max_iterations:
                             raise RuntimeError("FUNCTION LOOP LIMIT")
@@ -1290,14 +1305,14 @@ class SubroutineMixin(LanguageHost):
                         else:
                             ctx.ip += 1
                 finally:
-                    del self._call_stack[depth - 1:]
+                    del self.procs.calls[depth - 1:]
                 ret_val = next((v for k, v in self.variables.items() if k.upper() == uname),
                                '' if uname.endswith('$') else 0)
             finally:
                 self._pop_scope(frame)
             return ret_val
         finally:
-            self._func_call_depth -= 1
+            self.procs.depth -= 1
 
     # ── LOCAL / STATIC / SHARED ────────────────────────────────────────
 
@@ -1307,7 +1322,7 @@ class SubroutineMixin(LanguageHost):
     def _cf_local(self, stmt: str, run_vars: MutableMapping[str, Any], *, parsed: LocalStmt) -> tuple[bool, ExecOutcome]:
         for p in self._declared_names(parsed.var_list):
             if p.type is not None:
-                self._var_types[p.name] = p.type
+                self.symbols.var_types[p.name] = p.type
             value = self._default_value(p.name)
             run_vars[p.name] = value
             self.variables[p.name] = value
@@ -1315,18 +1330,18 @@ class SubroutineMixin(LanguageHost):
 
     def _cf_static(self, stmt: str, run_vars: MutableMapping[str, Any], *, parsed: StaticStmt) -> tuple[bool, ExecOutcome]:
         var_list = parsed.var_list
-        frame = self._call_stack[-1] if self._call_stack else {}
+        frame = self.procs.calls[-1] if self.procs.calls else {}
         sub_name = frame.get('sub_name') or frame.get('func_name') or '_GLOBAL'
-        if sub_name not in self._static_vars:
-            self._static_vars[sub_name] = {}
-        store = self._static_vars[sub_name]
+        if sub_name not in self.procs.statics:
+            self.procs.statics[sub_name] = {}
+        store = self.procs.statics[sub_name]
         for p in self._declared_names(var_list):
             if p.array:
-                if self._array_stack:
-                    self._array_stack[-1].add(p.name)       # keeps its elements between calls
+                if self.procs.array_scopes:
+                    self.procs.array_scopes[-1].add(p.name)       # keeps its elements between calls
                 continue
             if p.type is not None:
-                self._var_types[p.name] = p.type
+                self.symbols.var_types[p.name] = p.type
             val = store.get(p.name, self._default_value(p.name))
             store[p.name] = val
             run_vars[p.name] = val
@@ -1336,19 +1351,19 @@ class SubroutineMixin(LanguageHost):
     def _cf_shared(self, stmt: str, run_vars: MutableMapping[str, Any], *, parsed: SharedStmt) -> tuple[bool, ExecOutcome]:
         for p in self._declared_names(parsed.var_list):
             if p.array:
-                if self._array_stack:
-                    self._array_stack[-1].add(p.name)       # the caller's array, not a local
+                if self.procs.array_scopes:
+                    self.procs.array_scopes[-1].add(p.name)       # the caller's array, not a local
                 continue
-            if not self._scope_stack:
+            if not self.procs.scopes:
                 continue
             if p.type is not None:
-                self._var_types[p.name] = p.type
-            caller = self._scope_stack[-1]
+                self.symbols.var_types[p.name] = p.type
+            caller = self.procs.scopes[-1]
             value = caller.get(p.name, self._default_value(p.name))
             run_vars[p.name] = value
             self.variables[p.name] = value
-            if self._shared_stack:
-                self._shared_stack[-1].add(p.name)
+            if self.procs.shared_scopes:
+                self.procs.shared_scopes[-1].add(p.name)
         return True, ExecResult.ADVANCE
 
 
@@ -1396,45 +1411,67 @@ def error_code(err: Exception) -> int:
     return 1
 
 
+@dataclass
+class EventState:
+    """Event trapping: ON TIMER, ON MEASURE, ON KEY(n) and ON PLAY(n) handlers
+    with their ON | OFF | STOP states and the events STOP holds, the keys
+    KEY 15-25 define, the handler running for each kind, and the keys read
+    from the terminal that INKEY$ and GET have yet to take."""
+
+    timer_target: int | None = None
+    timer_interval: float = 0.0
+    timer_last: float = 0.0
+    timer_state: str = 'OFF'                                      # TIMER ON | OFF | STOP
+    timer_pending: bool = False                                   # an event held by TIMER STOP
+    measure_target: int | None = None
+    measure_fired: bool = False
+    key_traps: dict[int, int] = field(default_factory=dict)       # ON KEY(n) handlers
+    key_state: dict[int, str] = field(default_factory=dict)       # KEY(n) ON | OFF | STOP
+    key_pending: set[int] = field(default_factory=set)            # key events held by STOP
+    user_keys: dict[int, set[str]] = field(default_factory=dict)  # keys KEY 15-25 define
+    play_trap: tuple[int, int] | None = None                      # ON PLAY(n): (queue size, handler)
+    play_state: str = 'OFF'
+    play_pending: bool = False
+    play_last: int = 0
+    depth: dict[str, int] = field(default_factory=dict)           # kind -> GOSUB depth of its running handler
+    key_buffer: list[str] = field(default_factory=list)           # keys read, not yet taken
+    read_keys: Callable[..., list[str]] = read_terminal_keys
+
+
+@dataclass
+class ErrorState:
+    """ON ERROR: the handler's target, and ERR, ERL and the position RESUME
+    returns to while a handler runs."""
+
+    target: int | None = None  # ON ERROR GOTO's line
+    code: int = 0              # ERR
+    line: int = 0              # ERL
+    ip: int | None = None      # where RESUME returns
+    handling: bool = False
+
+
+@dataclass
+class DebugState:
+    """The debugger: TRON, STOP and CONT positions, breakpoints, WATCH
+    expressions, and the statevector checkpoints REWIND and FORWARD move
+    through."""
+
+    trace: bool = False                                               # TRON
+    stopped_ip: int | None = None                                     # where STOP or a breakpoint stopped
+    skip_stop_ip: int | None = None                                   # the STOP that CONT steps past
+    breakpoints: set[int] = field(default_factory=set)
+    watches: list[str] = field(default_factory=list)
+    checkpoints: list[tuple[int, Any]] = field(default_factory=list)  # (line, statevector)
+    position: int = -1                                                # the checkpoint REWIND and FORWARD are at
+
+
 class DebugMixin(LanguageHost):
     """Error handling, debugging, and event callbacks for QBasicTerminal."""
 
     def _init_debug(self) -> None:
-        self._error_target: int | None = None
-        self._err_code: int = 0
-        self._err_line: int = 0
-        self._err_ip: int | None = None
-        self._in_error_handler: bool = False
-        self._trace_mode: bool = False
-        self._stopped_ip: int | None = None
-        self._cont_skip_stop_ip: int | None = None
-        self._breakpoints: set[int] = set()
-        self._watches: list[str] = []
-        self._on_measure_target: int | None = None
-        self._on_measure_fired: bool = False
-        self._on_timer_target: int | None = None
-        self._on_timer_interval: float = 0.0
-        self._on_timer_last: float = 0.0
-        self._timer_state = 'OFF'             # TIMER ON | OFF | STOP
-        self._timer_pending = False           # an event held by TIMER STOP
-        # Key and music traps: ON KEY(n) / ON PLAY(n) handlers, their ON | OFF |
-        # STOP states, events held by STOP, and keys KEY 15-25 define.
-        self._key_traps: dict[int, int] = {}
-        self._key_state: dict[int, str] = {}
-        self._key_pending: set[int] = set()
-        self._user_keys: dict[int, set[str]] = {}
-        self._play_trap: tuple[int, int] | None = None
-        self._play_trap_state = 'OFF'
-        self._play_pending = False
-        self._play_last_count = 0
-        # An event's handler runs with the event held: kind -> GOSUB depth.
-        self._event_depth: dict[str, int] = {}
-        # Keys read from the terminal that INKEY$ and GET have yet to take.
-        self._key_buffer: list[str] = []
-        self._read_keys: Callable[..., list[str]] = read_terminal_keys
-        # Time-travel: statevector checkpoints indexed by gate count
-        self._sv_checkpoints: list[tuple[int, Any]] = []  # [(line_num, sv_copy)]
-        self._tt_position: int = -1  # current position in checkpoint list
+        self.errors = ErrorState()
+        self.debug = DebugState()
+        self.events = EventState()
 
     # ── Error handling ─────────────────────────────────────────────────
 
@@ -1443,16 +1480,16 @@ class DebugMixin(LanguageHost):
         if isinstance(target, str):             # labels resolve when the program compiles
             raise ValueError(f"LABEL {target} NOT FOUND")
         if target == 0:
-            self._error_target = None
+            self.errors.target = None
         else:
-            self._error_target = target
+            self.errors.target = target
         return True, ExecResult.ADVANCE
 
     def _cf_resume(self, stmt: str, sorted_lines: Sequence[int], *, parsed: ResumeStmt) -> tuple[bool, ExecOutcome]:
-        self._in_error_handler = False
+        self.errors.handling = False
         arg = parsed.arg
         from qubasic_core.parser import line_index
-        err_ip = self._err_ip if self._err_ip is not None else line_index(sorted_lines, self._err_line)
+        err_ip = self.errors.ip if self.errors.ip is not None else line_index(sorted_lines, self.errors.line)
         if arg is None or arg.strip() in ('', '0'):
             # RESUME (or RESUME 0) — retry the statement that caused the error
             return True, err_ip if err_ip is not None else ExecResult.ADVANCE
@@ -1473,15 +1510,15 @@ class DebugMixin(LanguageHost):
                       sorted_lines: Any, ip: int | None = None) -> int | None:
         """Handle a runtime error at statement ip (line line_num). Returns the
         statement to jump to, or None to propagate."""
-        if self._error_target is not None and not self._in_error_handler:
-            self._err_code = error_code(err)
-            self._err_line = line_num
-            self._err_ip = ip
-            self._in_error_handler = True
-            self.variables['ERR'] = self._err_code
-            self.variables['ERL'] = self._err_line
+        if self.errors.target is not None and not self.errors.handling:
+            self.errors.code = error_code(err)
+            self.errors.line = line_num
+            self.errors.ip = ip
+            self.errors.handling = True
+            self.variables['ERR'] = self.errors.code
+            self.variables['ERL'] = self.errors.line
             from qubasic_core.parser import line_index
-            return line_index(sorted_lines, self._error_target)
+            return line_index(sorted_lines, self.errors.target)
         return None
 
     # ── ASSERT ─────────────────────────────────────────────────────────
@@ -1505,38 +1542,38 @@ class DebugMixin(LanguageHost):
         if sv is None or sv.nbytes > CHECKPOINT_MAX_BYTES:
             return
         import numpy as np
-        self._sv_checkpoints.append((line_num, np.array(sv, copy=True)))
-        total = sum(c.nbytes for _, c in self._sv_checkpoints)
-        while self._sv_checkpoints and (len(self._sv_checkpoints) > MAX_SV_CHECKPOINTS
+        self.debug.checkpoints.append((line_num, np.array(sv, copy=True)))
+        total = sum(c.nbytes for _, c in self.debug.checkpoints)
+        while self.debug.checkpoints and (len(self.debug.checkpoints) > MAX_SV_CHECKPOINTS
                                         or total > CHECKPOINT_BUDGET_BYTES):
-            total -= self._sv_checkpoints.pop(0)[1].nbytes
-        self._tt_position = len(self._sv_checkpoints) - 1
+            total -= self.debug.checkpoints.pop(0)[1].nbytes
+        self.debug.position = len(self.debug.checkpoints) - 1
 
 
     def cmd_history(self, rest: str = '') -> None:
         """HISTORY — show statevector checkpoint list."""
-        if not self._sv_checkpoints:
+        if not self.debug.checkpoints:
             self.io.writeln("?NO CHECKPOINTS")
             return
-        for i, (ln, _) in enumerate(self._sv_checkpoints):
-            marker = " <<" if i == self._tt_position else ""
+        for i, (ln, _) in enumerate(self.debug.checkpoints):
+            marker = " <<" if i == self.debug.position else ""
             self.io.writeln(f"  [{i}] line {ln}{marker}")
 
     # ── TRON / TROFF ───────────────────────────────────────────────────
 
     def cmd_tron(self) -> None:
         """TRON — trace on, print each line number during execution."""
-        self._trace_mode = True
+        self.debug.trace = True
         self.io.writeln("TRACE ON")
 
     def cmd_troff(self) -> None:
         """TROFF — stop printing line numbers as the program runs."""
-        self._trace_mode = False
+        self.debug.trace = False
         self.io.writeln("TRACE OFF")
 
     def _trace_line(self, line_num: int) -> None:
         """Print trace output if trace mode is on."""
-        if self._trace_mode:
+        if self.debug.trace:
             self.io.write(f"[{line_num}]" + ' ')
 
     # ── STOP / CONT ────────────────────────────────────────────────────
@@ -1552,7 +1589,7 @@ class DebugMixin(LanguageHost):
             raise ValueError("RUN inside a program that runs shot by shot")
         self._clear_program_state()
         loop_stack.clear()
-        self._data_ptr = 0
+        self.data.ptr = 0
         self._reset_events()
         if self._build_qc is not None:
             self._build_qc.clear()
@@ -1569,12 +1606,12 @@ class DebugMixin(LanguageHost):
 
     def _cf_stop(self, stmt: str, sorted_lines: Sequence[int], ip: int, *, parsed: StopStmt) -> tuple[bool, ExecOutcome]:
         # CONT sets _cont_skip_stop_ip to replay past this STOP
-        if self._cont_skip_stop_ip is not None and self._cont_skip_stop_ip == ip:
-            self._cont_skip_stop_ip = None
+        if self.debug.skip_stop_ip is not None and self.debug.skip_stop_ip == ip:
+            self.debug.skip_stop_ip = None
             return True, ExecResult.ADVANCE
         line_num = sorted_lines[ip]
         self.io.writeln(f"STOPPED AT LINE {line_num}")
-        self._stopped_ip = ip
+        self.debug.stopped_ip = ip
         self._print_watches()
         return True, ExecResult.END
 
@@ -1585,12 +1622,12 @@ class DebugMixin(LanguageHost):
         so lines after STOP are reached. Variable state is rebuilt by
         replaying all lines before the STOP.
         """
-        if self._stopped_ip is None:
+        if self.debug.stopped_ip is None:
             self.io.writeln("?CANNOT CONTINUE")
             return
         self.io.writeln("CONTINUING...")
-        self._cont_skip_stop_ip = self._stopped_ip
-        self._stopped_ip = None
+        self.debug.skip_stop_ip = self.debug.stopped_ip
+        self.debug.stopped_ip = None
         self.cmd_run()
 
     # ── Breakpoints ────────────────────────────────────────────────────
@@ -1598,19 +1635,19 @@ class DebugMixin(LanguageHost):
     def cmd_breakpoint(self, rest: str) -> None:
         """BREAK <line> | BREAK CLEAR | BREAK LIST | BREAK <start>-<end> — manage breakpoints."""
         if not rest.strip():
-            if self._breakpoints:
-                self.io.writeln(f"  Breakpoints: {sorted(self._breakpoints)}")
+            if self.debug.breakpoints:
+                self.io.writeln(f"  Breakpoints: {sorted(self.debug.breakpoints)}")
             else:
                 self.io.writeln("  No breakpoints set")
             return
         rest = rest.strip().upper()
         if rest in ('CLEAR', 'ALL'):
-            self._breakpoints.clear()
+            self.debug.breakpoints.clear()
             self.io.writeln("BREAKPOINTS CLEARED")
             return
         if rest == 'LIST':
-            if self._breakpoints:
-                for bp in sorted(self._breakpoints):
+            if self.debug.breakpoints:
+                for bp in sorted(self.debug.breakpoints):
                     src = self.program.get(bp, '(no source)')
                     self.io.writeln(f"  {bp}: {src}")
             else:
@@ -1620,29 +1657,29 @@ class DebugMixin(LanguageHost):
         if '-' in rest:
             try:
                 a, b = rest.split('-')
-                for bp in list(self._breakpoints):
+                for bp in list(self.debug.breakpoints):
                     if int(a) <= bp <= int(b):
-                        self._breakpoints.discard(bp)
+                        self.debug.breakpoints.discard(bp)
                 self.io.writeln(f"BREAKPOINTS CLEARED IN {a}-{b}")
                 return
             except ValueError:
                 pass
         try:
             line = int(rest)
-            if line in self._breakpoints:
-                self._breakpoints.discard(line)
+            if line in self.debug.breakpoints:
+                self.debug.breakpoints.discard(line)
                 self.io.writeln(f"BREAKPOINT REMOVED: {line}")
             else:
-                self._breakpoints.add(line)
+                self.debug.breakpoints.add(line)
                 self.io.writeln(f"BREAKPOINT SET: {line}")
         except ValueError:
             self.io.writeln("?USAGE: BREAK <line> | BREAK <start>-<end> | BREAK CLEAR | BREAK LIST")
 
     def _check_breakpoint(self, line_num: int, sorted_lines: Sequence[int], ip: int) -> bool:
         """Check if we should break at this line. Returns True to stop."""
-        if line_num in self._breakpoints:
+        if line_num in self.debug.breakpoints:
             self.io.writeln(f"BREAKPOINT AT LINE {line_num}")
-            self._stopped_ip = ip
+            self.debug.stopped_ip = ip
             self._print_watches()
             return True
         return False
@@ -1652,27 +1689,27 @@ class DebugMixin(LanguageHost):
     def cmd_watch(self, rest: str) -> None:
         """WATCH [expr | CLEAR] — add or remove a watch expression, list them, or clear them."""
         if not rest.strip():
-            if self._watches:
+            if self.debug.watches:
                 self.io.writeln("  Watch expressions:")
-                for w in self._watches:
+                for w in self.debug.watches:
                     self.io.writeln(f"    {w}")
             else:
                 self.io.writeln("  No watches set")
             return
         rest = rest.strip()
         if rest.upper() == 'CLEAR':
-            self._watches.clear()
+            self.debug.watches.clear()
             self.io.writeln("WATCHES CLEARED")
             return
-        if rest in self._watches:
-            self._watches.remove(rest)
+        if rest in self.debug.watches:
+            self.debug.watches.remove(rest)
             self.io.writeln(f"WATCH REMOVED: {rest}")
         else:
-            self._watches.append(rest)
+            self.debug.watches.append(rest)
             self.io.writeln(f"WATCHING: {rest}")
 
     def _print_watches(self) -> None:
-        for w in self._watches:
+        for w in self.debug.watches:
             try:
                 val = self._safe_eval(w)
                 self.io.writeln(f"  {w} = {val}")
@@ -1682,15 +1719,15 @@ class DebugMixin(LanguageHost):
     # ── Callbacks ──────────────────────────────────────────────────────
 
     def _cf_on_measure(self, stmt: str, *, parsed: OnMeasureStmt) -> tuple[bool, ExecOutcome]:
-        self._on_measure_target = parsed.target
+        self.events.measure_target = parsed.target
         return True, ExecResult.ADVANCE
 
     def _cf_on_timer(self, stmt: str, *, parsed: OnTimerStmt) -> tuple[bool, ExecOutcome]:
         if isinstance(parsed.target, str):      # labels resolve when the program compiles
             raise ValueError(f"LABEL {parsed.target} NOT FOUND")
-        self._on_timer_interval = float(self._safe_eval(parsed.interval))
-        self._on_timer_target = parsed.target
-        self._on_timer_last = time.time()
+        self.events.timer_interval = float(self._safe_eval(parsed.interval))
+        self.events.timer_target = parsed.target
+        self.events.timer_last = time.time()
         return True, ExecResult.ADVANCE
 
     def _stmt_timer(self, stmt: str) -> bool:
@@ -1698,11 +1735,11 @@ class DebugMixin(LanguageHost):
         m = re.match(r'TIMER\s+(ON|OFF|STOP)\s*$', stmt.strip(), re.IGNORECASE)
         if not m:
             return False
-        self._timer_state = m.group(1).upper()
-        if self._timer_state == 'ON':
-            self._on_timer_last = time.time()
-        elif self._timer_state == 'OFF':
-            self._timer_pending = False
+        self.events.timer_state = m.group(1).upper()
+        if self.events.timer_state == 'ON':
+            self.events.timer_last = time.time()
+        elif self.events.timer_state == 'OFF':
+            self.events.timer_pending = False
         return True
 
     def _stmt_on_event(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
@@ -1724,14 +1761,14 @@ class DebugMixin(LanguageHost):
             if n not in KEY_TRAP_KEYS and not 15 <= n <= 25:
                 raise ValueError(f"ILLEGAL FUNCTION CALL: KEY({n})")
             if target is None:
-                self._key_traps.pop(n, None)
+                self.events.key_traps.pop(n, None)
             else:
-                self._key_traps[n] = target
+                self.events.key_traps[n] = target
         else:
             if not 1 <= n <= 32:
                 raise ValueError(f"ILLEGAL FUNCTION CALL: PLAY({n})")
-            self._play_trap = None if target is None else (n, target)
-            self._play_last_count = self._bg_remaining()
+            self.events.play_trap = None if target is None else (n, target)
+            self.events.play_last = self._bg_remaining()
         return True
 
     def _event_target(self, text: str) -> int | None:
@@ -1745,9 +1782,9 @@ class DebugMixin(LanguageHost):
 
     def _set_play_trap(self, state: str) -> None:
         """PLAY ON | OFF | STOP: arm, disarm or hold the ON PLAY trap."""
-        self._play_trap_state = state
+        self.events.play_state = state
         if state == 'OFF':
-            self._play_pending = False
+            self.events.play_pending = False
 
     @staticmethod
     def _stmt_device_events(stmt: str) -> bool:
@@ -1765,9 +1802,9 @@ class DebugMixin(LanguageHost):
             n = int(self._eval_with_vars(m.group(1), run_vars))
             state = m.group(2).upper()
             for k in ([*KEY_TRAP_KEYS, *range(15, 26)] if n == 0 else [n]):
-                self._key_state[k] = state
+                self.events.key_state[k] = state
                 if state == 'OFF':
-                    self._key_pending.discard(k)
+                    self.events.key_pending.discard(k)
             return True
         m = re.match(r'KEY\s+(\d+)\s*,\s*(.+)$', s, re.IGNORECASE)
         if m:
@@ -1776,7 +1813,7 @@ class DebugMixin(LanguageHost):
             if not isinstance(text, str):
                 raise ValueError("TYPE MISMATCH: KEY n takes a string")
             if 15 <= n <= 25:
-                self._user_keys[n] = defined_keys(text)
+                self.events.user_keys[n] = defined_keys(text)
             elif not (1 <= n <= 10 or n in (30, 31)):
                 raise ValueError(f"ILLEGAL FUNCTION CALL: KEY {n}")
             return True
@@ -1784,19 +1821,19 @@ class DebugMixin(LanguageHost):
 
     def _events_armed(self) -> bool:
         """Whether a timer, key or music trap is armed this run."""
-        return self._on_timer_target is not None or bool(self._key_traps) or self._play_trap is not None
+        return self.events.timer_target is not None or bool(self.events.key_traps) or self.events.play_trap is not None
 
     def _poll_keys(self) -> None:
         """Move the keys waiting at the terminal into the keyboard buffer."""
         if not getattr(self.io, 'replay', False):
-            self._key_buffer.extend(self._read_keys())
+            self.events.key_buffer.extend(self.events.read_keys())
 
     def _trapped_key(self, key: str) -> int | None:
         for n, k in KEY_TRAP_KEYS.items():
-            if key == k and n in self._key_traps:
+            if key == k and n in self.events.key_traps:
                 return n
-        for n, keys in self._user_keys.items():
-            if key in keys and n in self._key_traps:
+        for n, keys in self.events.user_keys.items():
+            if key in keys and n in self.events.key_traps:
                 return n
         return None
 
@@ -1805,31 +1842,31 @@ class DebugMixin(LanguageHost):
         runs, ip pushed for its RETURN, or None. An event waits while its own
         handler runs, as QBASIC holds it until RETURN."""
         depth = len(self._gosub_stack)
-        self._event_depth = {k: d for k, d in self._event_depth.items() if d <= depth}
-        if self._on_timer_target is not None and 'timer' not in self._event_depth:
+        self.events.depth = {k: d for k, d in self.events.depth.items() if d <= depth}
+        if self.events.timer_target is not None and 'timer' not in self.events.depth:
             target = self._check_timer_callback(sorted_lines, ip)
             if target is not None:
-                self._event_depth['timer'] = len(self._gosub_stack)
+                self.events.depth['timer'] = len(self._gosub_stack)
                 return target
-        if self._key_traps:
+        if self.events.key_traps:
             self._poll_keys()
-            for key in list(self._key_buffer):
+            for key in list(self.events.key_buffer):
                 n = self._trapped_key(key)
-                if n is not None and self._key_state.get(n, 'OFF') != 'OFF':
-                    self._key_buffer.remove(key)
-                    self._key_pending.add(n)
-            for n in sorted(self._key_pending):
-                if self._key_state.get(n) == 'ON' and 'key' not in self._event_depth:
-                    self._key_pending.discard(n)
-                    return self._fire_event('key', self._key_traps[n], sorted_lines, ip)
-        if self._play_trap is not None:
-            n, line = self._play_trap
+                if n is not None and self.events.key_state.get(n, 'OFF') != 'OFF':
+                    self.events.key_buffer.remove(key)
+                    self.events.key_pending.add(n)
+            for n in sorted(self.events.key_pending):
+                if self.events.key_state.get(n) == 'ON' and 'key' not in self.events.depth:
+                    self.events.key_pending.discard(n)
+                    return self._fire_event('key', self.events.key_traps[n], sorted_lines, ip)
+        if self.events.play_trap is not None:
+            n, line = self.events.play_trap
             count = self._bg_remaining()
-            if count < n <= self._play_last_count and self._play_trap_state != 'OFF':
-                self._play_pending = True
-            self._play_last_count = count
-            if self._play_pending and self._play_trap_state == 'ON' and 'play' not in self._event_depth:
-                self._play_pending = False
+            if count < n <= self.events.play_last and self.events.play_state != 'OFF':
+                self.events.play_pending = True
+            self.events.play_last = count
+            if self.events.play_pending and self.events.play_state == 'ON' and 'play' not in self.events.depth:
+                self.events.play_pending = False
                 return self._fire_event('play', line, sorted_lines, ip)
         return None
 
@@ -1839,41 +1876,41 @@ class DebugMixin(LanguageHost):
         if target is None:
             raise ValueError(f"LINE {line} NOT FOUND")
         self._gosub_stack.append(ip)
-        self._event_depth[kind] = len(self._gosub_stack)
+        self.events.depth[kind] = len(self._gosub_stack)
         return target
 
     def _reset_events(self) -> None:
         """A run's traps arm only when its own statements arm them."""
-        self._on_timer_target = None
-        self._timer_state = 'OFF'
-        self._timer_pending = False
-        self._key_traps.clear()
-        self._key_state.clear()
-        self._key_pending.clear()
-        self._user_keys.clear()
-        self._play_trap = None
-        self._play_trap_state = 'OFF'
-        self._play_pending = False
-        self._play_last_count = 0
-        self._event_depth.clear()
+        self.events.timer_target = None
+        self.events.timer_state = 'OFF'
+        self.events.timer_pending = False
+        self.events.key_traps.clear()
+        self.events.key_state.clear()
+        self.events.key_pending.clear()
+        self.events.user_keys.clear()
+        self.events.play_trap = None
+        self.events.play_state = 'OFF'
+        self.events.play_pending = False
+        self.events.play_last = 0
+        self.events.depth.clear()
 
     def _check_timer_callback(self, sorted_lines: Sequence[int], ip: int) -> int | None:
         """The ip of the ON TIMER handler when its interval has passed and
         TIMER ON is in force (TIMER STOP holds the event until TIMER ON),
         else None."""
-        if self._on_timer_target is not None and self._on_timer_interval > 0:
+        if self.events.timer_target is not None and self.events.timer_interval > 0:
             now = time.time()
-            due = now - self._on_timer_last >= self._on_timer_interval
-            if self._timer_state != 'ON':
-                if due and self._timer_state == 'STOP':
-                    self._timer_pending = True
-                    self._on_timer_last = now
+            due = now - self.events.timer_last >= self.events.timer_interval
+            if self.events.timer_state != 'ON':
+                if due and self.events.timer_state == 'STOP':
+                    self.events.timer_pending = True
+                    self.events.timer_last = now
                 return None
-            if due or self._timer_pending:
-                self._timer_pending = False
-                self._on_timer_last = now
+            if due or self.events.timer_pending:
+                self.events.timer_pending = False
+                self.events.timer_last = now
                 from qubasic_core.parser import line_index
-                target = line_index(sorted_lines, self._on_timer_target)
+                target = line_index(sorted_lines, self.events.timer_target)
                 if target is not None:
                     self._gosub_stack.append(ip)
                     return target
@@ -1883,7 +1920,7 @@ class DebugMixin(LanguageHost):
 # ---------------------------------------------------------------------------
 # QUBASIC keyword statements of the language: arrays, input, file I/O, the
 # screen, graphics and sound statements and the event traps. The statements
-# on qubits are QuantumStatementMixin's (simulator.py).
+# on qubits are QuantumStatementMixin's (circuits.py).
 # ---------------------------------------------------------------------------
 
 _RE_INPUT_STMT = re.compile(r'INPUT\s*(;)?\s*(?:"([^"]*)"\s*([;,]))?\s*(.*)$', re.IGNORECASE)
@@ -1987,11 +2024,11 @@ class StatementMixin(LanguageHost):
         try:
             if getattr(self.io, 'replay', False):
                 ch = self.io.read_line('')          # a later live shot replays
-            elif self._key_buffer or sys.stdin.isatty():
+            elif self.events.key_buffer or sys.stdin.isatty():
                 self._poll_keys()
-                if not self._key_buffer:
-                    self._key_buffer.extend(self._read_keys(True))
-                ch = self._key_buffer.pop(0) if self._key_buffer else ''
+                if not self.events.key_buffer:
+                    self.events.key_buffer.extend(self.events.read_keys(True))
+                ch = self.events.key_buffer.pop(0) if self.events.key_buffer else ''
                 if hasattr(self.io, 'record'):
                     self.io.record(ch)               # replayed by later shots
             else:
@@ -2034,8 +2071,8 @@ class StatementMixin(LanguageHost):
                 for lv, value in zip(targets, values):
                     self._write_lvalue(lv, value, run_vars)
                 # INPUT ; keeps the cursor after the typed text, else a new line
-                self._print_col = len(prompt) + len(line) if m.group(1) else 0
-                if self._canvas is not None:
+                self.screen.col = len(prompt) + len(line) if m.group(1) else 0
+                if self.graphics.canvas is not None:
                     self._gfx_print(prompt + line, newline=not m.group(1))
                 return True
             self.io.writeln("?Redo from start")
@@ -2050,11 +2087,11 @@ class StatementMixin(LanguageHost):
         if len(fields) != len(targets):
             return None
         values: list[Any] = []
-        for lv, field in zip(targets, fields):
+        for lv, typed in zip(targets, fields):
             if is_string_kind(self._lvalue_kind(lv)):
-                values.append(field)
+                values.append(typed)
                 continue
-            text = field.strip()
+            text = typed.strip()
             if not text:
                 values.append(0)
                 continue
@@ -2159,8 +2196,8 @@ class StatementMixin(LanguageHost):
         except (EOFError, KeyboardInterrupt):
             val = ''
         self._write_lvalue(lv, val, run_vars)
-        self._print_col = len(m.group(2) or '') + len(val) if m.group(1) else 0
-        if self._canvas is not None:
+        self.screen.col = len(m.group(2) or '') + len(val) if m.group(1) else 0
+        if self.graphics.canvas is not None:
             self._gfx_print((m.group(2) or '') + val, newline=not m.group(1))
         return True
 
@@ -2205,10 +2242,10 @@ class StatementMixin(LanguageHost):
     def _stmt_cls(self, stmt: str) -> bool:
         if not re.match(r'CLS\b', stmt.strip(), re.IGNORECASE):
             return False
-        self._print_col = 0
-        if self._canvas is not None:
-            self._canvas.cls()
-            self._gfx_row = self._gfx_col = 1
+        self.screen.col = 0
+        if self.graphics.canvas is not None:
+            self.graphics.canvas.cls()
+            self.graphics.row = self.graphics.col = 1
             return True
         self._text_clear()
         if self._on_terminal() and not getattr(self.io, 'replay', False):
@@ -2226,7 +2263,7 @@ class StatementMixin(LanguageHost):
         if not m:
             return False
         args = [a.strip() for a in m.group(1).split(',')]
-        canvas = self._canvas
+        canvas = self.graphics.canvas
         if canvas is not None:                 # graphics: drawing and background colours
             nums = [None if not a else self._COLOR_NAMES[a.lower()] if a.lower() in self._COLOR_NAMES
                     else int(round(float(self._safe_eval(a, extra_ns=run_vars)))) for a in args[:2]]
@@ -2262,14 +2299,14 @@ class StatementMixin(LanguageHost):
         nums = [int(round(float(self._safe_eval(a, extra_ns=run_vars)))) if a else None
                 for a in args[:2]]
         if len(nums) > 1 and nums[1]:
-            self._print_col = nums[1] - 1
-        if self._canvas is not None:
+            self.screen.col = nums[1] - 1
+        if self.graphics.canvas is not None:
             self._gfx_locate(nums[0] if nums else None, nums[1] if len(nums) > 1 else None)
             return True
         if nums and nums[0] is not None:
             if not 1 <= nums[0] <= 25:
                 raise ValueError(f"ILLEGAL FUNCTION CALL: LOCATE row {nums[0]} (1-25)")
-            self._print_row = nums[0]
+            self.screen.row = nums[0]
         if self._on_terminal() and not getattr(self.io, 'replay', False) and nums:
             row = nums[0] or 1
             col = (nums[1] if len(nums) > 1 else None) or 1
@@ -2287,9 +2324,9 @@ class StatementMixin(LanguageHost):
     def _clear_program_state(self) -> None:
         self.variables.clear()
         self.arrays.clear()
-        self._array_dims.clear()
-        self._dimmed_arrays.clear()
-        for handle in list(self._file_handles):
+        self.symbols.array_dims.clear()
+        self.symbols.dimmed.clear()
+        for handle in list(self.files.handles):
             self._close_file(handle)
         self._gosub_stack.clear()
 
@@ -2303,7 +2340,7 @@ class StatementMixin(LanguageHost):
             for item in self._split_arg_list(m.group(2)):
                 name = re.match(r'\s*([A-Za-z_]\w*[$%!#&]?)', item)
                 if name:
-                    self._global_shared.add(name.group(1))
+                    self.symbols.shared.add(name.group(1))
         return True
 
     def _stmt_beep(self, stmt: str) -> bool:
@@ -2364,7 +2401,7 @@ class StatementMixin(LanguageHost):
             except EOFError:
                 return ''
         self._poll_keys()
-        ch = self._key_buffer.pop(0) if self._key_buffer else ''
+        ch = self.events.key_buffer.pop(0) if self.events.key_buffer else ''
         if hasattr(io, 'record'):
             io.record(ch)
         return ch

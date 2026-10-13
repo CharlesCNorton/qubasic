@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 LAYERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('core', ('host', 'engine')),
     ('language', ('parser', 'expression', 'interpreter', 'devices', 'editing')),
-    ('simulation', ('simtools', 'simulator', 'noise', 'locc', 'physics', 'machine')),
+    ('simulation', ('simtools', 'circuits', 'simulator', 'noise', 'locc', 'physics', 'machine')),
     ('applications', ('algorithms', 'benchmarking', 'qec', 'logical')),
     ('presentation', ('display', 'analysis')),
     ('composition', ('terminal', 'api', 'cli', 'jupyter_kernel', '__init__', '__main__')),
@@ -49,11 +49,14 @@ if TYPE_CHECKING:
     from qiskit_aer.noise import NoiseModel
 
     from qubasic_core import qec as S
-    from qubasic_core.devices import Canvas, PlayState, RecordFile
-    from qubasic_core.engine import CircuitBackend, ExecContext, ExecOutcome, IOPort
-    from qubasic_core.expression import LValue, Record
-    from qubasic_core.interpreter import Param
+    from qubasic_core.devices import Canvas, FileState, GraphicsState, RecordFile, SoundState, TextScreen
+    from qubasic_core.editing import EditorState
+    from qubasic_core.engine import CircuitBackend, ExecContext, ExecOutcome, IOPort, RunReport
+    from qubasic_core.expression import LValue, Record, SymbolState
+    from qubasic_core.interpreter import DataState, DebugState, ErrorState, EventState, Param, ProcedureState
     from qubasic_core.locc import LOCCEngine
+    from qubasic_core.machine import AerTuning, MachineState
+    from qubasic_core.noise import NoiseState
     from qubasic_core.parser import (
         AssertStmt,
         CallStmt,
@@ -98,7 +101,7 @@ if TYPE_CHECKING:
         SwapStmt,
         WhileStmt,
     )
-    from qubasic_core.physics import Molecule
+    from qubasic_core.physics import BosonState, Molecule, QuditState
     from qubasic_core.qec import DetectorModel
     from qubasic_core.simtools import Tableau
     from qubasic_core.simulator import BufferedIO, LiveNoise, LiveState, TableauState
@@ -149,119 +152,57 @@ if TYPE_CHECKING:
         _SAFE_CONSTS: Any
         _SAFE_FUNCS: Any
         _STMT_KEYWORDS: Any
-        _array_dims: dict[str, list[int]]
-        _array_lb: dict[str, list[int]]
-        _array_types: dict[str, str]
-        _auto_line: int
-        _auto_mode: bool
-        _auto_step: int
         _basis_gates: list[str] | None
-        _breakpoints: set[int]
         _build_qc: QuantumCircuit | None
-        _call_stack: list[dict[str, Any]]
-        _canvas: Canvas | None
         _classical_bits: dict[str, ClassicalRegister]
-        _color_bg: str
-        _color_fg: str
         _compiled_cache: tuple[tuple[tuple[int, str], ...], CompiledProgram] | None
-        _consts: set[str]
-        _cont_skip_stop_ip: int | None
         _coupling_map: list[list[int]] | None
-        _current_slot: int
         _custom_gates: dict[str, Any]
-        _data_cache_key: tuple | None
-        _data_line_starts: list[tuple[int, int]]
-        _data_pool: list[Any]
-        _data_ptr: int
         _def_seg: int | None
-        _deftypes: dict[str, str]
         _device_spec: str | None
-        _dimmed_arrays: set[str]
         _endian_big: bool
-        _err_code: int
-        _err_ip: int | None
-        _err_line: int
-        _error_target: int | None
-        _file_cols: dict[int, int]
-        _file_dir: str
-        _file_fields: dict[int, list[str]]
-        _file_handles: dict[int, Any]
-        _func_call_depth: int
-        _func_defs: dict[str, dict[str, Any]]
-        _gfx_col: int
-        _gfx_row: int
-        _global_shared: set[str]
         _gosub_stack: list[int]
-        _imported_lines: set[int]
-        _in_error_handler: bool
-        _include_depth: int
-        _include_stack: list[str]
-        _key_buffer: list[str]
         _last_sv: Any
         _live: LiveState | TableauState | None
         _logical_mode: dict | None
-        _lprint_col: int
-        _lprint_path: str | None
-        _noise_spec: str | None
-        _on_measure_fired: bool
-        _on_measure_target: int | None
-        _on_timer_interval: float
-        _on_timer_last: float
-        _on_timer_target: int | None
-        _option_base: int
         _parsed: dict[int, Any]
-        _pending_type: dict | None
-        _play_state: PlayState
-        _print_col: int
-        _print_row: int
-        _program_slots: dict[int, dict[int, str]]
         _prompt: str
-        _read_keys: Callable[..., list[str]]
-        _record_files: dict[int, RecordFile]
         _rnd_last: float
         _rng: random.Random
-        _scope_stack: list[dict[str, Any]]
         _screen_mode: int
         _seed: int | None
-        _shared_stack: list[set[str]]
-        _sound_events: list[tuple[float, float]]
-        _sprites: dict[tuple[str, int], np.ndarray]
-        _static_vars: dict[str, dict[str, Any]]
-        _stopped_ip: int | None
         _strict_names: bool
-        _sub_defs: dict[str, dict[str, Any]]
-        _sv_checkpoints: list[tuple[int, Any]]
-        _text_attr: list[list[int]]
-        _text_bottom: int
-        _text_screen: list[list[str]]
-        _text_top: int
         _theme: dict[str, str]
         _theme_name: str
-        _timer_pending: bool
-        _timer_state: str
-        _trace_mode: bool
-        _tt_position: int
-        _undo_stack: list[dict[int, str]]
-        _user_fns: dict[str, dict[str, Any]]
-        _user_types: dict[str, list[tuple[str, str]]]
-        _var_types: dict[str, str]
-        _watches: list[str]
         arrays: dict[str, Any]
+        data: DataState
+        debug: DebugState
+        editor: EditorState
+        errors: ErrorState
+        events: EventState
+        files: FileState
+        graphics: GraphicsState
         locc: LOCCEngine | None
         locc_mode: bool
+        noise: NoiseState
         num_qubits: int
+        procs: ProcedureState
         program: dict[int, str]
         registers: OrderedDict[str, tuple[int, int]]
+        screen: TextScreen
         shots: int
         sim_device: str
         sim_method: str
         sim_precision: str
+        sound: SoundState
         subroutines: dict[str, Any]
+        symbols: SymbolState
         variables: dict[str, Any]
 
         # Hooks: declared for this layer and those above, implemented by a higher layer
         def cmd_run(self) -> None:
-            """RUN: execute the program, for CONT and CHAIN (the simulation layer)."""
+            """RUN: execute the program and show its results, for CONT and CHAIN
+            (the presentation layer)."""
 
         def _peek(self, addr: float) -> float:
             """PEEK: read an address of the memory map (the simulation layer)."""
@@ -437,11 +378,9 @@ if TYPE_CHECKING:
         def _init_debug(self) -> None: ...
         def _init_file_handles(self) -> None: ...
         def _init_graphics(self) -> None: ...
-        def _init_program_mgmt(self) -> None: ...
         def _init_screen(self) -> None: ...
         def _init_sound(self) -> None: ...
         def _init_subs(self) -> None: ...
-        def _init_variables(self) -> None: ...
         def _inkey(self) -> str: ...
         def _inp(self, port: float) -> int: ...
         def _input_chars(self, n: Any, handle: Any=...) -> str: ...
@@ -641,15 +580,10 @@ if TYPE_CHECKING:
         _PRECISION_METHODS: Any
         _SYS_BACKENDS: Any
         _USR_BLOCKED_CMDS: Any
-        _bcut: int
-        _bmodes: int
-        _bsv: np.ndarray | None
         _build_saw_measure: bool
         _channels: dict[str, list[np.ndarray]]
         _circuit_cache: tuple[QuantumCircuit, AerSimulator] | None
         _circuit_cache_key: tuple[Any, ...] | None
-        _es_approx_error: float | None
-        _fusion_enable: bool | None
         _ham_molecules: dict[str, Molecule]
         _hamiltonians: dict
         _last_density: np.ndarray | None
@@ -660,57 +594,20 @@ if TYPE_CHECKING:
         _live_saves: dict[str, tuple[str, list]]
         _locc_shot_cap: int | None
         _measure_subset: list[int] | None
-        _mps_truncation: float | None
-        _noise_depol_p: float
-        _noise_locc_param: float
-        _noise_locc_type: str
-        _noise_model: NoiseModel | None
         _pending_set_density: np.ndarray | None
         _pending_set_state: np.ndarray | None
         _poke_state_prep: dict[Any, Any]
-        _profile_data: dict[int, dict[str, float]]
-        _profile_mode: bool
-        _profile_start: float
-        _qd: int
-        _qn: int
-        _qsv: np.ndarray | None
-        _qubit_noise: dict[int, tuple[int, float]]
-        _readout_errors: list[tuple[float, float]] | None
         _run_manifest: dict[str, Any] | None
         _state_source: Callable[[], Any] | None
-        _stats_runs: list[dict[str, int]]
-        _status: dict[int, float]
         _step_auto: bool
         _step_delay: float
-        _sv_parallel_threshold: int | None
-        _user_sys: dict[int, str]
-        _zero_page: list[float]
+        aer: AerTuning
+        bosons: BosonState
         last_circuit: QuantumCircuit | None
         last_counts: dict[str, int] | None
         last_mitigated: dict[str, float] | None
-
-        # Hooks: declared for this layer and those above, implemented by a higher layer
-        def print_histogram(self, counts: dict[str, int]) -> None:
-            """Show a run's counts as a histogram (the presentation layer)."""
-
-        def _print_sv_compact(self, sv: np.ndarray) -> None:
-            """Show a statevector on one line, for STEP, REWIND and FORWARD (the
-            presentation layer)."""
-
-        def _locc_state(self, rest: str = ...) -> None:
-            """Show the LOCC registers' states, joint or one register each (the
-            presentation layer)."""
-
-        def _auto_display(self) -> None:
-            """Show what DISPLAY selected after a run (the presentation layer)."""
-
-        def _run_encoded(self, t0: float) -> bool:
-            """Run the program on LQUBITS logical qubits; False when it runs on the
-            physical qubits instead (the applications layer)."""
-
-        def _logical_trailer(self) -> None:
-            """Report the logical-qubit model after an LQUBITS run (the applications
-            layer)."""
+        machine: MachineState
+        qudit: QuditState
 
         # Methods
         def _active_sv_for_reg(self, reg: str) -> 'tuple[np.ndarray, int] | tuple[None, int]': ...
@@ -723,6 +620,7 @@ if TYPE_CHECKING:
         def _apply_gate_str(self, stmt: str, qc: QuantumCircuit, _call_stack: set[str] | None=..., *, backend: CircuitBackend | None=...) -> None: ...
         def _bcheck(self, mode: int) -> None: ...
         def _bit_names(self, texts: list[str]) -> tuple[set[str], bool]: ...
+        def _bit_order_note(self, display: list) -> str | None: ...
         def _bits(self, s: str) -> str: ...
         def _bos_apply(self, mat: np.ndarray, modes: list[int]) -> None: ...
         def _build_backend_opts(self, method: str, precision: str | None=...) -> dict: ...
@@ -766,7 +664,6 @@ if TYPE_CHECKING:
         def _init_live(self) -> None: ...
         def _init_memory(self) -> None: ...
         def _init_mitigation(self) -> None: ...
-        def _init_profiler(self) -> None: ...
         def _init_qudits(self) -> None: ...
         def _invalidate_run_state(self) -> None: ...
         def _is_clifford(self, qc: 'QuantumCircuit') -> bool: ...
@@ -785,6 +682,7 @@ if TYPE_CHECKING:
         def _locc_run(self) -> None: ...
         def _locc_run_vectorized(self, sorted_lines: CompiledProgram, has_measure: bool) -> None: ...
         def _locc_run_with_send(self, sorted_lines: CompiledProgram, has_measure: bool) -> None: ...
+        def _locc_state(self, rest: str=...) -> None: ...
         def _locc_try_special(self, reg: str, stmt: str, run_vars: MutableMapping[str, Any]) -> bool: ...
         def _make_backend(self, method: str=..., *, include_noise: bool=..., precision: str | None=...) -> 'AerSimulator': ...
         def _measure_into_bit(self, qc: QuantumCircuit, qubit: int, var: str, prefix: str) -> None: ...
@@ -803,6 +701,10 @@ if TYPE_CHECKING:
         def _peek_qubit(self, addr: int) -> float: ...
         def _poke(self, addr: float, value: float) -> None: ...
         def _prepare_run(self, qc: QuantumCircuit) -> None: ...
+        def _print_histogram_plain(self, display: list, sorted_counts: list, total: int) -> None: ...
+        def _print_histogram_rich(self, display: list, sorted_counts: list, total: int) -> None: ...
+        def _print_statevector(self, sv: np.ndarray, n_qubits: int | None=...) -> None: ...
+        def _print_sv_compact(self, sv: np.ndarray) -> None: ...
         def _profile_line_end(self, line_num: int, gates: int=...) -> None: ...
         def _profile_line_start(self, line_num: int) -> None: ...
         def _program_has_measure(self, sorted_lines: Iterable[int]) -> bool: ...
@@ -813,16 +715,18 @@ if TYPE_CHECKING:
         def _report_n(self, mode: int) -> None: ...
         def _report_width(self, n: int) -> None: ...
         def _resolve_qubit(self, arg: str, *, n_qubits: int | None=...) -> int: ...
+        def _rich_print(self, *renderables: Any) -> None: ...
         def _run_kwargs(self) -> dict: ...
-        def _run_live(self, t0: float, sorted_lines: Sequence[int], carry: BufferedIO | None=...) -> None: ...
+        def _run_live(self, t0: float, sorted_lines: Sequence[int], carry: BufferedIO | None=...) -> RunReport | None: ...
         def _run_no_measure(self, qc: QuantumCircuit, qc_sv: QuantumCircuit, t0: float, precision: str | None=...) -> None: ...
-        def _run_program(self) -> None: ...
         def _run_with_fallback(self, qc: QuantumCircuit, backend_opts: dict, method: str, capture: str=...) -> 'Any': ...
         def _select_method(self, qc: QuantumCircuit) -> tuple[str, str]: ...
         def _show_profile(self) -> None: ...
         def _show_stats(self) -> None: ...
+        def _simulate(self, t0: float, sorted_lines: list[int]) -> RunReport | None: ...
         @staticmethod
         def _split_colon_stmts(stmt: str) -> list[str]: ...
+        def _start_run(self) -> tuple[float, list[int]] | None: ...
         def _state_from_spec(self, spec: str) -> np.ndarray: ...
         def _state_status(self, addr: int) -> float: ...
         def _stats_export_csv(self, path: str) -> None: ...
@@ -901,6 +805,7 @@ if TYPE_CHECKING:
         def cmd_version(self, rest: str=...) -> None: ...
         def cmd_wait(self, rest: str) -> None: ...
         def cmd_zne(self, rest: str) -> None: ...
+        def print_histogram(self, counts: dict[str, int]) -> None: ...
         def result(self) -> dict: ...
         def run_immediate(self, line: str) -> None: ...
 
@@ -967,6 +872,7 @@ if TYPE_CHECKING:
         def _lattice_run(self, qc: QuantumCircuit, shots: int) -> list[list[str]]: ...
         def _logical_error_rate(self, code: dict, p: float, trials: int, rng: np.random.Generator, uf: bool=..., decoder: str | None=...) -> float: ...
         def _logical_pl(self, name: str, d: int, p: float) -> float: ...
+        def _logical_trailer(self) -> None: ...
         def _lookup_feasible(self, code: dict) -> bool: ...
         def _match_graph(self, code: dict) -> list: ...
         def _match_recovery(self, code: dict, synd_bits: Sequence[int] | np.ndarray) -> tuple[np.ndarray, np.ndarray]: ...
@@ -1000,6 +906,7 @@ if TYPE_CHECKING:
         def _qec_show_bb(self, l: int, m: int) -> None: ...
         def _random_circuit(self, n: int, depth: int, rng: np.random.Generator) -> QuantumCircuit: ...
         def _rb_survival(self, lengths: list[int], samples: int, interleave: tuple[list[str], np.ndarray] | None, rng: np.random.Generator) -> list[float]: ...
+        def _run_encoded(self, t0: float) -> bool: ...
         def _run_steane(self, t0: float) -> None: ...
         def _shor_circuit_phases(self, a: int, N: int, shots: int) -> list: ...
         def _shor_oracle_phases(self, a: int, N: int, shots: int) -> list: ...
@@ -1071,7 +978,7 @@ if TYPE_CHECKING:
 
         # Methods
         def _amplitude_rows(self, sv: np.ndarray, sep: str=...) -> list[str]: ...
-        def _bit_order_note(self, display: list) -> str | None: ...
+        def _auto_display(self) -> None: ...
         def _bloch_vector(self, sv: np.ndarray, qubit: int, n_qubits: int | None=...) -> tuple[float, float, float]: ...
         def _circuit_to_qb(self, qc: QuantumCircuit) -> tuple[list[str], int, dict]: ...
         def _current_state(self) -> tuple[Any, int, list[int] | None]: ...
@@ -1083,14 +990,11 @@ if TYPE_CHECKING:
         def _init_assist(self) -> None: ...
         def _locc_bloch(self, rest: str) -> None: ...
         def _print_bloch_single(self, sv: np.ndarray | None, qubit: int, n_qubits: int | None=..., vector: tuple[float, float, float] | None=...) -> None: ...
-        def _print_histogram_plain(self, display: list, sorted_counts: list, total: int) -> None: ...
-        def _print_histogram_rich(self, display: list, sorted_counts: list, total: int) -> None: ...
         def _print_probs(self, sv: np.ndarray, n_qubits: int | None=...) -> None: ...
         def _print_stabilizers(self, tab: Tableau) -> None: ...
-        def _print_statevector(self, sv: np.ndarray, n_qubits: int | None=...) -> None: ...
         def _resolve_analysis_target(self, rest: str) -> tuple[np.ndarray | None, int, str]: ...
         def _restore_var(self, var: str, had_prior: bool, prior: Any) -> None: ...
-        def _rich_print(self, *renderables: Any) -> None: ...
+        def _run_and_show(self) -> None: ...
         def _status_prompt(self) -> str: ...
         def _suggest_command(self, word: str) -> None: ...
         def cmd_animate(self, rest: str) -> None: ...

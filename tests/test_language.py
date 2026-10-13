@@ -15,6 +15,7 @@ from conftest import InTempDir, ScriptIO, feed, run_basic, term
 
 from qubasic_core import api
 from qubasic_core.api import CaptureIO
+from qubasic_core.circuits import _resolve_named_state
 from qubasic_core.devices import (
     MODES,
     Canvas,
@@ -32,7 +33,6 @@ from qubasic_core.editing import number_source
 from qubasic_core.expression import format_using, number_text, print_text, str_text
 from qubasic_core.interpreter import _input_fields, _parse_input_number, error_code
 from qubasic_core.parser import CompileError, compile_program, parse_stmt, strip_comment
-from qubasic_core.simulator import _resolve_named_state
 from qubasic_core.terminal import QBasicTerminal
 
 # ---------------------------------------------------------------------------
@@ -558,7 +558,7 @@ class TestEditingAndChecks(unittest.TestCase):
             t2.io = ScriptIO()
             t2.cmd_load(rel)
             self.assertEqual(t2.sim_precision, 'single')
-            self.assertEqual(t2._noise_spec, 'depolarizing 0.001 0.01; readout 0.02')
+            self.assertEqual(t2.noise.spec, 'depolarizing 0.001 0.01; readout 0.02')
             self.assertEqual(sorted(map(tuple, t2._coupling_map)), sorted(map(tuple, t._coupling_map)))
             self.assertEqual(t2._basis_gates, ['rz', 'sx', 'cx'])
             self.assertEqual(t2.variables['p'], {'x': 4})
@@ -575,7 +575,7 @@ class TestEditingAndChecks(unittest.TestCase):
             t2.io = ScriptIO()
             t2.cmd_load(rel)
             self.assertEqual(t2._device_spec, 'ring 4 80 60')
-            self.assertIsNotNone(t2._noise_model)
+            self.assertIsNotNone(t2.noise.model)
             self.assertNotIn('?', t2.io.text)
 
 
@@ -1063,7 +1063,7 @@ class TestScreenStatements(unittest.TestCase):
         feed(t, '10 SCREEN 4', 'RUN')
         self.assertEqual(t._screen_mode, 4)
         feed(t, '10 SCREEN 12', '20 COLOR 4, 1', '30 PSET (5, 5)', 'RUN')
-        self.assertEqual((t._canvas.mode, t._canvas.fg, t._canvas.bg), (12, 4, 1))
+        self.assertEqual((t.graphics.canvas.mode, t.graphics.canvas.fg, t.graphics.canvas.bg), (12, 4, 1))
         self.assertIn('ILLEGAL FUNCTION CALL: COLOR 99', feed(t, '10 SCREEN 12', '20 COLOR 99', 'RUN'))
         self.assertIn('ILLEGAL FUNCTION CALL: SCREEN 6', feed(t, '10 SCREEN 6', 'RUN'))
         feed(t, '10 SCREEN , , 0, 0', 'RUN')
@@ -1287,7 +1287,7 @@ class TestSound(unittest.TestCase):
         t, out, _ = run('PLAY "T180 O4 L8 CDEFGAB>C"\nSOUND 440, 18.2\nBEEP\nPRINT "done"')
         self.assertEqual(out, '\adone\n')
         self.assertAlmostEqual(t._sound_seconds(), 8 * (60 / 180 / 2) + 1.0 + 0.25, places=2)
-        frames = len(synthesize(t._sound_events))
+        frames = len(synthesize(t.sound.events))
         with tempfile.TemporaryDirectory(dir='.') as d:
             path = os.path.relpath(os.path.join(d, 'tune.wav'))
             t.dispatch(f'SAVEWAV {path} CLEAR')
@@ -1295,7 +1295,7 @@ class TestSound(unittest.TestCase):
             with wave.open(path) as w:
                 self.assertEqual((w.getnchannels(), w.getframerate()), (1, 22050))
                 self.assertEqual(w.getnframes(), frames)
-        self.assertEqual(t._sound_events, [])
+        self.assertEqual(t.sound.events, [])
 
     def test_synthesis(self):
         samples = synthesize([(440.0, 0.1), (0.0, 0.05)])
@@ -1351,7 +1351,7 @@ class TestEvents(unittest.TestCase):
     def test_timer_on_off_stop(self):
         from unittest.mock import patch
         t = QBasicTerminal()
-        t._on_timer_target, t._on_timer_interval, t._on_timer_last = 100, 1.0, 0.0
+        t.events.timer_target, t.events.timer_interval, t.events.timer_last = 100, 1.0, 0.0
         t._gosub_stack = []
         lines = [100, 110]
         with patch('qubasic_core.interpreter.time') as clock:
@@ -1511,7 +1511,7 @@ class TestPrintersAndFileSystem(InTempDir):
         t.process('RUN')
         self.assertIn('to the printer', t.io.text)
         self.assertIn('42', t.io.text)
-        t._lprint_path = 'printer.log'
+        t.files.printer = 'printer.log'
         t.process('RUN')
         self.assertEqual(open('printer.log').read().split('\n')[:2], ['to the printer', ' 42 '])
 
@@ -1696,7 +1696,7 @@ PRINT POINT(20, 20); POINT(40, 30); POINT(210, 150); POINT(0)
 ''')
         self.assertTrue(out.startswith(' 4  15  12  220 \n'), out[:40])   # DRAW moved the cursor
         self.assertIn('SCREEN 13 (320x200, 256 colours):', out)
-        self.assertEqual(t._canvas.point(160, 100), 1)
+        self.assertEqual(t.graphics.canvas.point(160, 100), 1)
 
     def test_window_pmap_and_step(self):
         t, out, _ = run('''
@@ -1707,7 +1707,7 @@ LINE -STEP(5, 5), 13
 PRINT PMAP(0, 0); PMAP(0, 1); POINT(0, 0)
 ''')
         self.assertTrue(out.startswith(' 320  240  13 \n'), out[:30])     # LINE repainted (0, 0)
-        c = t._canvas
+        c = t.graphics.canvas
         self.assertEqual(c.point(5, 5), 13)
 
     def test_get_put_through_arrays(self):
@@ -1719,7 +1719,7 @@ GET (0, 0)-(7, 7), spr
 PUT (100, 100), spr, PSET
 PRINT spr(0); spr(1)
 ''')
-        c = t._canvas
+        c = t.graphics.canvas
         self.assertEqual(c.point(104, 104), 6)
         self.assertEqual(t.arrays['spr'][:2], [8.0, 8.0])
 
@@ -1736,7 +1736,7 @@ VIEW
 WINDOW
 PSET (0, 0), 3
 ''')
-        c = t._canvas
+        c = t.graphics.canvas
         self.assertEqual(c.point(55, 55), 0)          # CLS cleared the viewport
         self.assertEqual(c.point(0, 0), 3)
         self.assertEqual(c.palette[4], (0, 170, 0))
@@ -1768,13 +1768,13 @@ PSET (0, 0), 3
         t.dispatch('DISPLAY BLOCH')
         self.assertEqual(t._screen_mode, 3)
         t.dispatch('COLOR 9, 1')
-        self.assertEqual((t._canvas.fg, t._canvas.bg), (9, 1))
+        self.assertEqual((t.graphics.canvas.fg, t.graphics.canvas.bg), (9, 1))
         t.dispatch('CLS')
-        self.assertEqual(t._canvas.point(0, 0), 1)
+        self.assertEqual(t.graphics.canvas.point(0, 0), 1)
         t.dispatch('DRAW "BM10,10 C4 R5"')
-        self.assertEqual(t._canvas.point(15, 10), 4)
+        self.assertEqual(t.graphics.canvas.point(15, 10), 4)
         t.dispatch('SCREEN 0')
-        self.assertIsNone(t._canvas)
+        self.assertIsNone(t.graphics.canvas)
 
     def test_savepng_screen(self):
         t = QBasicTerminal()
@@ -1810,7 +1810,7 @@ class TestGraphicsText(unittest.TestCase):
 
     def test_print_draws_characters_from_the_top_left(self):
         t, _, _ = run('SCREEN 13\nCOLOR 4\nPRINT "Hi"')
-        c = t._canvas
+        c = t.graphics.canvas
         self.assertEqual(c.text_grid(), (40, 25, 8))
         np.testing.assert_array_equal(self.cell(c, 0, 0), self.pattern('H', 8))
         np.testing.assert_array_equal(self.cell(c, 1, 0), self.pattern('i', 8))
@@ -1818,23 +1818,23 @@ class TestGraphicsText(unittest.TestCase):
 
     def test_locate_places_the_text_and_tall_cells_stretch_the_font(self):
         t, _, _ = run('SCREEN 12\nLOCATE 3, 5\nPRINT "A"')
-        c = t._canvas
+        c = t.graphics.canvas
         self.assertEqual(c.text_grid(), (80, 30, 16))
         np.testing.assert_array_equal(self.cell(c, 4, 2), self.pattern('A', 16))
         self.assertFalse(self.cell(c, 0, 0).any())
 
     def test_text_wraps_and_the_screen_scrolls(self):
         t, _, _ = run('SCREEN 13\nFOR i = 1 TO 26: PRINT CHR$(64 + i): NEXT i')
-        c = t._canvas
+        c = t.graphics.canvas
         # 26 lines and their line feeds on 25 rows scroll twice: C on top, Z above the cursor
         np.testing.assert_array_equal(self.cell(c, 0, 0), self.pattern('C', 8))
         np.testing.assert_array_equal(self.cell(c, 0, 23), self.pattern('Z', 8))
         t, _, _ = run('SCREEN 13\nPRINT STRING$(41, "x")')
-        np.testing.assert_array_equal(self.cell(t._canvas, 0, 1), self.pattern('x', 8))
+        np.testing.assert_array_equal(self.cell(t.graphics.canvas, 0, 1), self.pattern('x', 8))
 
     def test_cls_homes_the_cursor_and_input_echoes_on_the_screen(self):
         t, _, _ = run('SCREEN 13\nPRINT "ab"\nCLS\nINPUT "n"; n', answers=['7'])
-        c = t._canvas
+        c = t.graphics.canvas
         for col, ch in enumerate('n? 7'):
             np.testing.assert_array_equal(self.cell(c, col, 0), self.pattern(ch, 8))
         self.assertEqual(t.variables['n'], 7)
@@ -1842,7 +1842,7 @@ class TestGraphicsText(unittest.TestCase):
     def test_locate_outside_the_screen_is_an_error(self):
         t, out, _ = run('ON ERROR GOTO 90\nSCREEN 13\nLOCATE 26, 1\nEND\n90 PRINT ERR')
         self.assertEqual(out.split()[0], '5')
-        self.assertEqual(t._gfx_row, 2)                  # ERR printed on the screen, row 1
+        self.assertEqual(t.graphics.row, 2)                  # ERR printed on the screen, row 1
 
     def test_characters_outside_ascii_print_as_a_box(self):
         self.assertEqual(glyph(chr(200)), bytes.fromhex('7e42424242427e00'))
@@ -1871,7 +1871,7 @@ class TestTerminalRuns(unittest.TestCase):
 
     def test_a_circuit_build_stops_at_the_instruction_limit(self):
         t = self.terminal()
-        with mock.patch('qubasic_core.simulator.MAX_CIRCUIT_INSTRUCTIONS', 50):
+        with mock.patch('qubasic_core.circuits.MAX_CIRCUIT_INSTRUCTIONS', 50):
             out = feed(t, '10 H 0', '20 GOTO 10', 'RUN')
         self.assertIn('CIRCUIT LIMIT (50 instructions)', out)
 
@@ -1911,14 +1911,14 @@ class TestEventsAndAudio(unittest.TestCase):
 
     def test_inkey_gives_chr0_and_the_scan_code_for_special_keys(self):
         t = term(1)
-        t._read_keys = self.keys(['\x00H'], ['x'])
+        t.events.read_keys = self.keys(['\x00H'], ['x'])
         out = feed(t, '10 k$ = INKEY$', '20 PRINT LEN(k$); ASC(MID$(k$, 2))', '30 k$ = INKEY$',
                    '40 PRINT k$', 'RUN')
         self.assertEqual(out.split('RAN ')[0].split(), ['2', '72', 'x'])
 
     def test_on_key_calls_its_handler_once_per_press(self):
         t = term(1)
-        t._read_keys = self.keys([], [], ['\x00H'], ['\x00H'])
+        t.events.read_keys = self.keys([], [], ['\x00H'], ['\x00H'])
         prog = ('10 ON KEY(11) GOSUB 100', '20 KEY(11) ON', '30 FOR i = 1 TO 20: NEXT i',
                 '40 PRINT hits; deepest', '50 END', '100 lvl = lvl + 1',
                 '110 IF lvl > deepest THEN deepest = lvl', '120 hits = hits + 1', '130 lvl = lvl - 1',
@@ -1929,20 +1929,20 @@ class TestEventsAndAudio(unittest.TestCase):
 
     def test_key_stop_holds_the_event_and_key_off_leaves_the_key_to_inkey(self):
         t = term(1)
-        t._read_keys = self.keys(['\x00;'])
+        t.events.read_keys = self.keys(['\x00;'])
         prog = ('10 ON KEY(1) GOSUB 100', '20 KEY(1) STOP', '30 FOR i = 1 TO 5: NEXT i',
                 '40 PRINT "held"; hits', '50 KEY(1) ON', '60 PRINT "after"; hits', '70 END',
                 '100 hits = hits + 1', '110 RETURN')
         self.assertEqual(feed(t, *prog, 'RUN').split('RAN ')[0].split(), ['held', '0', 'after', '1'])
         t = term(1)
-        t._read_keys = self.keys(['\x00;'])
+        t.events.read_keys = self.keys(['\x00;'])
         prog = ('10 ON KEY(1) GOSUB 100', '20 KEY(1) OFF', '30 k$ = INKEY$',
                 '40 PRINT hits; ASC(MID$(k$, 2))', '50 END', '100 hits = hits + 1', '110 RETURN')
         self.assertEqual(feed(t, *prog, 'RUN').split('RAN ')[0].split(), ['0', '59'])
 
     def test_a_defined_key_traps_its_character(self):
         t = term(1)
-        t._read_keys = self.keys([], ['a'])
+        t.events.read_keys = self.keys([], ['a'])
         prog = ('10 KEY 15, CHR$(0) + CHR$(30)', '20 ON KEY(15) GOSUB Pressed', '30 KEY(15) ON',
                 '40 FOR i = 1 TO 5: NEXT i', '50 PRINT hits', '60 END', '65 Pressed:', '70 hits = hits + 1',
                 '80 RETURN')
@@ -1955,7 +1955,7 @@ class TestEventsAndAudio(unittest.TestCase):
         def clock():
             now[0] += 0.05
             return now[0]
-        t._clock = clock
+        t.sound.clock = clock
         prog = ('10 ON PLAY(2) GOSUB 100', '20 PLAY ON', '30 PLAY "MB L4 CDEF"',
                 '40 FOR i = 1 TO 60: NEXT i', '50 PRINT n', '60 END', '100 n = n + 1', '110 RETURN')
         # four quarter notes at tempo 120 take 2 s; the queue drops below 2
@@ -1983,7 +1983,7 @@ class TestEventsAndAudio(unittest.TestCase):
                 pass
         t = term(1)
         t._on_terminal = lambda: True
-        t._speaker = Fake()
+        t.sound.speaker = Fake()
         out = feed(t, '10 PLAY "T120 L8 CDE"', '20 PLAY "MB L4 C"', '30 SOUND 440, 18.2', '40 BEEP', 'RUN')
         rate = 22050
         self.assertEqual([w for _, w in played], [True, False, False, True])
@@ -2009,7 +2009,7 @@ class TestPCCompatibility(InTempDir):
     def test_screen13_pixels_through_def_seg(self):
         t, out, _ = run('SCREEN 13\nDEF SEG = &HA000\nPOKE 320 * 100 + 200, 14\nPRINT PEEK(320 * 100 + 200)\n'
                         'DEF SEG\nPRINT PEEK(&HD000)')
-        self.assertEqual(int(t._canvas.pixels[100, 200]), 14)
+        self.assertEqual(int(t.graphics.canvas.pixels[100, 200]), 14)
         self.assertEqual(out.split()[:2], ['14', '1'])           # DEF SEG alone: the memory map again
 
     def test_bsave_and_bload_round_trip_the_screen(self):
@@ -2019,12 +2019,12 @@ class TestPCCompatibility(InTempDir):
         self.assertEqual(data[:7], bytes([0xFD, 0x00, 0xA0, 0, 0, 0x00, 0xFA]))
         self.assertEqual(len(data), 7 + 64000)
         t, _, _ = run('SCREEN 13\nDEF SEG = &HA000\nBLOAD "pic.bsv"')
-        self.assertTrue((t._canvas.pixels == 9).all())
+        self.assertTrue((t.graphics.canvas.pixels == 9).all())
 
     def test_vga_palette_ports(self):
         t, out, _ = run('SCREEN 13\nOUT &H3C8, 5\nOUT &H3C9, 63\nOUT &H3C9, 0\nOUT &H3C9, 31\n'
                         'OUT &H3C7, 5\nPRINT INP(&H3C9); INP(&H3C9); INP(&H3C9)')
-        self.assertEqual(t._canvas.palette[5], (255, 0, 125))   # 6-bit levels to 8-bit
+        self.assertEqual(t.graphics.canvas.palette[5], (255, 0, 125))   # 6-bit levels to 8-bit
         self.assertEqual(out.split()[:3], ['63', '0', '31'])
 
     def test_retrace_wait_and_the_bios_clock(self):
@@ -2038,8 +2038,8 @@ class TestPCCompatibility(InTempDir):
 
     def test_view_print_scrolls_only_its_rows(self):
         t, _, _ = run('PRINT "top"\nVIEW PRINT 2 TO 4\nFOR i = 1 TO 10: PRINT i: NEXT i')
-        self.assertEqual(''.join(t._text_screen[0]).strip(), 'top')
-        self.assertEqual([''.join(r).strip() for r in t._text_screen[1:4]], ['9', '10', ''])
+        self.assertEqual(''.join(t.screen.cells[0]).strip(), 'top')
+        self.assertEqual([''.join(r).strip() for r in t.screen.cells[1:4]], ['9', '10', ''])
 
     def test_run_starts_again_with_variables_cleared(self):
         _, out, _ = run('n = n + 1\nPRINT "pass"; n\nIF k = 0 THEN k = 1: x = 5: RUN Again\nEND\n'
@@ -2061,7 +2061,7 @@ class TestPCCompatibility(InTempDir):
 
     def test_lprint_formats_like_print(self):
         t = term(1)
-        t._lprint_path = 'printer.txt'
+        t.files.printer = 'printer.txt'
         feed(t, '10 LPRINT "a"; 1, "b"', '20 LPRINT USING "##.#"; 3.14159', '30 LPRINT "pos";',
              '40 p = LPOS(0)', '50 LPRINT p', 'RUN')
         with open('printer.txt') as fh:
@@ -2122,10 +2122,10 @@ class TestSaveLoad(InTempDir):
         out = feed(t2, 'LOAD session')
         self.assertIn('LOADED', out)
         self.assertIn('QUBITS changed: 1 -> 3', out)
-        self.assertEqual((t2.shots, t2.sim_method, t2.sim_precision, t2._screen_mode, t2._option_base),
+        self.assertEqual((t2.shots, t2.sim_method, t2.sim_precision, t2._screen_mode, t2.symbols.option_base),
                          (300, 'statevector', 'single', 2, 1))
         self.assertTrue(t2._endian_big)
-        self.assertEqual((t2._seed, t2._noise_spec, t2._basis_gates), (4, 'depolarizing 0.01; readout 0.02',
+        self.assertEqual((t2._seed, t2.noise.spec, t2._basis_gates), (4, 'depolarizing 0.01; readout 0.02',
                                                                        ['rz', 'sx', 'x', 'cx']))
         self.assertEqual((t2.variables['p']['x'], t2.variables['p']['name'], t2.variables['n']), (7, 'ab  ', 2.5))
         self.assertEqual(t2._safe_eval('FNSQ(3)'), 9)

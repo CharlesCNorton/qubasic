@@ -40,7 +40,7 @@ class BenchmarkingMixin(ApplicationsHost):
 
     def _bench_backend(self) -> AerSimulator:
         from qiskit_aer import AerSimulator
-        return AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
+        return AerSimulator(noise_model=self.noise.model) if self.noise.model else AerSimulator()
 
     def _random_circuit(self, n: int, depth: int, rng: np.random.Generator) -> QuantumCircuit:
         """Brickwork random circuit: random U3 layer + CZ entangling layer."""
@@ -550,12 +550,12 @@ class ResourceMixin(ApplicationsHost):
         parts = rest.split()
         if not parts:
             coupling = 'set' if self._coupling_map else 'none'
-            self.io.writeln(f"DEVICE: noise={'on' if self._noise_model else 'off'}, "
+            self.io.writeln(f"DEVICE: noise={'on' if self.noise.model else 'off'}, "
                             f"coupling={coupling}")
             return
         if parts[0].upper() in ('OFF', 'NONE'):
-            self._noise_model = None
-            self._noise_spec = None
+            self.noise.model = None
+            self.noise.spec = None
             self._device_spec = None
             self._coupling_map = None
             self._circuit_cache_key = None
@@ -569,8 +569,8 @@ class ResourceMixin(ApplicationsHost):
             from qiskit_aer.noise import NoiseModel, thermal_relaxation_error
             nm = NoiseModel()
             t_1q, t_2q = 50e-9, 300e-9   # typical gate durations
-            _1q = ['h', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'sx', 'rx', 'ry', 'rz', 'p', 'u', 'id']
-            _2q = ['cx', 'cy', 'cz', 'ch', 'swap', 'dcx', 'iswap', 'crx', 'cry', 'crz', 'cp', 'rxx', 'ryy', 'rzz']
+            from qubasic_core.noise import _1Q as _1q
+            from qubasic_core.noise import _2Q as _2q
             for q in range(n):
                 nm.add_quantum_error(thermal_relaxation_error(t1, t2, t_1q), _1q, [q])
             err2 = thermal_relaxation_error(t1, t2, t_2q).expand(
@@ -603,9 +603,9 @@ class ResourceMixin(ApplicationsHost):
             edges = []
             for a, b in cm:
                 edges += [[a, b], [b, a]]
-            self._noise_model = nm
+            self.noise.model = nm
             self._coupling_map = edges if topo not in ('all', 'full') else None
-            self._noise_spec = None
+            self.noise.spec = None
             self._device_spec = f"{topo} {n} {t1 * 1e6:g} {t2 * 1e6:g}"
             self._circuit_cache_key = None
             self.io.writeln(f"DEVICE {topo}: {n} qubits, T1={t1 * 1e6:.0f}us T2={t2 * 1e6:.0f}us, "

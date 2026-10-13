@@ -14,6 +14,7 @@ import re
 import struct
 import time
 from collections.abc import ItemsView, Iterator, KeysView, MutableMapping, ValuesView
+from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any, Callable, NamedTuple
@@ -1190,25 +1191,37 @@ def letter_ranges(spec: str) -> list[str]:
     return letters
 
 
+@dataclass
+class SymbolState:
+    """How the program's names are declared: variable types (DIM AS) and
+    DEFtype letter ranges, CONSTs, SHARED globals, array bounds and element
+    types, OPTION BASE, TYPE definitions and DEF FN functions."""
+
+    var_types: dict[str, str] = field(default_factory=dict)                # name -> declared type (DIM x AS ...)
+    deftypes: dict[str, str] = field(default_factory=dict)                 # first letter -> type (DEFINT and the rest)
+    consts: set[str] = field(default_factory=set)
+    shared: set[str] = field(default_factory=set)                          # DIM SHARED and COMMON SHARED names
+    array_dims: dict[str, list[int]] = field(default_factory=dict)         # upper bounds per dimension
+    array_lb: dict[str, list[int]] = field(default_factory=dict)           # lower bounds per dimension
+    array_types: dict[str, str] = field(default_factory=dict)              # element type
+    dimmed: set[str] = field(default_factory=set)                          # DIM'd arrays enforce their bounds on write
+    option_base: int = 0
+    types: dict[str, list[tuple[str, str]]] = field(default_factory=dict)  # TYPE name -> (field, type)
+    pending_type: dict | None = None                                       # a TYPE block being entered
+    fns: dict[str, dict[str, Any]] = field(default_factory=dict)           # DEF FN functions
+
+
 class VariableMixin(LanguageHost):
     """Typed variables, records, CONST, DIM/REDIM/ERASE and array storage."""
-
-    def _init_variables(self) -> None:
-        self._var_types: dict[str, str] = {}
-        self._deftypes: dict[str, str] = {}
-        self._consts: set[str] = set()
-        self._global_shared: set[str] = set()
-        self._array_lb: dict[str, list[int]] = {}
-        self._array_types: dict[str, str] = {}
 
     def _reset_declarations(self, prog: Any = None) -> None:
         """Forget the last run's declarations, then apply the program's
         DEFtype statements (they hold for the whole program, wherever they
         sit, as in QBASIC) and its TYPE blocks."""
-        self._var_types.clear()
-        self._consts.clear()
-        self._global_shared.clear()
-        self._deftypes.clear()
+        self.symbols.var_types.clear()
+        self.symbols.consts.clear()
+        self.symbols.shared.clear()
+        self.symbols.deftypes.clear()
         if prog is None:
             return
         for text in prog.texts:
@@ -1216,9 +1229,9 @@ class VariableMixin(LanguageHost):
             if m:
                 kind = _DEF_KIND[m.group(1).upper()]
                 for letter in letter_ranges(m.group(2)):
-                    self._deftypes[letter] = kind
+                    self.symbols.deftypes[letter] = kind
         for name, fields in getattr(prog, 'types', {}).items():
-            self._user_types[name] = list(fields)
+            self.symbols.types[name] = list(fields)
 
     # ── Types ────────────────────────────────────────────────────────
 
@@ -1232,13 +1245,13 @@ class VariableMixin(LanguageHost):
             rec = self.variables.get(base)
             if isinstance(rec, Record):
                 return self._path_kind(rec.type_name, path)
-        declared = self._var_types.get(name)
+        declared = self.symbols.var_types.get(name)
         if declared:
             return declared
-        return self._deftypes.get(name[:1].upper(), 'SINGLE')
+        return self.symbols.deftypes.get(name[:1].upper(), 'SINGLE')
 
     def _type_fields(self, type_name: str) -> list[tuple[str, str]]:
-        fields = self._user_types.get(type_name.upper())
+        fields = self.symbols.types.get(type_name.upper())
         if fields is None:
             raise ValueError(f"UNDEFINED TYPE: {type_name}")
         return fields
@@ -1266,7 +1279,7 @@ class VariableMixin(LanguageHost):
         return rec
 
     def _default_of_kind(self, kind: str, depth: int = 0) -> Any:
-        if kind in self._user_types:
+        if kind in self.symbols.types:
             return self._new_record(kind, depth)
         if is_string_kind(kind):
             return ' ' * fixed_length(kind)
@@ -1279,7 +1292,7 @@ class VariableMixin(LanguageHost):
         """`value` converted for storage in variable `name` (or an element of
         array `name`), raising TYPE MISMATCH or OVERFLOW as QBASIC does."""
         kind = kind or self._kind(name)
-        if kind in self._user_types:
+        if kind in self.symbols.types:
             if not (isinstance(value, Record) and value.type_name == kind):
                 raise ValueError(f"TYPE MISMATCH: '{name}' holds a {kind} record")
             return copy.deepcopy(value)
@@ -1376,7 +1389,7 @@ class VariableMixin(LanguageHost):
             value = self._safe_eval(dm.group(2), extra_ns=run_vars)
             if name[-1:] in SUFFIX_KIND:
                 value = self._coerce(name, value)
-            self._consts.add(name)
+            self.symbols.consts.add(name)
             if run_vars is not None and run_vars is not self.variables:
                 run_vars[name] = value
             self.variables[name] = value
@@ -1401,14 +1414,14 @@ class VariableMixin(LanguageHost):
             lo = round_half_even(self._safe_eval(m.group(1), extra_ns=run_vars))
             hi = round_half_even(self._safe_eval(m.group(2), extra_ns=run_vars))
         else:
-            lo = self._option_base
+            lo = self.symbols.option_base
             hi = round_half_even(self._safe_eval(spec, extra_ns=run_vars))
         if hi < lo:
             raise ValueError(f"SUBSCRIPT OUT OF RANGE: bounds {lo} TO {hi}")
         return lo, hi
 
     def _check_type(self, typ: str) -> None:
-        if typ not in TYPE_NAMES and typ not in self._user_types and not typ.startswith('STRING*'):
+        if typ not in TYPE_NAMES and typ not in self.symbols.types and not typ.startswith('STRING*'):
             raise ValueError(f"UNDEFINED TYPE: {typ}")
 
     def _make_array(self, name: str, bounds: str, typ: str | None, run_vars: Any,
@@ -1425,12 +1438,12 @@ class VariableMixin(LanguageHost):
             raise ValueError(f"OUT OF MEMORY: {name} would hold {total} elements")
         if typ is not None:
             self._check_type(typ)
-            self._array_types[name] = typ
+            self.symbols.array_types[name] = typ
         else:
-            self._array_types.pop(name, None)
+            self.symbols.array_types.pop(name, None)
         kind = self._array_kind(name)
         old = self.arrays.get(name)
-        if kind in self._user_types:
+        if kind in self.symbols.types:
             data = [self._new_record(kind) for _ in range(total)]
         else:
             data = [self._default_of_kind(kind)] * total
@@ -1438,12 +1451,12 @@ class VariableMixin(LanguageHost):
             keep = min(len(old), total)
             data[:keep] = old[:keep]
         self.arrays[name] = data
-        self._array_dims[name] = sizes
-        self._array_lb[name] = lows
-        self._dimmed_arrays.add(name)
+        self.symbols.array_dims[name] = sizes
+        self.symbols.array_lb[name] = lows
+        self.symbols.dimmed.add(name)
 
     def _array_kind(self, name: str) -> str:
-        return self._array_types.get(name) or self._kind(name)
+        return self.symbols.array_types.get(name) or self._kind(name)
 
     def _try_exec_dim(self, stmt: str, run_vars: Any = None) -> bool:
         """DIM [SHARED] decl[, decl ...] — arrays, typed scalars and records."""
@@ -1458,7 +1471,7 @@ class VariableMixin(LanguageHost):
             name, bounds = dm.group(1), dm.group(2)
             typ = type_text(dm.group(3), dm.group(4)) if dm.group(3) else None
             if shared:
-                self._global_shared.add(name)
+                self.symbols.shared.add(name)
             if bounds is not None and bounds.strip():
                 self._make_array(name, bounds, typ, run_vars)
                 continue
@@ -1467,9 +1480,9 @@ class VariableMixin(LanguageHost):
                 suffix = SUFFIX_KIND.get(name[-1:])
                 if suffix and suffix != typ.split('*')[0]:
                     raise ValueError(f"DUPLICATE DEFINITION: '{name}' AS {typ}")
-                self._var_types[name] = typ
+                self.symbols.var_types[name] = typ
             current = self.variables.get(name)
-            if typ is not None and typ in self._user_types:
+            if typ is not None and typ in self.symbols.types:
                 same = isinstance(current, Record) and current.type_name == typ
                 value: Any = current if same else self._new_record(typ)
             elif current is None:
@@ -1489,7 +1502,7 @@ class VariableMixin(LanguageHost):
         return self._try_exec_dim(stmt)
 
     def _dim_record(self, var_name: str, type_name: str) -> None:
-        self._var_types[var_name] = type_name.upper()
+        self.symbols.var_types[var_name] = type_name.upper()
         self.variables[var_name] = self._new_record(type_name)
 
     def _try_exec_redim(self, stmt: str, run_vars: Any = None) -> bool:
@@ -1504,7 +1517,7 @@ class VariableMixin(LanguageHost):
             if not dm or not dm.group(2):
                 raise ValueError(f"SYNTAX ERROR: REDIM {decl}")
             typ = (type_text(dm.group(3), dm.group(4)) if dm.group(3)
-                   else self._array_types.get(dm.group(1)))
+                   else self.symbols.array_types.get(dm.group(1)))
             self._make_array(dm.group(1), dm.group(2), typ, run_vars, preserve=preserve)
         return True
 
@@ -1520,10 +1533,10 @@ class VariableMixin(LanguageHost):
 
     def _drop_array(self, name: str) -> None:
         self.arrays.pop(name, None)
-        self._array_dims.pop(name, None)
-        self._array_lb.pop(name, None)
-        self._array_types.pop(name, None)
-        self._dimmed_arrays.discard(name)
+        self.symbols.array_dims.pop(name, None)
+        self.symbols.array_lb.pop(name, None)
+        self.symbols.array_types.pop(name, None)
+        self.symbols.dimmed.discard(name)
 
     # ── Element access ───────────────────────────────────────────────
 
@@ -1532,24 +1545,24 @@ class VariableMixin(LanguageHost):
         array on first use (see the module docstring)."""
         if name not in self.arrays:
             if len(indices) > 1:
-                sizes = [IMPLICIT_UPPER - self._option_base + 1] * len(indices)
+                sizes = [IMPLICIT_UPPER - self.symbols.option_base + 1] * len(indices)
                 total = 1
                 for s in sizes:
                     total *= s
                 self.arrays[name] = [self._default_value(name) for _ in range(total)]
-                self._array_dims[name] = sizes
-                self._array_lb[name] = [self._option_base] * len(indices)
-                self._dimmed_arrays.add(name)
+                self.symbols.array_dims[name] = sizes
+                self.symbols.array_lb[name] = [self.symbols.option_base] * len(indices)
+                self.symbols.dimmed.add(name)
             else:
                 self.arrays[name] = []
         data = self.arrays[name]
-        dims = self._array_dims.get(name)
-        lows = self._array_lb.get(name)
+        dims = self.symbols.array_dims.get(name)
+        lows = self.symbols.array_lb.get(name)
         subs = [round_half_even(i) for i in indices]
         if dims is not None and len(subs) != len(dims):
             raise ValueError(f"WRONG NUMBER OF DIMENSIONS: {name} has {len(dims)}")
         if lows is None:
-            lows = [self._option_base] * len(subs)
+            lows = [self.symbols.option_base] * len(subs)
         if len(subs) == 1 and dims is None:
             idx = subs[0] - lows[0]
             if idx < 0:
@@ -1593,8 +1606,8 @@ class VariableMixin(LanguageHost):
         if name not in self.arrays:
             raise ValueError(f"SUBSCRIPT OUT OF RANGE: array {name} is not dimensioned")
         k = round_half_even(dim) - 1
-        dims = self._array_dims.get(name) or [len(self.arrays[name])]
-        lows = self._array_lb.get(name) or [self._option_base] * len(dims)
+        dims = self.symbols.array_dims.get(name) or [len(self.arrays[name])]
+        lows = self.symbols.array_lb.get(name) or [self.symbols.option_base] * len(dims)
         if not 0 <= k < len(dims):
             raise ValueError(f"SUBSCRIPT OUT OF RANGE: {name} has {len(dims)} dimension(s)")
         return lows[k] if fn == 'LBOUND' else lows[k] + dims[k] - 1
@@ -1616,8 +1629,8 @@ class VariableMixin(LanguageHost):
     def _lvalue_kind(self, lv: LValue) -> str:
         """The type a value assigned through `lv` takes."""
         if lv.field:
-            elem_type = self._array_types.get(lv.name, '')
-            if elem_type not in self._user_types:
+            elem_type = self.symbols.array_types.get(lv.name, '')
+            if elem_type not in self.symbols.types:
                 raise ValueError(f"TYPE MISMATCH: {lv.name}() elements are not records")
             return self._path_kind(elem_type, lv.field)
         if lv.subs is not None:
@@ -1735,12 +1748,12 @@ class _Names:
         if found and callable(val):
             return _apply(name, val, args)
         up = name.upper()
-        fns = t._user_fns
+        fns = t.symbols.fns
         key = up if up.startswith('FN') else 'FN' + up
         if key in fns:
             f = fns[key]
             return t._call_user_fn_expr(f['params'], f['body'], tuple(args))
-        if up in t._func_defs:
+        if up in t.procs.functions:
             return t._invoke_function(up, list(args), t._function_lines())
         fn = t._builtin(up)
         if fn is None:
@@ -1770,8 +1783,8 @@ class _Names:
             kind = t._kind(node[1])
         elif node[0] == 'call' and node[1] in t.arrays:
             kind = t._array_kind(node[1])
-        elif node[0] == 'field' and node[1][0] == 'call' and node[1][1] in t._array_types:
-            kind = t._path_kind(t._array_types[node[1][1]], node[2])
+        elif node[0] == 'field' and node[1][0] == 'call' and node[1][1] in t.symbols.array_types:
+            kind = t._path_kind(t.symbols.array_types[node[1][1]], node[2])
         else:
             return None
         value = evaluate(node, self)
@@ -1902,14 +1915,14 @@ class ExpressionMixin(LanguageHost):
         if up == 'FILEATTR':
             return self._fileattr
         if up == 'LPOS':
-            return lambda n=0: self._lprint_col + 1
+            return lambda n=0: self.files.printer_col + 1
         if up == 'INP':
             return self._inp
         if up in _ZERO_ARG:
             method = getattr(self, _ZERO_ARG[up])
             return method if up == 'RND' else (lambda *a: method())
         if up == 'POS':
-            return lambda x=0: self._print_col + 1
+            return lambda x=0: self.screen.col + 1
         if up == 'FRE':
             try:
                 import psutil
@@ -1922,7 +1935,7 @@ class ExpressionMixin(LanguageHost):
         """The compiled program FUNCTION bodies run from (with the FUNCTION
         table indexed against it)."""
         prog = self._compiled()
-        if not self._func_defs and prog.funcs:
+        if not self.procs.functions and prog.funcs:
             self._scan_subs(prog)
         return prog
 
@@ -2033,7 +2046,7 @@ class ExpressionMixin(LanguageHost):
     def _assert_assignable(self, name: str) -> None:
         """Reject assignment to a built-in constant name (case-insensitive)
         or to a CONST."""
-        if name in self._consts:
+        if name in self.symbols.consts:
             raise ValueError(f"DUPLICATE DEFINITION: '{name}' is a CONST")
         if name.upper() in self._RESERVED_CONST_NAMES:
             raise ValueError(

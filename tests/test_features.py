@@ -152,9 +152,9 @@ class TestClassicBasic(unittest.TestCase):
         t2 = QBasicTerminal()
         t2.process('10 DATA 5, 6')
         t2._collect_data()
-        t2._data_ptr = 2
+        t2.data.ptr = 2
         t2.cmd_restore()
-        self.assertEqual(t2._data_ptr, 0)
+        self.assertEqual(t2.data.ptr, 0)
 
     def test_on_goto_gosub(self):
         """ON expr GOTO and ON expr GOSUB."""
@@ -226,7 +226,7 @@ class TestClassicBasic(unittest.TestCase):
         t3.process('10 OPTION BASE 1')
         t3.process('20 END')
         _, out = capture(t3.cmd_run)
-        self.assertEqual(t3._option_base, 1)
+        self.assertEqual(t3.symbols.option_base, 1)
 
     def test_exit_statements(self):
         """EXIT FOR, EXIT WHILE, EXIT DO handler logic."""
@@ -352,14 +352,14 @@ class TestMemoryMap(unittest.TestCase):
         t_noise = QBasicTerminal()
         t_noise._poke(0xD100, 1)
         t_noise._poke(0xD101, 0.05)
-        ntype, nparam = t_noise._qubit_noise.get(0, (0, 0.0))
+        ntype, nparam = t_noise.noise.per_qubit.get(0, (0, 0.0))
         self.assertEqual(ntype, 1)
         self.assertAlmostEqual(nparam, 0.05)
         self.assertEqual(t_noise._peek(0xD100), 1.0)
         self.assertAlmostEqual(t_noise._peek(0xD101), 0.05)
         t_noise._poke(0xD102, 2)
         t_noise._poke(0xD103, 0.1)
-        ntype, nparam = t_noise._qubit_noise.get(1, (0, 0.0))
+        ntype, nparam = t_noise.noise.per_qubit.get(1, (0, 0.0))
         self.assertEqual(ntype, 2)
         self.assertAlmostEqual(nparam, 0.1)
 
@@ -421,7 +421,7 @@ class TestMemoryMap(unittest.TestCase):
         t3.subroutines['MYROUTINE'] = {'body': ['H 0'], 'params': []}
         _, out = capture(t3.cmd_sys, 'INSTALL 0xF000, MYROUTINE')
         self.assertIn('INSTALLED', out)
-        self.assertIn(0xF000, t3._user_sys)
+        self.assertIn(0xF000, t3.machine.user_sys)
         _, out = capture(t3.cmd_sys, '0xF000')
         self.assertNotIn('UNDEFINED', out)
 
@@ -525,7 +525,7 @@ class TestScreenAndDisplay(unittest.TestCase):
         _, out = capture(self.t.cmd_screen, '12')
         self.assertIn('640x480', out)
         _, out = capture(self.t.cmd_screen, '0')
-        self.assertIsNone(self.t._canvas)
+        self.assertIsNone(self.t.graphics.canvas)
 
         # CLS
         _, out = capture(self.t.cmd_cls)
@@ -606,7 +606,7 @@ class TestSubsAndScope(unittest.TestCase):
         self.t.process('30 END FUNCTION')
         sorted_lines = sorted(self.t.program.keys())
         self.t._scan_subs(sorted_lines)
-        self.assertIn('DOUBLE', self.t._func_defs)
+        self.assertIn('DOUBLE', self.t.procs.functions)
         result = self.t._invoke_function('DOUBLE', [5.0], sorted_lines)
         self.assertAlmostEqual(result, 10.0)
 
@@ -662,24 +662,24 @@ class TestSubsAndScope(unittest.TestCase):
         result = self.t._cf_on_error('ON ERROR GOTO 100', parsed=parse_stmt('ON ERROR GOTO 100'))
         self.assertIsNotNone(result)
         self.assertEqual(result, (True, ExecResult.ADVANCE))
-        self.assertEqual(self.t._error_target, 100)
+        self.assertEqual(self.t.errors.target, 100)
 
         # ON ERROR GOTO 0 clears
         self.t._cf_on_error('ON ERROR GOTO 0', parsed=parse_stmt('ON ERROR GOTO 0'))
-        self.assertIsNone(self.t._error_target)
+        self.assertIsNone(self.t.errors.target)
 
         # _handle_error routes correctly
-        self.t._error_target = 100
+        self.t.errors.target = 100
         self.t.program = {10: 'SOMETHING', 100: 'PRINT "CAUGHT"'}
         sorted_lines = [10, 100]
         ip = self.t._handle_error(RuntimeError("ERROR 42"), 10, sorted_lines)
         self.assertEqual(ip, 1)
-        self.assertEqual(self.t._err_code, 42)
-        self.assertEqual(self.t._err_line, 10)
+        self.assertEqual(self.t.errors.code, 42)
+        self.assertEqual(self.t.errors.line, 10)
 
         # RESUME NEXT
-        self.t._err_line = 20
-        self.t._in_error_handler = True
+        self.t.errors.line = 20
+        self.t.errors.handling = True
         sorted_lines = [10, 20, 30]
         self.t.program = {10: 'X', 20: 'Y', 30: 'Z'}
         result = self.t._cf_resume('RESUME NEXT', sorted_lines, parsed=parse_stmt('RESUME NEXT'))
@@ -688,7 +688,7 @@ class TestSubsAndScope(unittest.TestCase):
 
         # ERR and ERL variables
         t_erl = QBasicTerminal()
-        t_erl._error_target = 100
+        t_erl.errors.target = 100
         t_erl.program = {20: 'BAD LINE', 100: 'HANDLER'}
         sorted_lines = [20, 100]
         t_erl._handle_error(RuntimeError("ERROR 42"), 20, sorted_lines)
@@ -738,7 +738,7 @@ class TestDebugAndProfile(unittest.TestCase):
         self.assertIn('No breakpoints', out)
 
         # Hit check
-        self.t._breakpoints.add(20)
+        self.t.debug.breakpoints.add(20)
         result = self.t._check_breakpoint(20, [10, 20, 30], 1)
         self.assertTrue(result)
 
@@ -760,7 +760,7 @@ class TestDebugAndProfile(unittest.TestCase):
         self.t.process('30 PRINT "AFTER"')
         _, out = capture(self.t.cmd_run)
         self.assertIn('STOPPED', out)
-        self.assertIsNotNone(self.t._stopped_ip)
+        self.assertIsNotNone(self.t.debug.stopped_ip)
 
         t2 = QBasicTerminal()
         _, out = capture(t2.cmd_cont)
@@ -770,13 +770,13 @@ class TestDebugAndProfile(unittest.TestCase):
         """TRON, TROFF, trace line output."""
         _, out = capture(self.t.cmd_tron)
         self.assertIn('TRACE ON', out)
-        self.assertTrue(self.t._trace_mode)
+        self.assertTrue(self.t.debug.trace)
 
         _, out = capture(self.t.cmd_troff)
         self.assertIn('TRACE OFF', out)
-        self.assertFalse(self.t._trace_mode)
+        self.assertFalse(self.t.debug.trace)
 
-        self.t._trace_mode = True
+        self.t.debug.trace = True
         _, out = capture(self.t._trace_line, 10)
         self.assertIn('[10]', out)
 
@@ -784,17 +784,17 @@ class TestDebugAndProfile(unittest.TestCase):
         """PROFILE ON/OFF/SHOW, with and without data."""
         _, out = capture(self.t.cmd_profile, 'ON')
         self.assertIn('PROFILE ON', out)
-        self.assertTrue(self.t._profile_mode)
+        self.assertTrue(self.t.machine.profiling)
         _, out = capture(self.t.cmd_profile, 'OFF')
         self.assertIn('PROFILE OFF', out)
-        self.assertFalse(self.t._profile_mode)
+        self.assertFalse(self.t.machine.profiling)
 
         # Show empty
         _, out = capture(self.t.cmd_profile, 'SHOW')
         self.assertIn('No profile data', out)
 
         # Show with data
-        self.t._profile_data = {10: {'time_ms': 1.5, 'calls': 1, 'gates': 2}}
+        self.t.machine.profile = {10: {'time_ms': 1.5, 'calls': 1, 'gates': 2}}
         self.t.program = {10: 'H 0'}
         _, out = capture(self.t.cmd_profile, 'SHOW')
         self.assertIn('Profile', out)
@@ -806,17 +806,17 @@ class TestDebugAndProfile(unittest.TestCase):
         self.t.num_qubits = 2
         sv1 = np.array([1, 0, 0, 0], dtype=complex)
         sv2 = np.array([0.707, 0, 0, 0.707], dtype=complex)
-        self.t._sv_checkpoints = [(10, sv1.copy()), (20, sv2.copy())]
-        self.t._tt_position = 1
+        self.t.debug.checkpoints = [(10, sv1.copy()), (20, sv2.copy())]
+        self.t.debug.position = 1
         self.t.last_sv = sv2.copy()
 
         _, out = capture(self.t.cmd_rewind, '1')
         self.assertIn('step 0', out)
-        self.assertEqual(self.t._tt_position, 0)
+        self.assertEqual(self.t.debug.position, 0)
 
         _, out = capture(self.t.cmd_forward, '1')
         self.assertIn('step 1', out)
-        self.assertEqual(self.t._tt_position, 1)
+        self.assertEqual(self.t.debug.position, 1)
 
         _, out = capture(self.t.cmd_history)
         self.assertIn('[0]', out)
@@ -832,10 +832,10 @@ class TestDebugAndProfile(unittest.TestCase):
         _, out = capture(self.t.cmd_stats, '')
         self.assertIn('No statistics', out)
 
-        self.t._stats_runs.append({'0': 10})
+        self.t.machine.runs.append({'0': 10})
         _, out = capture(self.t.cmd_stats, 'CLEAR')
         self.assertIn('CLEARED', out)
-        self.assertEqual(len(self.t._stats_runs), 0)
+        self.assertEqual(len(self.t.machine.runs), 0)
 
         # Run N
         self.t.process('10 H 0')
@@ -843,11 +843,11 @@ class TestDebugAndProfile(unittest.TestCase):
         self.t.shots = 10
         _, out = capture(self.t.cmd_stats, '3')
         self.assertIn('Collected', out)
-        self.assertEqual(len(self.t._stats_runs), 3)
+        self.assertEqual(len(self.t.machine.runs), 3)
 
         # Show with data
         t2 = QBasicTerminal()
-        t2._stats_runs = [{'00': 500, '11': 524}, {'00': 510, '11': 514}]
+        t2.machine.runs = [{'00': 500, '11': 524}, {'00': 510, '11': 514}]
         _, out = capture(t2.cmd_stats, 'SHOW')
         self.assertIn('Statistics', out)
         self.assertIn('2 runs', out)
@@ -857,10 +857,10 @@ class TestDebugAndProfile(unittest.TestCase):
         has passed, keeping the interrupted ip for RETURN."""
         from unittest.mock import patch
         t = QBasicTerminal()
-        t._on_timer_target = 100
-        t._on_timer_interval = 1.0
-        t._on_timer_last = 1000.0  # fake "last fire" time
-        t._timer_state = 'ON'      # events are trapped after TIMER ON
+        t.events.timer_target = 100
+        t.events.timer_interval = 1.0
+        t.events.timer_last = 1000.0  # fake "last fire" time
+        t.events.timer_state = 'ON'      # events are trapped after TIMER ON
         t._gosub_stack = []
         t.program = {100: 'PRINT "timer"', 110: 'RETURN'}
         sorted_lines = [100, 110]
@@ -872,7 +872,7 @@ class TestDebugAndProfile(unittest.TestCase):
             mock_time.time.return_value = 1001.5  # 1.5 s elapsed
             self.assertEqual(t._check_timer_callback(sorted_lines, 1), 0)
             self.assertEqual(t._gosub_stack, [1])
-            self.assertEqual(t._on_timer_last, 1001.5)
+            self.assertEqual(t.events.timer_last, 1001.5)
 
 
 # =====================================================================
@@ -1111,7 +1111,7 @@ class TestProgramManagement(unittest.TestCase):
             eof_val = t._eof(1)
             self.assertEqual(eof_val, 0)  # not at EOF yet
             # Read to end
-            t._file_handles[1].read()
+            t.files.handles[1].read()
             eof_val = t._eof(1)
             self.assertEqual(eof_val, -1)  # at EOF
             _, out2 = capture(t.cmd_close, '#1')
@@ -1240,15 +1240,15 @@ class TestQuantumOps(unittest.TestCase):
         result = self.t._cf_on_measure('ON MEASURE GOSUB 100', parsed=parse_stmt('ON MEASURE GOSUB 100'))
         self.assertIsNotNone(result)
         self.assertEqual(result, (True, ExecResult.ADVANCE))
-        self.assertEqual(self.t._on_measure_target, 100)
+        self.assertEqual(self.t.events.measure_target, 100)
 
         # ON TIMER
         t2 = QBasicTerminal()
         result = t2._cf_on_timer('ON TIMER(5) GOSUB 200', parsed=parse_stmt('ON TIMER(5) GOSUB 200'))
         self.assertIsNotNone(result)
         self.assertEqual(result, (True, ExecResult.ADVANCE))
-        self.assertEqual(t2._on_timer_target, 200)
-        self.assertAlmostEqual(t2._on_timer_interval, 5.0)
+        self.assertEqual(t2.events.timer_target, 200)
+        self.assertAlmostEqual(t2.events.timer_interval, 5.0)
 
         # ON TIMER stored in program (not yet executed)
         t3 = QBasicTerminal()
@@ -1256,7 +1256,7 @@ class TestQuantumOps(unittest.TestCase):
         t3.process('20 END', track_undo=False)
         t3.process('100 PRINT "timer"', track_undo=False)
         t3.process('110 RETURN', track_undo=False)
-        self.assertIsNone(t3._on_timer_target)
+        self.assertIsNone(t3.events.timer_target)
 
         # ON MEASURE stored in program
         t4 = QBasicTerminal()
@@ -1314,9 +1314,9 @@ class TestQuantumOps(unittest.TestCase):
 
         # User TYPE
         if not hasattr(self.t, '_user_types'):
-            self.t._user_types = {}
-        self.t._user_types['POINT'] = [('x', 'FLOAT'), ('y', 'FLOAT')]
-        self.assertEqual(len(self.t._user_types['POINT']), 2)
+            self.t.symbols.types = {}
+        self.t.symbols.types['POINT'] = [('x', 'FLOAT'), ('y', 'FLOAT')]
+        self.assertEqual(len(self.t.symbols.types['POINT']), 2)
 
     def test_sample_output_format(self):
         """SAMPLE n draws n shots of the program's circuit."""
@@ -1565,11 +1565,11 @@ class TestNoiseModel(unittest.TestCase):
         t = QBasicTerminal()
         # ON
         _, out = capture(t.cmd_noise, 'depolarizing 0.01')
-        assert t._noise_model is not None
+        assert t.noise.model is not None
         assert 'depolarizing' in out.lower()
         # OFF
         _, out = capture(t.cmd_noise, 'OFF')
-        assert t._noise_model is None
+        assert t.noise.model is None
 
     def test_noise_types(self):
         """All noise types parse without error."""
@@ -1580,7 +1580,7 @@ class TestNoiseModel(unittest.TestCase):
                        'reset 0.01 0.01']:
             _, out = capture(t.cmd_noise, ntype)
             assert 'ERROR' not in out.upper(), f"Failed on: {ntype}"
-            t._noise_model = None  # reset
+            t.noise.model = None  # reset
 
     def test_unknown_noise(self):
         t = QBasicTerminal()
@@ -2155,7 +2155,7 @@ class TestGapCoverage(unittest.TestCase):
             self.t.cmd_open(f'"{fname}" FOR INPUT AS #1')
             self.assertEqual(self.t._eof(1), 0)
             # Read to end
-            fh = self.t._file_handles[1]
+            fh = self.t.files.handles[1]
             fh.read()
             self.assertEqual(self.t._eof(1), -1)
             self.t.cmd_close('#1')
@@ -2173,7 +2173,7 @@ class TestGapCoverage(unittest.TestCase):
         try:
             _, out = capture(self.t.cmd_open, f'"{fname}" FOR INPUT AS #1 ENCODING "utf-8"')
             self.assertIn('OPENED #1', out)
-            fh = self.t._file_handles.get(1)
+            fh = self.t.files.handles.get(1)
             self.assertIsNotNone(fh)
             self.assertEqual(fh.encoding, 'utf-8')
             self.t.cmd_close('#1')
@@ -2189,7 +2189,7 @@ class TestGapCoverage(unittest.TestCase):
         try:
             _, out = capture(self.t.cmd_open, f'"{fname}" FOR INPUT AS #2 ENCODING "binary"')
             self.assertIn('OPENED #2', out)
-            fh = self.t._file_handles.get(2)
+            fh = self.t.files.handles.get(2)
             self.assertIsNotNone(fh)
             self.assertIn('b', fh.mode)
             self.t.cmd_close('#2')
@@ -2230,16 +2230,16 @@ class TestGapCoverage(unittest.TestCase):
         """TYPE defines a record type with fields in _user_types."""
         _, out1 = capture(self.t.cmd_type, 'Point')
         self.assertIn('TYPE POINT', out1)
-        self.assertIsNotNone(self.t._pending_type)
+        self.assertIsNotNone(self.t.symbols.pending_type)
         # Feed fields
         _, _ = capture(self.t._accumulate_type_field, '  x AS FLOAT')
         _, _ = capture(self.t._accumulate_type_field, '  y AS FLOAT')
         _, out_end = capture(self.t._accumulate_type_field, 'END TYPE')
         self.assertIn('TYPE POINT', out_end)
         self.assertIn('2 fields', out_end)
-        self.assertIsNone(self.t._pending_type)
-        self.assertIn('POINT', self.t._user_types)
-        fields = self.t._user_types['POINT']
+        self.assertIsNone(self.t.symbols.pending_type)
+        self.assertIn('POINT', self.t.symbols.types)
+        fields = self.t.symbols.types['POINT']
         self.assertEqual(len(fields), 2)
         self.assertEqual(fields[0], ('x', 'FLOAT'))
         self.assertEqual(fields[1], ('y', 'FLOAT'))
@@ -2671,33 +2671,33 @@ class TestCommandEffects(unittest.TestCase):
         rows = re.findall(r'^\s+(\d+)\s+[\d.]+\s+[\d.]+\s+(\d+)\s+(\d+)\s+(.+)$', profile, re.M)
         self.assertEqual(rows, [('10', '1', '1', 'H 0'), ('20', '1', '1', 'CX 0,1')])
         self.said(t, t.cmd_profile, 'OFF')
-        self.assertFalse(t._profile_mode)
+        self.assertFalse(t.machine.profiling)
         self.said(t, t.cmd_watch, 'x')
-        self.assertEqual(t._watches, ['x'])
+        self.assertEqual(t.debug.watches, ['x'])
         self.said(t, t.cmd_watch, 'CLEAR')
-        self.assertEqual(t._watches, [])
+        self.assertEqual(t.debug.watches, [])
         self.said(t, t.cmd_breakpoint, '20')
-        self.assertEqual(t._breakpoints, {20})
+        self.assertEqual(t.debug.breakpoints, {20})
         self.assertIn('20: CX 0,1', self.said(t, t.cmd_breakpoint, 'LIST'))
         self.said(t, t.cmd_breakpoint, '10-30')
-        self.assertEqual(t._breakpoints, set())
+        self.assertEqual(t.debug.breakpoints, set())
         self.said(t, t.cmd_tron)
-        self.assertTrue(t._trace_mode)
+        self.assertTrue(t.debug.trace)
         self.said(t, t.cmd_troff)
-        self.assertFalse(t._trace_mode)
+        self.assertFalse(t.debug.trace)
         self.assertIn('Collected 3 runs', self.said(t, t.cmd_stats, '3'))
-        self.assertEqual(len(t._stats_runs), 3)
+        self.assertEqual(len(t.machine.runs), 3)
         self.assertIn('Statistics over 3 runs (20 shots/run)', self.said(t, t.cmd_stats, 'SHOW'))
         self.said(t, t.cmd_stats, 'CLEAR')
-        self.assertEqual(t._stats_runs, [])
-        t._sv_checkpoints = [(10, np.array([1, 0, 0, 0], dtype=complex)),
+        self.assertEqual(t.machine.runs, [])
+        t.debug.checkpoints = [(10, np.array([1, 0, 0, 0], dtype=complex)),
                              (20, np.array([1, 0, 0, 1], dtype=complex) / np.sqrt(2))]
-        t._tt_position = 1
+        t.debug.position = 1
         self.assertIn('[1] line 20 <<', self.said(t, t.cmd_history))
         self.assertIn('+1.000|00⟩', self.said(t, t.cmd_rewind, '1'))
-        self.assertEqual(t._tt_position, 0)
+        self.assertEqual(t.debug.position, 0)
         self.assertIn('+0.707|00⟩ +0.707|11⟩', self.said(t, t.cmd_forward, '1'))
-        self.assertEqual(t._tt_position, 1)
+        self.assertEqual(t.debug.position, 1)
 
     def test_screen_and_machine_commands(self):
         from qubasic_core import __version__
@@ -2707,7 +2707,7 @@ class TestCommandEffects(unittest.TestCase):
             self.assertEqual(t._screen_mode, mode)
         self.said(t, t.cmd_display, '1')
         self.said(t, t.cmd_color, 'red, blue')
-        self.assertEqual((t._color_fg, t._color_bg), ('red', 'blue'))
+        self.assertEqual((t.screen.fg, t.screen.bg), ('red', 'blue'))
         self.said(t, t.cmd_prompt, '"> "')
         self.assertEqual(t._prompt, '> ')
         self.assertIn('$D000 = 2.0', self.said(t, t.cmd_peek, '$D000'))

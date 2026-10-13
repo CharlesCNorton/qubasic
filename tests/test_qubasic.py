@@ -934,10 +934,10 @@ class TestFileIO(unittest.TestCase):
             finally:
                 os.unlink(path)
         # depth limit
-        self.t._include_depth = 100
+        self.t.editor.include_depth = 100
         _, out = capture(self.t.cmd_include, 'anything.qb')
         self.assertIn('DEPTH LIMIT', out)
-        self.t._include_depth = 0
+        self.t.editor.include_depth = 0
         # nonexistent
         _, out = capture(self.t.cmd_include, 'nonexistent_file_xyz.qb')
         self.assertIn('NOT FOUND', out)
@@ -1215,9 +1215,9 @@ class TestMisc(unittest.TestCase):
 
     def test_noise(self):
         capture(self.t.cmd_noise, 'depolarizing 0.01')
-        self.assertIsNotNone(self.t._noise_model)
+        self.assertIsNotNone(self.t.noise.model)
         capture(self.t.cmd_noise, 'OFF')
-        self.assertIsNone(self.t._noise_model)
+        self.assertIsNone(self.t.noise.model)
         # heavy depolarizing adds errors (1 qubit)
         t1 = QBasicTerminal(); t1.num_qubits = 1; t1.shots = 1000
         t1.program = {10: 'X 0', 20: 'MEASURE'}
@@ -1366,7 +1366,7 @@ class TestAdditionalCoverage(unittest.TestCase):
             100: 'RETURN',
         }
         capture(self.t.cmd_run)
-        self.assertEqual(self.t._on_timer_target, 100)
+        self.assertEqual(self.t.events.timer_target, 100)
 
     def test_on_measure_callback(self):
         # Set up ON MEASURE GOSUB target, verify target is set
@@ -1378,7 +1378,7 @@ class TestAdditionalCoverage(unittest.TestCase):
             100: 'RETURN',
         }
         capture(self.t.cmd_run)
-        self.assertEqual(self.t._on_measure_target, 100)
+        self.assertEqual(self.t.events.measure_target, 100)
 
     def test_dir_with_path(self):
         """DIR lists the .qb and .bas programs in a directory with their sizes."""
@@ -1402,7 +1402,7 @@ class TestAdditionalCoverage(unittest.TestCase):
         self.t.num_qubits = 1
         self.t.program = {10: 'OPTION BASE 1', 20: 'H 0', 30: 'MEASURE'}
         capture(self.t.cmd_run)
-        self.assertEqual(self.t._option_base, 1)
+        self.assertEqual(self.t.symbols.option_base, 1)
 
     def test_error_handler_limit(self):
         # ON ERROR GOTO handler with 300+ lines should not hang
@@ -1434,7 +1434,7 @@ class TestAdditionalCoverage(unittest.TestCase):
 
     def test_named_state_errors(self):
         # |GHZ3> with dim < 8 (fewer than 3 qubits) falls back to |0>
-        from qubasic_core.simulator import _resolve_named_state
+        from qubasic_core.circuits import _resolve_named_state
         sv = _resolve_named_state('|GHZ3>', 2)  # 2 qubits -> dim=4 < 8
         self.assertAlmostEqual(sv[0], 1.0)  # fallback to |0>
         self.assertAlmostEqual(np.sum(np.abs(sv)**2), 1.0)
@@ -1906,15 +1906,15 @@ class TestFrontier(unittest.TestCase):
     def test_qudits(self):
         t = QBasicTerminal()
         capture(t.cmd_qudit, '3'); capture(t.cmd_qf, '0')
-        self.assertTrue(np.allclose(np.abs(t._qsv) ** 2, 1 / 3, atol=1e-9))
+        self.assertTrue(np.allclose(np.abs(t.qudit.sv) ** 2, 1 / 3, atol=1e-9))
         t2 = QBasicTerminal()
         capture(t2.cmd_qudit, '3')
         for _ in range(3):
             capture(t2.cmd_qx, '0')
-        self.assertAlmostEqual(abs(t2._qsv[0]), 1.0, places=9)
+        self.assertAlmostEqual(abs(t2.qudit.sv[0]), 1.0, places=9)
         t3 = QBasicTerminal()
         capture(t3.cmd_qudit, '3 2'); capture(t3.cmd_qf, '0'); capture(t3.cmd_qsum, '0 1')
-        nz = sorted(i for i, a in enumerate(t3._qsv) if abs(a) > 1e-9)
+        nz = sorted(i for i, a in enumerate(t3.qudit.sv) if abs(a) > 1e-9)
         self.assertEqual(nz, [0, 4, 8])   # |00>, |11>, |22>
 
     def test_bosonic(self):
@@ -2000,7 +2000,7 @@ class TestResources(unittest.TestCase):
     def test_device_and_optimize(self):
         t = QBasicTerminal(); t.num_qubits = 3; t.shots = 500; t._seed = 1
         capture(t.cmd_device, 'linear 3')
-        self.assertIsNotNone(t._noise_model)
+        self.assertIsNotNone(t.noise.model)
         self.assertIsNotNone(t._coupling_map)
         # OPTIMIZE collapses redundant gates.
         t2 = QBasicTerminal(); t2.num_qubits = 1

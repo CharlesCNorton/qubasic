@@ -725,9 +725,9 @@ class LogicalMixin(ApplicationsHost):
             saved = (self._logical_mode or {}).get('saved_noise')
             self._logical_mode = None
             if saved:
-                self._noise_model, self._noise_spec = saved
+                self.noise.model, self.noise.spec = saved
             else:
-                self._noise_model = self._noise_spec = None
+                self.noise.model = self.noise.spec = None
             self._circuit_cache_key = None
             restored = " (previous NOISE restored)" if saved and saved[0] is not None else ""
             self.io.writeln(f"LQUBITS OFF — back to physical qubits{restored}")
@@ -752,8 +752,8 @@ class LogicalMixin(ApplicationsHost):
             p = float(self._eval_with_vars(m.group(4), {})) if m.group(4) else 1e-3
             if cname == 'STEANE':
                 saved = (self._logical_mode['saved_noise'] if self._logical_mode
-                         else (self._noise_model, self._noise_spec))
-                self._noise_model, self._noise_spec = saved    # no modeled channel
+                         else (self.noise.model, self.noise.spec))
+                self.noise.model, self.noise.spec = saved    # no modeled channel
                 self._logical_mode = {'n': n, 'code': cname, 'd': 3, 'p': p,
                                       'pl': self._logical_pl(cname, 3, p),
                                       'encoded': True, 'patch': 7, 'saved_noise': saved}
@@ -779,9 +779,9 @@ class LogicalMixin(ApplicationsHost):
             nm.add_all_qubit_readout_error(
                 ReadoutError([[1 - pl, pl], [pl, 1 - pl]]))
             saved = (self._logical_mode['saved_noise'] if self._logical_mode
-                     else (self._noise_model, self._noise_spec))
-            self._noise_model = nm
-            self._noise_spec = None
+                     else (self.noise.model, self.noise.spec))
+            self.noise.model = nm
+            self.noise.spec = None
             self._logical_mode = {'n': n, 'code': cname, 'd': d, 'p': p, 'pl': pl,
                                   'saved_noise': saved, 'encoded': mode_word != 'MODEL',
                                   'force_encoded': mode_word == 'ENCODED'}

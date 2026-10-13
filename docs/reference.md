@@ -576,16 +576,21 @@ Parameters come first, then qubits: `RX theta, q`, `CRZ theta, c, t`, `U theta, 
 | Gate | Parameters | Qubits | Aliases |
 |---|---|---|---|
 | CCX | 0 | 3 | TOFFOLI |
+| CCZ | 0 | 3 |  |
 | CH | 0 | 2 |  |
 | CP | 1 | 2 |  |
 | CRX | 1 | 2 |  |
 | CRY | 1 | 2 |  |
 | CRZ | 1 | 2 |  |
+| CS | 0 | 2 |  |
+| CSDG | 0 | 2 |  |
 | CSWAP | 0 | 3 | FREDKIN |
+| CSX | 0 | 2 |  |
 | CX | 0 | 2 | CNOT |
 | CY | 0 | 2 |  |
 | CZ | 0 | 2 |  |
 | DCX | 0 | 2 |  |
+| ECR | 0 | 2 |  |
 | H | 0 | 1 |  |
 | ID | 0 | 1 |  |
 | ISWAP | 0 | 2 |  |
@@ -595,11 +600,13 @@ Parameters come first, then qubits: `RX theta, q`, `CRZ theta, c, t`, `U theta, 
 | RY | 1 | 1 |  |
 | RYY | 1 | 2 |  |
 | RZ | 1 | 1 |  |
+| RZX | 1 | 2 |  |
 | RZZ | 1 | 2 |  |
 | S | 0 | 1 |  |
 | SDG | 0 | 1 |  |
 | SWAP | 0 | 2 |  |
 | SX | 0 | 1 |  |
+| SXDG | 0 | 1 |  |
 | T | 0 | 1 |  |
 | TDG | 0 | 1 |  |
 | U | 3 | 1 |  |

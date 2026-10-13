@@ -22,7 +22,7 @@ GATE_TABLE = {
     # 0-param, 1-qubit
     'H':    (0, 1), 'X':    (0, 1), 'Y':    (0, 1), 'Z':    (0, 1),
     'S':    (0, 1), 'T':    (0, 1), 'SDG':  (0, 1), 'TDG':  (0, 1),
-    'SX':   (0, 1), 'ID':   (0, 1),
+    'SX':   (0, 1), 'SXDG': (0, 1), 'ID':   (0, 1),
     # 1-param, 1-qubit
     'RX':   (1, 1), 'RY':   (1, 1), 'RZ':   (1, 1), 'P':    (1, 1),
     # 3-param, 1-qubit
@@ -30,11 +30,13 @@ GATE_TABLE = {
     # 0-param, 2-qubit
     'CX':   (0, 2), 'CNOT': (0, 2), 'CZ':   (0, 2), 'CY':   (0, 2),
     'CH':   (0, 2), 'SWAP': (0, 2), 'DCX':  (0, 2), 'ISWAP':(0, 2),
+    'ECR':  (0, 2), 'CS':   (0, 2), 'CSDG': (0, 2), 'CSX':  (0, 2),
     # 1-param, 2-qubit
     'CRX':  (1, 2), 'CRY':  (1, 2), 'CRZ':  (1, 2), 'CP':   (1, 2),
-    'RXX':  (1, 2), 'RYY':  (1, 2), 'RZZ':  (1, 2),
+    'RXX':  (1, 2), 'RYY':  (1, 2), 'RZZ':  (1, 2), 'RZX':  (1, 2),
     # 0-param, 3-qubit
     'CCX':  (0, 3), 'TOFFOLI': (0, 3), 'CSWAP': (0, 3), 'FREDKIN': (0, 3),
+    'CCZ':  (0, 3),
 }
 
 # Aliases

@@ -15,7 +15,7 @@ from conftest import InTempDir, feed, term
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import Statevector
 
-from qubasic_core import cli, display
+from qubasic_core import cli, display, simulator
 from qubasic_core.api import CaptureIO
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ class TestCommandSurface(unittest.TestCase):
         t = term(seed=3, shots=200)
 
         def nbar(term_, mode):
-            return float(np.sum(np.arange(term_._bcut) * term_._mode_rdm_diag(mode)))
+            return float(np.sum(np.arange(term_.bosons.cutoff) * term_._mode_rdm_diag(mode)))
 
         t.cmd_bosonic('2 12')
         t.cmd_displace('0 1.0')                      # <n> = |alpha|^2
@@ -504,7 +504,7 @@ class TestHistogramsAndTables(unittest.TestCase):
 
     def test_plain_output(self):
         t = term()
-        with mock.patch.object(display, '_RICH', False):
+        with mock.patch.object(display, '_RICH', False), mock.patch.object(simulator, '_RICH', False):
             out = feed(t, '10 H 0', '20 MEASURE', 'RUN')
             self.assertIn('%)', out)
             out = feed(t, '20', 'RUN', 'STATE')
@@ -577,14 +577,14 @@ class TestAssist(unittest.TestCase):
         self.assertIn('Undo will remove: [30]', feed(t, 'UNDO'))
         t.process('20')
         self.assertIn('Undo will restore: [20]', feed(t, 'UNDO'))
-        t._undo_stack.clear()
+        t.editor.undo.clear()
         self.assertIn('?NOTHING TO UNDO', feed(t, 'UNDO'))
         out = feed(t, 'DIFF', 'DIFF 3')
         self.assertIn('?USAGE: DIFF', out)
         self.assertIn('?BANK 3 is empty', out)
-        t._program_slots[3] = {10: 'H 0'}
+        t.editor.slots[3] = {10: 'H 0'}
         self.assertIn('+20 X 1', feed(t, 'DIFF 3'))
-        t._program_slots[4] = dict(t.program)
+        t.editor.slots[4] = dict(t.program)
         self.assertIn('No differences with bank 4', feed(t, 'DIFF 4'))
         feed(t, '30 MEASURE')
         out = feed(t, 'COMPARE statevector stabilizer', 'COMPARE statevector')
@@ -709,11 +709,15 @@ class TestExport(InTempDir):
                          ['H 0', 'CX 0, 1', 'RZ 0.25, 1', 'BARRIER', 'RESET 0', 'MEASURE'])
 
     def test_loadqasm_imports_unknown_gates_as_matrices(self):
+        from qiskit.circuit.library import XXPlusYYGate
         qc = QuantumCircuit(2)
-        qc.rzx(0.3, 0, 1)
+        qc.append(XXPlusYYGate(0.3, 0.2), [0, 1])
         lines, n_unknown, custom = term(agent=True)._circuit_to_qb(qc)
         self.assertEqual((lines, n_unknown), (['G0 0, 1'], 1))
         self.assertEqual(custom['G0'].shape, (4, 4))
+        known = QuantumCircuit(2)
+        known.rzx(0.3, 0, 1)
+        self.assertEqual(term(agent=True)._circuit_to_qb(known)[:2], (['RZX 0.3, 0, 1'], 0))
 
     def test_loadqasm_errors(self):
         t = term(agent=True)

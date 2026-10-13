@@ -165,7 +165,7 @@ class TestChannels(unittest.TestCase):
             with self.subTest(spec=spec):
                 t = term(seed=4, shots=2000)
                 t.cmd_noise(spec)
-                errors = t._noise_model._default_quantum_errors
+                errors = t.noise.model._default_quantum_errors
                 self.assertEqual(errors['cx'].num_qubits, 2)
                 self.assertEqual(errors['ccx'].num_qubits, 3)
                 self.assertEqual(errors['h'].num_qubits, 1)
@@ -180,12 +180,12 @@ class TestChannels(unittest.TestCase):
         t = term(seed=4, shots=2000)
         t.cmd_noise('thermal 10 50 1')
         self.assertIn('T2 <= 2 T1', t.io.text)
-        self.assertIsNone(t._noise_model)
+        self.assertIsNone(t.noise.model)
         t.cmd_noise('pauli 0.5 0.5 0.5')
         self.assertIn('sum past 1', t.io.text)
         t.cmd_noise('sparkle 0.1')
         self.assertIn('UNKNOWN NOISE TYPE', t.io.text)
-        self.assertIsNone(t._noise_model)
+        self.assertIsNone(t.noise.model)
 
 
 class TestComposition(unittest.TestCase):
@@ -193,24 +193,24 @@ class TestComposition(unittest.TestCase):
     def test_semicolon_composes_and_add_extends(self):
         t = term(seed=4, shots=2000)
         t.cmd_noise('depolarizing 0.01; readout 0.05')
-        self.assertEqual(t._noise_spec, 'depolarizing 0.01; readout 0.05')
-        self.assertIsNotNone(t._noise_model._default_readout_error)
+        self.assertEqual(t.noise.spec, 'depolarizing 0.01; readout 0.05')
+        self.assertIsNotNone(t.noise.model._default_readout_error)
         t.cmd_noise('ADD crosstalk 0.02')
-        self.assertEqual(t._noise_spec, 'depolarizing 0.01; readout 0.05; crosstalk 0.02')
+        self.assertEqual(t.noise.spec, 'depolarizing 0.01; readout 0.05; crosstalk 0.02')
         t.cmd_noise('INFO')
         self.assertIn('crosstalk 0.02', t.io.text)
 
     def test_readout_errors_compose(self):
         t = term(seed=4, shots=2000)
         t.cmd_noise('readout 0.1 0.2; readout 0.3 0.1')
-        p = np.asarray(t._noise_model._default_readout_error.probabilities)
+        p = np.asarray(t.noise.model._default_readout_error.probabilities)
         want = np.array([[0.9, 0.1], [0.2, 0.8]]) @ np.array([[0.7, 0.3], [0.1, 0.9]])
         np.testing.assert_allclose(p, want)
 
     def test_add_without_a_model_starts_one(self):
         t = term(seed=4, shots=2000)
         t.cmd_noise('ADD readout 0.1')
-        self.assertEqual(t._noise_spec, 'readout 0.1')
+        self.assertEqual(t.noise.spec, 'readout 0.1')
 
     def test_composed_noise_runs_live(self):
         t = term(1, seed=4, shots=400)
@@ -695,6 +695,64 @@ class TestStabilizerTableau(unittest.TestCase):
         self.assertIn('the noise on X is not a Pauli channel', out)
 
 
+class TestAerGatesAndNoise(unittest.TestCase):
+    """The gates and noise Aer added: ECR, CS, CSDG, CSX, SXDG, CCZ and RZX,
+    the stabilizer method on ECR, SXDG and RZ at multiples of pi/2, and the
+    Pauli-Lindblad channel."""
+
+    def test_gate_matrices_match_qiskit(self):
+        from qiskit.circuit.library import (
+            CCZGate,
+            CSdgGate,
+            CSGate,
+            CSXGate,
+            ECRGate,
+            RZXGate,
+            SXdgGate,
+        )
+        for name, params, gate in (('SXDG', (), SXdgGate()), ('ECR', (), ECRGate()), ('CS', (), CSGate()),
+                                   ('CSDG', (), CSdgGate()), ('CSX', (), CSXGate()), ('CCZ', (), CCZGate()),
+                                   ('RZX', (0.7,), RZXGate(0.7))):
+            np.testing.assert_allclose(_np_gate_matrix(name, params),
+                                       Operator(gate).reverse_qargs().data, atol=1e-12, err_msg=name)
+
+    def test_new_gates_run_and_clifford_ones_take_the_stabilizer_method(self):
+        t = term(2, seed=1, shots=200)
+        out = feed(t, '10 H 0', '20 ECR 0, 1', '30 RZ PI/2, 0', '40 SXDG 1', '50 MEASURE', 'RUN')
+        self.assertIn('method=stabilizer', out)
+        out = feed(t, '30 RZ 0.3, 0', 'RUN')
+        self.assertNotIn('method=stabilizer', out)
+        t3 = term(3, seed=1)
+        feed(t3, '10 X 0', '20 X 1', '30 H 2', '40 CCZ 0, 1, 2', '50 H 2', '60 CS 0, 1', '70 CSX 0, 2',
+             '80 RZX 0.4, 0, 1', 'RUN')
+        qc = QuantumCircuit(3)
+        qc.x([0, 1])
+        qc.h(2)
+        qc.ccz(0, 1, 2)
+        qc.h(2)
+        qc.cs(0, 1)
+        qc.csx(0, 2)
+        qc.rzx(0.4, 0, 1)
+        from qiskit.quantum_info import Statevector
+        self.assertAlmostEqual(abs(np.vdot(Statevector(qc).data, t3.last_sv)), 1.0, places=9)
+
+    def test_pauli_lindblad_noise(self):
+        flip = (1 - math.exp(-2 * 0.1)) / 2                  # an X generator at rate r flips (1 - e^-2r)/2
+        t = term(1, seed=4, shots=6000)
+        out = feed(t, 'NOISE lindblad X 0.1', '10 X 0', '20 MEASURE', 'RUN')
+        self.assertIn('lindblad X:0.1', feed(t, 'NOISE INFO') + out)
+        self.assertAlmostEqual(t.last_counts.get('0', 0) / 6000, flip, delta=0.015)
+        t2 = term(2, seed=4, shots=6000)
+        feed(t2, 'NOISE lindblad XX 0.1', '10 CX 0, 1', '20 MEASURE', 'RUN')
+        self.assertAlmostEqual(t2.last_counts.get('11', 0) / 6000, flip, delta=0.015)
+        t3 = term(40, seed=4, shots=1500)                     # a live run on the stabilizer tableau
+        out = feed(t3, 'NOISE lindblad X 0.1', '10 X 0', '20 MEAS 0 -> m', '30 PRINT m;', '40 MEASURE 0', 'RUN')
+        self.assertIn('stabilizer tableau', out)
+        self.assertAlmostEqual(t3.last_counts.get('0', 0) / 1500, flip, delta=0.03)
+        for bad in ('NOISE lindblad X', 'NOISE lindblad Q 0.1', 'NOISE lindblad XYZ 0.1', 'NOISE lindblad X -1'):
+            self.assertIn('?', feed(term(1), bad), bad)
+
+
 class TestInputAcrossShots(unittest.TestCase):
 
     def test_first_shot_reads_and_later_shots_replay(self):
@@ -913,9 +971,9 @@ class TestMemoryMap(unittest.TestCase):
     def test_screen_mode_address_acts_as_screen(self):
         t = term(agent=True)
         t._poke(0xD007, 13)
-        self.assertEqual((t._canvas.mode, t._peek(0xD007)), (13, 13.0))
+        self.assertEqual((t.graphics.canvas.mode, t._peek(0xD007)), (13, 13.0))
         t._poke(0xD007, 0)
-        self.assertIsNone(t._canvas)
+        self.assertIsNone(t.graphics.canvas)
         t._poke(0xD007, 3)
         self.assertEqual((t._screen_mode, t._peek(0xD007)), (3, 3.0))
 
@@ -984,7 +1042,7 @@ class TestMemoryMap(unittest.TestCase):
         t2 = term(inputs=['3', '7=2', 'oops=', '?', 'Q'], agent=True)
         out = feed(t2, 'MONITOR')
         self.assertIn('$0007 <- 2.0', out)
-        self.assertEqual(t2._zero_page[7], 2.0)
+        self.assertEqual(t2.machine.zero_page[7], 2.0)
         self.assertIn('MONITOR OFF', out)
 
 
@@ -1143,13 +1201,13 @@ class TestQudits(unittest.TestCase):
         for text in ('?USAGE: QUDIT', '?NO QUDIT STATE', 'dimension must be 2-36', 'too large'):
             self.assertIn(text, out)
         feed(t, 'QUDIT 3 2', 'QF 0', 'QSUM 0 1')
-        np.testing.assert_allclose(np.abs(t._qsv[[0, 4, 8]]) ** 2, [1 / 3] * 3, atol=1e-12)
+        np.testing.assert_allclose(np.abs(t.qudit.sv[[0, 4, 8]]) ** 2, [1 / 3] * 3, atol=1e-12)
         out = feed(t, 'QSTATE', 'QMEASURE 300', 'QUDIT')
         self.assertIn('|11>', out)
         self.assertIn('QMEASURE (300 shots, base-3)', out)
         self.assertIn('QUDIT: 2 qudits of dimension 3', out)
         feed(t, 'QUDIT 5 1', 'QX 0 2', 'QZ 0')
-        self.assertAlmostEqual(complex(t._qsv[2]), np.exp(2j * math.pi * 2 / 5))
+        self.assertAlmostEqual(complex(t.qudit.sv[2]), np.exp(2j * math.pi * 2 / 5))
         out = feed(t, 'QX 3', 'QZ', 'QF 9', 'QSUM 0')
         for text in ('?QX ERROR', '?QZ ERROR', '?QF ERROR', '?QSUM ERROR'):
             self.assertIn(text, out)

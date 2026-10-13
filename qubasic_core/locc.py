@@ -344,7 +344,7 @@ class LOCCCommandsMixin(SimulationHost):
 
         Stored by cmd_noise when a depolarizing model is set.
         """
-        return getattr(self, '_noise_depol_p', 0.0)
+        return self.noise.depol_p
 
     def cmd_locc(self, rest: str) -> None:
         """LOCC [JOINT|SPLIT] <n1> <n2> [...] | OFF | STATUS | SHOTCAP <n> — registers that share classical bits (SPLIT) or entanglement (JOINT).
@@ -446,8 +446,8 @@ class LOCCCommandsMixin(SimulationHost):
 
         # Pre-check RAM before allocating
         mode = "JOINT" if joint else "SPLIT"
-        noise_p = getattr(self, '_noise_locc_param', 0.0)
-        noise_t = getattr(self, '_noise_locc_type', 'none')
+        noise_p = self.noise.locc_param
+        noise_t = self.noise.locc_type
         temp_eng = LOCCEngine(sizes, joint=joint, noise_param=noise_p, noise_type=noise_t)
         tot, peak = temp_eng.mem_gb()
         ram = ram_gb()
@@ -476,7 +476,7 @@ class LOCCCommandsMixin(SimulationHost):
             self.io.writeln("  Joint statevector — use SHARE for pre-shared entanglement")
         if peak > 30:
             self.io.writeln("  WARNING: large registers. Keep SHOTS low for SEND-based protocols.")
-        if self._noise_model and noise_p == 0:
+        if self.noise.model and noise_p == 0:
             self.io.writeln("  WARNING: the active noise model has no LOCC numpy form and is "
                             "ignored here; LOCC runs one depolarizing, amplitude_damping or "
                             "phase_flip channel.")

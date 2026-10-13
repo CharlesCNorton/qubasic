@@ -167,10 +167,10 @@ there is no machine code or memory address to reach. Without `DEF SEG`,
 
 | Gates | |
 |---|---|
-| one qubit | `H X Y Z S T SDG TDG SX ID` |
+| one qubit | `H X Y Z S T SDG TDG SX SXDG ID` |
 | one qubit, angles | `RX RY RZ P` (one angle), `U` (three) |
-| two qubits | `CX CZ CY CH SWAP DCX ISWAP`, `CRX CRY CRZ CP RXX RYY RZZ` (one angle) |
-| three qubits | `CCX CSWAP` |
+| two qubits | `CX CZ CY CH SWAP DCX ISWAP ECR CS CSDG CSX`, `CRX CRY CRZ CP RXX RYY RZZ RZX` (one angle) |
+| three qubits | `CCX CSWAP CCZ` |
 
 Angles come first: `RX PI/4, 0`, `CRZ theta, 0, 1`. `CTRL` and `INV` modify any
 gate, `UNITARY NAME = [[...]]` defines one from a matrix, `DEF NAME = gates`
@@ -200,8 +200,8 @@ passed.
 
 ## Simulation
 
-`METHOD automatic` (the default) runs noiseless Clifford circuits on the
-stabilizer simulator at any width, other circuits on a statevector while one
+`METHOD automatic` (the default) runs noiseless Clifford circuits (ECR, SXDG
+and RZ at multiples of π/2 included) on the stabilizer simulator at any width, other circuits on a statevector while one
 fits in the memory available (at double precision, then single), and wider
 ones as matrix product states; the summary line names the method used.
 `METHOD` also selects `statevector`, `density_matrix`, `stabilizer`,
@@ -229,6 +229,7 @@ a tableau.
 NOISE depolarizing 0.001 0.01; readout 0.02 0.03     channels joined with ;
 NOISE thermal 50e-6 70e-6 50e-9                       T1, T2 and gate time
 NOISE ADD amplitude_damping 0.01                      extend the active model
+NOISE lindblad X 0.001 ZZ 0.0005                      Pauli-Lindblad generators and rates
 MITIGATE READOUT ON                                   invert readout error on every RUN
 ZNE 1.0 ZZ 0 1 SCALES 1 3 5 FIT EXP                   zero-noise extrapolation
 ```
@@ -301,22 +302,31 @@ python tools/generate.py                    regenerate host.py's stubs and docs/
 ```
 
 The interpreter is one object, `QBasicTerminal` (`terminal.py`), assembled
-from a state container and 58 mixins, one per concern, in six layers. A module
-imports only from its own layer or the layers below it, and the same holds for
-calls through `self`: each layer has a host class in `host.py` declaring what
-its mixins may use, the attributes and methods of its own layer and the ones
-below, and each mixin derives from its layer's host, so mypy rejects a call
-into a higher layer. The few places where a lower layer must reach up, such as
-RUN printing its histogram or LOAD entering lines as if typed, are hooks: a
-method declared with a docstring at the lowest layer that calls it and
-implemented only above it. `tools/generate.py` writes the method stubs and
-places each attribute at the lowest layer that uses it.
+from a state container and 59 mixins, one per concern, in six layers. Its state
+is the program, its variables and the run settings, plus one state object per
+concern, each a dataclass beside the mixin that owns it: `files`, `screen`
+(the text screen), `graphics`, `sound`, `events` (event traps), `errors`
+(ON ERROR), `debug`, `data` (DATA and READ), `procs` (SUB and FUNCTION),
+`symbols` (declarations and types), `editor`, `noise`, `aer` (Aer's tuning
+options), `machine` (the memory map and profiler), `qudit` and `bosons`. A module imports only from its own
+layer or the layers below it, and the same holds for calls through `self`:
+each layer has a host class in `host.py` declaring what its mixins may use, the
+attributes and methods of its own layer and the ones below, and each mixin
+derives from its layer's host, so mypy rejects a call into a higher layer. The
+few places where a lower layer must reach up, such as LOAD entering lines as if
+typed or PEEK reading the memory map, are hooks: a method declared with a
+docstring at the lowest layer that calls it and implemented only above it. RUN
+is a presentation command: the simulation layer opens and runs the program and
+returns a `RunReport` saying what is left to show (the histogram, a note,
+DISPLAY's view, the logical-qubit trailer), and the RUN command shows it.
+`tools/generate.py` writes the method stubs and places each attribute at the
+lowest layer that uses it.
 
 | Layer | Modules |
 |---|---|
 | core | `host` (the layer table and hosts), `engine` (limits, result codes, errors, the I/O protocol, output and path services) |
 | language | `parser` (statement parser, compiler, catalog), `expression` (expressions, variables, formatting), `interpreter` (control flow, procedures, statements), `devices` (graphics, sound, screen, files), `editing` |
-| simulation | `simtools` (capacity, the numpy statevector engine, backends), `simulator` (RUN, circuit build, quantum statements, live runs), `noise`, `locc`, `physics` (dynamics, chemistry, qudits, bosonic modes), `machine` (settings, memory map, profiler, demos) |
+| simulation | `simtools` (capacity, the numpy statevector and stabilizer engines, backends), `circuits` (circuit build, quantum statements), `simulator` (results and how they print, RUN, live runs), `noise`, `locc`, `physics` (dynamics, chemistry, qudits, bosonic modes), `machine` (settings, memory map, profiler, demos) |
 | applications | `algorithms`, `benchmarking`, `qec` (codes, decoders, circuit-level noise), `logical` (logical qubits, lattice surgery) |
 | presentation | `display`, `analysis` |
 | composition | `terminal`, `api`, `cli` (with the browser REPL), `jupyter_kernel` |
@@ -336,7 +346,7 @@ whose docstring opens with its syntax, registered in `_CMD_WITH_ARG` or
 (`parser.py`), after which `tools/generate.py` declares it in its layer's host
 and lists it in the reference. A statement is a handler in its layer's table
 (`_LANGUAGE_STATEMENTS` in `interpreter.py`, `_QUANTUM_STATEMENTS` in
-`simulator.py`, `_CIRCUIT_STATEMENTS` in `algorithms.py`), which the terminal
+`circuits.py`, `_CIRCUIT_STATEMENTS` in `algorithms.py`), which the terminal
 merges into `_STMT_KEYWORDS`, with its line in the catalog's `STATEMENTS`.
 `tests/test_project.py` checks the layering of imports and of calls, the
 hooks, the stubs, the docstrings, the catalog's coverage of every dispatched

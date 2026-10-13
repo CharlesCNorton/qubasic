@@ -20,10 +20,8 @@ from qubasic_core.engine import (
     AMPLITUDE_THRESHOLD,
     HISTOGRAM_BAR_WIDTH,
     MAX_BLOCH_DISPLAY,
-    MAX_DISPLAY_AMPLITUDES,
     MAX_HISTOGRAM_STATES,
     MAX_STABILIZERS_SHOWN,
-    _RichTable,
 )
 from qubasic_core.host import PresentationHost
 
@@ -126,193 +124,6 @@ def _get_console() -> Console | None:
 
 class DisplayMixin(PresentationHost):
     """Display and visualization methods for the QUBASIC terminal."""
-
-    def _rich_print(self, *renderables: Any) -> None:
-        """Render rich content to a string and emit it through the IOPort.
-
-        Routing rich output through self.io (instead of straight to stdout)
-        means headless/agent callers with a custom IOPort capture tables and
-        statevectors too, and the IOPort's encoding fallback applies uniformly.
-        ANSI colour is kept only when stdout is a real terminal.
-        """
-        import io as _io
-
-        from rich.console import Console
-        buf = _io.StringIO()
-        force = bool(sys.stdout and sys.stdout.isatty())
-        Console(file=buf, highlight=False, force_terminal=force).print(*renderables)
-        self.io.write(buf.getvalue())
-
-
-    def _bit_order_note(self, display: list) -> str | None:
-        """Human-facing reminder of which bit is which qubit.
-
-        Bitstrings are little-endian (qubit 0 is the rightmost character), the
-        most common source of off-by-reverse mistakes when reading a histogram,
-        unless OPTION ENDIAN BIG flipped the display order. When the result
-        covers the whole register the positions are labelled per qubit; for a
-        measured subset only the convention is shown.
-        """
-        if not display:
-            return None
-        big = getattr(self, '_endian_big', False)
-        nbits = len(display[0][0])
-        nq = getattr(self, 'num_qubits', nbits)
-        if nbits == nq and nbits <= 16:
-            order = range(nbits) if big else range(nbits - 1, -1, -1)
-            labels = ' '.join(f'q{i}' for i in order)
-            return f"  bit order  {labels}   (qubit 0 = {'leftmost' if big else 'rightmost'})"
-        return f"  bit order  qubit 0 = {'leftmost' if big else 'rightmost'} bit"
-
-    def print_histogram(self, counts: dict[str, int]) -> None:
-        """Measurement histogram with optional rich-table formatting."""
-        total = sum(counts.values())
-        sorted_counts = sorted(counts.items(), key=lambda x: -x[1])
-        display = sorted_counts[:MAX_HISTOGRAM_STATES]
-
-        note = self._bit_order_note(display)
-        if note:
-            self.io.writeln(note)
-
-        if _RICH:
-            self._print_histogram_rich(display, sorted_counts, total)
-        else:
-            self._print_histogram_plain(display, sorted_counts, total)
-
-    def _print_histogram_rich(self, display: list, sorted_counts: list,
-                              total: int) -> None:
-        """Rich-formatted histogram with colored bars."""
-        table = _RichTable(show_header=True, header_style="bold cyan",
-                           box=None, padding=(0, 1))
-        table.add_column("State", justify="right", style="bold")
-        table.add_column("Count", justify="right")
-        table.add_column("%", justify="right")
-        table.add_column("Distribution", min_width=HISTOGRAM_BAR_WIDTH)
-
-        max_count = max(c for _, c in display) if display else 1
-        if len(sorted_counts) > MAX_HISTOGRAM_STATES:
-            self._rich_print(
-                f"\n  [dim]Showing top {MAX_HISTOGRAM_STATES} of "
-                f"{len(sorted_counts)} outcomes:[/dim]\n")
-        else:
-            self._rich_print()
-
-        for state, count in display:
-            pct = 100 * count / total
-            bar_len = int(HISTOGRAM_BAR_WIDTH * count / max_count)
-            bar = '\u2588' * bar_len
-            color = "green" if pct > 40 else "yellow" if pct > 10 else "dim"
-            table.add_row(
-                f"|{self._bits(state)}\u27E9",
-                str(count),
-                f"{pct:5.1f}%",
-                f"[{color}]{bar}[/{color}]")
-
-        if len(sorted_counts) > MAX_HISTOGRAM_STATES:
-            rest_count = sum(c for _, c in sorted_counts[MAX_HISTOGRAM_STATES:])
-            table.add_row(
-                "...", str(rest_count),
-                f"{100*rest_count/total:5.1f}%", "[dim](remaining)[/dim]")
-
-        try:
-            self._rich_print(table)
-            self._rich_print()
-        except UnicodeEncodeError:
-            self._print_histogram_plain(display, sorted_counts, total)
-
-    def _print_histogram_plain(self, display: list, sorted_counts: list,
-                               total: int) -> None:
-        """Plain-text histogram (fallback when rich is not available)."""
-        if len(sorted_counts) > MAX_HISTOGRAM_STATES:
-            self.io.writeln(f"\n  Showing top {MAX_HISTOGRAM_STATES} of {len(sorted_counts)} outcomes:\n")
-        else:
-            self.io.writeln('')
-
-        max_count = max(c for _, c in display) if display else 1
-        max_label = max(len(k) for k, _ in display) if display else 1
-
-        _theme = getattr(self, '_theme', {})
-        for state, count in display:
-            pct = 100 * count / total
-            bar_len = int(HISTOGRAM_BAR_WIDTH * count / max_count)
-            bar = '\u2588' * bar_len
-            ket = f"|{self._bits(state)}\u27E9"
-            # Colorize bar by probability
-            if _theme and sys.stdout.isatty():
-                rst = _theme.get('reset', '')
-                if pct > 40:
-                    bar = f"{_theme.get('bar_hi', '')}{bar}{rst}"
-                elif pct > 10:
-                    bar = f"{_theme.get('bar_mid', '')}{bar}{rst}"
-                else:
-                    bar = f"{_theme.get('bar_lo', '')}{bar}{rst}"
-            self.io.writeln(f"  {ket:>{max_label+3}}  {count:>6}  ({pct:5.1f}%)  {bar}")
-
-        if len(sorted_counts) > MAX_HISTOGRAM_STATES:
-            rest_count = sum(c for _, c in sorted_counts[MAX_HISTOGRAM_STATES:])
-            self.io.writeln(f"  {'...':>{max_label+3}}  {rest_count:>6}  "
-                            f"({100*rest_count/total:5.1f}%)  (remaining)")
-        self.io.writeln('')
-
-    def _print_statevector(self, sv: np.ndarray, n_qubits: int | None = None) -> None:
-        """Print the first non-zero amplitudes of the statevector (index order).
-
-        Only the shown amplitudes are formatted; the rest are counted in one
-        vectorized pass, so a large state prints in seconds.
-        """
-        from qubasic_core.simtools import nonzero_indices
-        sv = np.asarray(sv).reshape(-1)
-        n = n_qubits if n_qubits is not None else self.num_qubits
-        idx, total = nonzero_indices(sv, AMPLITUDE_THRESHOLD, MAX_DISPLAY_AMPLITUDES)
-        rows = []
-        for i in idx:
-            amp = complex(sv[int(i)])
-            rows.append((f"|{self._bits(format(int(i), f'0{n}b'))}\u27E9",
-                         f"{amp.real:+.4f}{amp.imag:+.4f}j", abs(amp) ** 2))
-        remaining = total - len(rows)
-
-        if _RICH:
-            table = _RichTable(show_header=True, header_style="bold cyan",
-                               box=None, padding=(0, 1))
-            table.add_column("State", justify="right", style="bold")
-            table.add_column("Amplitude", justify="right")
-            table.add_column("P", justify="right")
-            self._rich_print(f"\n  [bold]Statevector ({n} qubits):[/bold]")
-            for ket, amp_s, prob in rows:
-                table.add_row(ket, amp_s, f"{prob:.4f}")
-            if remaining > 0:
-                table.add_row("...", "", f"+{remaining} more")
-            try:
-                self._rich_print(table)
-                self._rich_print()
-                return
-            except UnicodeEncodeError:
-                pass  # fall through to plain-text path below
-
-        self.io.writeln(f"\n  Statevector ({n} qubits):")
-        for ket, amp_s, prob in rows:
-            self.io.writeln(f"  {ket}  {amp_s}  (P={prob:.4f})")
-        if remaining > 0:
-            self.io.writeln(f"  ... and {remaining} more non-zero amplitudes")
-        self.io.writeln('')
-
-    def _print_sv_compact(self, sv: np.ndarray) -> None:
-        """Compact statevector display for step mode (first 8 non-zero terms)."""
-        from qubasic_core.simtools import nonzero_indices
-        sv = np.asarray(sv).reshape(-1)
-        n = self.num_qubits
-        idx, _ = nonzero_indices(sv, AMPLITUDE_THRESHOLD, 9, count=False)
-        parts = []
-        for i in idx[:8]:
-            amp = complex(sv[int(i)])
-            state = self._bits(format(int(i), f'0{n}b'))
-            if abs(amp.imag) < AMPLITUDE_THRESHOLD:
-                parts.append(f"{amp.real:+.3f}|{state}\u27E9")
-            else:
-                parts.append(f"({amp.real:.2f}{amp.imag:+.2f}j)|{state}\u27E9")
-        if len(idx) > 8:
-            parts.append("...")
-        self.io.writeln(f"   |\u03C8\u27E9 = {' '.join(parts)}")
 
     def _print_probs(self, sv: np.ndarray, n_qubits: int | None = None) -> None:
         """Print the most probable outcomes with a histogram bar each."""
@@ -426,6 +237,61 @@ class DisplayMixin(PresentationHost):
             self.cmd_density()
         elif mode == 5:
             self.cmd_circuit()
+
+
+# ---------------------------------------------------------------------------
+# RUN: the layers below run the program and report; this layer shows the
+# report. The simulation layer opens the run and simulates it (or the LOCC
+# engine runs it, or LQUBITS runs it encoded, from the applications layer),
+# and the report says which histogram, note, DISPLAY view and logical-qubit
+# trailer follow.
+# ---------------------------------------------------------------------------
+
+class RunCommandMixin(PresentationHost):
+    """RUN: the stored program run by the layers below, then its report shown."""
+
+    def cmd_run(self) -> None:
+        """RUN — execute the stored program: build and simulate its circuit, or run
+        it live (shot by shot) when it reads measurement results, or on the LOCC
+        or encoded engines in those modes, then show the histogram (and any
+        picture the program drew on a graphics SCREEN)."""
+        self._gfx_begin_run()
+        self.screen.col = 0
+        self.sound.events.clear()
+        self.sound.play = type(self.sound.play)()
+        try:
+            self._run_and_show()
+        finally:
+            for handle in list(self.files.handles):     # a program's end closes its files
+                self._close_file(handle)
+            self._gfx_present()
+            if self.sound.events and self._on_terminal():
+                self.io.writeln(f"({self._sound_seconds():.2f} s of sound: SAVEWAV <file> saves it)")
+
+    def _run_and_show(self) -> None:
+        if self.locc_mode:
+            self._locc_run()
+            return
+        opened = self._start_run()
+        if opened is None:
+            return
+        t0, lines = opened
+        if self._logical_mode and self._logical_mode.get('encoded') and self._run_encoded(t0):
+            return
+        report = self._simulate(t0, lines)
+        if report is None:
+            return
+        if report.logical:
+            self._logical_trailer()
+        if report.counts:
+            self.print_histogram(report.counts)
+            self._mitigate_after_run()
+            if report.display:
+                self._auto_display()
+        elif report.note:
+            self.io.writeln(report.note)
+        if report.bell:
+            self.io.write('\a')
 
 
 # ---------------------------------------------------------------------------
@@ -632,20 +498,6 @@ class StateDisplayMixin(PresentationHost):
             self.io.writeln(f"    {name:>10}  {count:>4}  {bar}")
         self.io.writeln('')
 
-    def _locc_state(self, rest: str = '') -> None:
-        reg = rest.strip().upper() if rest else ''
-        if self._locc_engine.joint:
-            if not reg or reg in self._locc_engine.names:
-                sizes = '+'.join(str(s) for s in self._locc_engine.sizes)
-                self.io.writeln(f"\n  Joint statevector ({sizes} qubits):")
-                self._print_statevector(self._locc_engine.sv, self._locc_engine.n_total)
-        else:
-            show = [reg] if reg and reg in self._locc_engine.names else self._locc_engine.names
-            for name in show:
-                size = self._locc_engine.get_size(name)
-                self.io.writeln(f"\n  Register {name} ({size} qubits):")
-                self._print_statevector(self._locc_engine.svs[name], size)
-
     def _locc_bloch(self, rest: str) -> None:
         m = re.match(r'([A-Z])\s*(\d*)', rest.strip(), re.IGNORECASE) if rest.strip() else None
         if m and m.group(1):
@@ -743,7 +595,7 @@ class VisualizeMixin(PresentationHost):
     def cmd_draw(self, rest: str) -> None:
         """DRAW [qubit] — braille Bloch sphere; on a graphics SCREEN, DRAW "commands"
         runs QBASIC's DRAW macro language instead."""
-        if self._canvas is not None and rest.strip() and not rest.strip().isdigit():
+        if self.graphics.canvas is not None and rest.strip() and not rest.strip().isdigit():
             self._gfx_draw('DRAW ' + rest, self.variables)
             return
         sv = self._active_sv
@@ -932,8 +784,8 @@ class SweepMixin(PresentationHost):
         backend_opts = {'method': self.sim_method}
         if self.sim_device == 'GPU':
             backend_opts['device'] = 'GPU'
-        if self._noise_model:
-            backend_opts['noise_model'] = self._noise_model
+        if self.noise.model:
+            backend_opts['noise_model'] = self.noise.model
         backend = AerSimulator(**backend_opts)
         sweep_xs: list[float] = []
         sweep_ys: list[float] = []

@@ -286,8 +286,8 @@ class TestHostContract(unittest.TestCase):
 
     def test_the_statement_table_merges_every_layer(self):
         from qubasic_core.algorithms import PrimitivesMixin
+        from qubasic_core.circuits import QuantumStatementMixin
         from qubasic_core.interpreter import StatementMixin
-        from qubasic_core.simulator import QuantumStatementMixin
         tables = (StatementMixin._LANGUAGE_STATEMENTS, QuantumStatementMixin._QUANTUM_STATEMENTS,
                   PrimitivesMixin._CIRCUIT_STATEMENTS)
         merged = QBasicTerminal._STMT_KEYWORDS
@@ -467,7 +467,7 @@ class TestExamples(unittest.TestCase):
         t = run('grover3.qb')
         self.assertGreater(t.last_counts.get('101', 0) / sum(t.last_counts.values()), 0.85)
         t = run('graphics.bas')
-        self.assertIsNotNone(t._canvas)
+        self.assertIsNotNone(t.graphics.canvas)
         self.assertIn('colour at the centre:', t.io.text)
 
 

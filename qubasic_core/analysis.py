@@ -250,7 +250,7 @@ class AnalysisMixin(PresentationHost):
         # 4. Histogram vs the state's distribution (chi-square), when the counts
         #    cover the whole register of a noiseless run.
         counts = self.last_counts
-        noisy = self._noise_model is not None or bool(self._qubit_noise)
+        noisy = self.noise.model is not None or bool(self.noise.per_qubit)
         if counts and not self.locc_mode:
             nbits = len(next(iter(counts)))
             if noisy:
@@ -331,7 +331,7 @@ class AnalysisMixin(PresentationHost):
             named = {'|0>', '|1>', '|+>', '|->', '|BELL>', '|GHZ>',
                      '|GHZ3>', '|GHZ4>', '|W>', '|W3>'}
             if target.upper() in named:
-                from qubasic_core.simulator import _resolve_named_state
+                from qubasic_core.circuits import _resolve_named_state
                 tvec = _resolve_named_state(target.upper(), n)
             else:
                 tvec = np.array(self._parse_matrix(target), dtype=np.complex128).ravel()
@@ -425,12 +425,12 @@ class AnalysisMixin(PresentationHost):
         try:
             qc, _ = self.build_circuit()
             from qiskit.quantum_info import PTM, Operator, SuperOp
-            if self._noise_model is not None:
+            if self.noise.model is not None:
                 from qiskit import transpile
                 from qiskit_aer import AerSimulator
                 qc2 = qc.copy()
                 qc2.save_superop()
-                b = AerSimulator(method='superop', noise_model=self._noise_model)
+                b = AerSimulator(method='superop', noise_model=self.noise.model)
                 res = b.run(transpile(qc2, b, optimization_level=self._transpile_opt_level)).result()
                 ptm = PTM(SuperOp(np.asarray(res.data()['superop'])))
                 src = 'noisy channel'
@@ -469,7 +469,7 @@ class AnalysisMixin(PresentationHost):
         gate_method = {'H': 'h', 'S': 's'}
         from qiskit import QuantumCircuit, transpile
         from qiskit_aer import AerSimulator
-        backend = AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
+        backend = AerSimulator(noise_model=self.noise.model) if self.noise.model else AerSimulator()
         shots = max(200, self.shots)
         if self._seed is not None:
             np.random.seed(self._seed)
@@ -732,10 +732,10 @@ class ExportMixin(PresentationHost):
         path = checked
         if not path.lower().endswith('.png'):
             path += '.png'
-        default = 'screen' if self._canvas is not None else ('hist' if self.last_counts else 'circuit')
+        default = 'screen' if self.graphics.canvas is not None else ('hist' if self.last_counts else 'circuit')
         what = parts[1].lower() if len(parts) > 1 else default
         if what == 'screen':
-            if self._canvas is None:
+            if self.graphics.canvas is None:
                 self.io.writeln("?NO GRAPHICS SCREEN — SCREEN 12 (or 1, 2, 7-13) first")
                 return
             try:
@@ -1016,7 +1016,7 @@ class AssistMixin(PresentationHost):
         parts = [f"{self.num_qubits}q"]
         if self.locc_mode:
             parts.append("LOCC")
-        if self._noise_model:
+        if self.noise.model:
             parts.append("noisy")
         return ' '.join(parts) + ' ] '
 
@@ -1089,7 +1089,7 @@ class AssistMixin(PresentationHost):
             self.io.writeln("?USAGE: DIFF <slot>")
             return
         slot = int(rest.strip())
-        other = self._program_slots.get(slot, {})
+        other = self.editor.slots.get(slot, {})
         if not other:
             self.io.writeln(f"?BANK {slot} is empty")
             return

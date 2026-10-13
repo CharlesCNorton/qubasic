@@ -26,7 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "qiskit>=1.0",
-    "qiskit-aer>=0.13",
+    "qiskit-aer>=0.15",
     "numpy>=1.24",
     "scipy>=1.5",
     "rustworkx>=0.14",

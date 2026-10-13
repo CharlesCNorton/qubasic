@@ -668,29 +668,37 @@ def _match_paren(text: str, start: int) -> int:
     raise ValueError("unbalanced parentheses")
 
 
+@dataclass
+class GraphicsState:
+    """A graphics SCREEN's state: the canvas, GET's sprites, the text cursor on
+    the canvas, the VGA palette ports, and how this run's frames are drawn."""
+
+    canvas: Canvas | None = None                                              # the SCREEN's pixels, None in text mode
+    sprites: dict[tuple[str, int], np.ndarray] = field(default_factory=dict)  # GET's blocks by (array, index)
+    row: int = 1                                                              # the text cursor on a graphics screen,
+    col: int = 1                                                              # counted from 1 as LOCATE counts
+    dac_index: int = 0                                                        # the VGA palette ports' state
+    dac_read: int = 0
+    dac_rgb: list[int] = field(default_factory=list)
+    live: bool = False                                                        # this run draws its frames in place
+    frame_at: float = 0.0                                                     # when the last frame was drawn
+    shown: tuple[bytes, bytes] | None = None                                  # that frame's pixels and palette
+    run_start: float = 0.0
+
+
 class GraphicsMixin(LanguageHost):
     """QBASIC's graphics statements on a Canvas."""
 
     def _init_graphics(self) -> None:
-        self._canvas: Canvas | None = None
-        self._sprites: dict[tuple[str, int], np.ndarray] = {}
-        self._gfx_row = 1                           # the text cursor on a graphics screen,
-        self._gfx_col = 1                           # counted from 1 as LOCATE counts
+        self.graphics = GraphicsState()
         self._def_seg: int | None = None            # DEF SEG: the segment PEEK and POKE address
-        self._dac_index = 0                         # the VGA palette ports' state
-        self._dac_read = 0
-        self._dac_rgb: list[int] = []
-        self._gfx_live = False                      # this run draws its frames in place
-        self._gfx_frame_at = 0.0                    # when the last frame was drawn
-        self._gfx_shown: tuple[bytes, bytes] | None = None   # that frame's pixels and palette
-        self._gfx_run_start = 0.0
 
     # ── helpers ─────────────────────────────────────────────────────────
 
     def _gfx(self) -> Canvas:
-        if self._canvas is None:
+        if self.graphics.canvas is None:
             raise ValueError("ILLEGAL FUNCTION CALL: graphics need SCREEN 1, 2 or 7-13")
-        return self._canvas
+        return self.graphics.canvas
 
     def _gfx_num(self, expr: str, run_vars: MutableMapping[str, Any]) -> float:
         return float(self._eval_with_vars(expr.strip(), run_vars))
@@ -731,26 +739,26 @@ class GraphicsMixin(LanguageHost):
     def _gfx_screen(self, mode: int) -> None:
         """Open a graphics mode with a cleared screen (SCREEN 0 closes it)."""
         if mode == 0:
-            self._canvas = None
+            self.graphics.canvas = None
             return
-        self._canvas = Canvas(mode)
-        self._sprites.clear()
-        self._gfx_row = self._gfx_col = 1
+        self.graphics.canvas = Canvas(mode)
+        self.graphics.sprites.clear()
+        self.graphics.row = self.graphics.col = 1
 
     def _gfx_begin_run(self) -> None:
-        if self._canvas is not None:
-            self._canvas.drawn = False
-        self._gfx_live = False
-        self._gfx_shown = None
-        self._gfx_run_start = time.monotonic()
+        if self.graphics.canvas is not None:
+            self.graphics.canvas.drawn = False
+        self.graphics.live = False
+        self.graphics.shown = None
+        self.graphics.run_start = time.monotonic()
 
     def _gfx_present(self) -> None:
         """Show the picture a run drew (on a terminal in colour): in place when
         the run drew frames, else after its output."""
-        c = self._canvas
+        c = self.graphics.canvas
         if c is None or not c.drawn or isinstance(self.io, NullIO):
             return
-        if self._gfx_live:
+        if self.graphics.live:
             self._gfx_draw_in_place(c)
             return
         self._gfx_show()
@@ -761,20 +769,20 @@ class GraphicsMixin(LanguageHost):
         program waits for time or a key (start), or after half a second of
         running, and come at most 15 times a second unless the program is
         about to wait (force)."""
-        c = self._canvas
+        c = self.graphics.canvas
         if c is None or not c.drawn or getattr(self.io, 'replay', False) or not self._on_terminal():
             return
         now = time.monotonic()
-        if not (self._gfx_live or start or now - self._gfx_run_start >= 0.5):
+        if not (self.graphics.live or start or now - self.graphics.run_start >= 0.5):
             return
-        if self._gfx_live and not force and now - self._gfx_frame_at < 1 / 15:
+        if self.graphics.live and not force and now - self.graphics.frame_at < 1 / 15:
             return
         frame = (c.pixels.tobytes(), np.asarray(c.palette).tobytes())
-        if frame == self._gfx_shown:
+        if frame == self.graphics.shown:
             return
         self._gfx_draw_in_place(c)
-        self._gfx_shown = frame
-        self._gfx_frame_at = now
+        self.graphics.shown = frame
+        self.graphics.frame_at = now
 
     def _gfx_draw_in_place(self, c: Canvas) -> None:
         """Draw the screen at the top of the terminal and put the cursor back
@@ -783,9 +791,9 @@ class GraphicsMixin(LanguageHost):
         cols = min(160, shutil.get_terminal_size((100, 40)).columns - 1)
         rows = [f"SCREEN {c.mode} ({c.width}x{c.height}, {c.colors} colours):"]
         rows += c.text_rows(max(8, cols), color=True)
-        if not self._gfx_live:
+        if not self.graphics.live:
             self.io.write('\n' * len(rows))
-            self._gfx_live = True
+            self.graphics.live = True
         self.io.write('\x1b7\x1b[H' + ('\x1b[K\n').join(rows) + '\x1b[K\x1b8')
 
     def _gfx_show(self, cols: int | None = None) -> None:
@@ -801,7 +809,7 @@ class GraphicsMixin(LanguageHost):
         """Draw printed text on the graphics screen at its text cursor, wrapping
         at the right edge and scrolling the screen up past the bottom row, as
         QBASIC prints on a graphics SCREEN."""
-        c = self._canvas
+        c = self.graphics.canvas
         if c is None:
             return
         cols, rows, _ = c.text_grid()
@@ -811,21 +819,21 @@ class GraphicsMixin(LanguageHost):
                 continue
             if ch in '\r\a':
                 continue
-            if self._gfx_col > cols:
+            if self.graphics.col > cols:
                 self._gfx_newline(rows)
-            c.draw_char(ch, self._gfx_col - 1, self._gfx_row - 1)
-            self._gfx_col += 1
+            c.draw_char(ch, self.graphics.col - 1, self.graphics.row - 1)
+            self.graphics.col += 1
         if newline:
             self._gfx_newline(rows)
 
     def _gfx_newline(self, rows: int) -> None:
-        self._gfx_col = 1
-        self._gfx_row += 1
-        bottom = min(self._text_bottom, rows)
-        if self._gfx_row > bottom:
-            assert self._canvas is not None
-            self._canvas.scroll_text(self._text_top, bottom)
-            self._gfx_row = bottom
+        self.graphics.col = 1
+        self.graphics.row += 1
+        bottom = min(self.screen.bottom, rows)
+        if self.graphics.row > bottom:
+            assert self.graphics.canvas is not None
+            self.graphics.canvas.scroll_text(self.screen.top, bottom)
+            self.graphics.row = bottom
 
     # ── memory, ports and the BIOS clock ────────────────────────────────
 
@@ -851,7 +859,7 @@ class GraphicsMixin(LanguageHost):
             cell, attr = divmod(offset, 2)
             row, col = divmod(cell, 80)
             if 0 <= row < 25:
-                return self._text_attr[row][col] if attr else ord(self._text_screen[row][col])
+                return self.screen.attrs[row][col] if attr else ord(self.screen.cells[row][col])
             return 0
         if 0x46C <= linear <= 0x46F:                     # BIOS ticks since midnight
             ticks = int(self._seconds_since_midnight() * 18.2065)
@@ -872,16 +880,16 @@ class GraphicsMixin(LanguageHost):
             row, col = divmod(cell, 80)
             if 0 <= row < 25:
                 if attr:
-                    self._text_attr[row][col] = value
+                    self.screen.attrs[row][col] = value
                 else:
-                    self._text_screen[row][col] = chr(value)
+                    self.screen.cells[row][col] = chr(value)
                     if self._on_terminal() and not getattr(self.io, 'replay', False):
                         self.io.write(f'\x1b7\x1b[{row + 1};{col + 1}H{chr(value)}\x1b8')
 
     def _video13(self) -> Canvas | None:
         """SCREEN 13's canvas, whose pixels are the bytes at &HA000; in other
         modes those bytes read 0 and take no writes."""
-        c = self._canvas
+        c = self.graphics.canvas
         return c if c is not None and c.mode == 13 else None
 
     @staticmethod
@@ -899,13 +907,13 @@ class GraphicsMixin(LanguageHost):
             phase = (time.monotonic() * 70) % 1
             return 9 if phase < 0.15 else 0
         if p == 0x3C9:
-            c = self._canvas
-            entry = self._dac_read // 3
+            c = self.graphics.canvas
+            entry = self.graphics.dac_read // 3
             rgb = c.palette[entry] if c is not None and entry < len(c.palette) else (0, 0, 0)
-            self._dac_read += 1
-            return round(rgb[(self._dac_read - 1) % 3] * 63 / 255)
+            self.graphics.dac_read += 1
+            return round(rgb[(self.graphics.dac_read - 1) % 3] * 63 / 255)
         if p == 0x60:
-            key = self._key_buffer[-1] if self._key_buffer else ''
+            key = self.events.key_buffer[-1] if self.events.key_buffer else ''
             return ord(key[-1]) if key.startswith('\x00') else 0
         return 0
 
@@ -922,18 +930,18 @@ class GraphicsMixin(LanguageHost):
         port = int(self._eval_with_vars(parts[0], run_vars))
         value = int(self._eval_with_vars(parts[1], run_vars)) & 0xFF
         if port == 0x3C8:
-            self._dac_index, self._dac_rgb = value, []
+            self.graphics.dac_index, self.graphics.dac_rgb = value, []
         elif port == 0x3C7:
-            self._dac_read = value * 3
+            self.graphics.dac_read = value * 3
         elif port == 0x3C9:
-            self._dac_rgb.append(value & 63)
-            if len(self._dac_rgb) == 3:
-                c = self._canvas
-                if c is not None and self._dac_index < len(c.palette):
-                    r, g, b = (round(v * 255 / 63) for v in self._dac_rgb)
-                    c.palette[self._dac_index] = (r, g, b)
+            self.graphics.dac_rgb.append(value & 63)
+            if len(self.graphics.dac_rgb) == 3:
+                c = self.graphics.canvas
+                if c is not None and self.graphics.dac_index < len(c.palette):
+                    r, g, b = (round(v * 255 / 63) for v in self.graphics.dac_rgb)
+                    c.palette[self.graphics.dac_index] = (r, g, b)
                     c.drawn = True
-                self._dac_index, self._dac_rgb = (self._dac_index + 1) & 0xFF, []
+                self.graphics.dac_index, self.graphics.dac_rgb = (self.graphics.dac_index + 1) & 0xFF, []
         return True
 
     def _port_wait(self, port: int, mask: int, xor: int = 0) -> None:
@@ -1002,11 +1010,11 @@ class GraphicsMixin(LanguageHost):
         if row is not None:
             if not 1 <= row <= rows:
                 raise ValueError(f"ILLEGAL FUNCTION CALL: LOCATE row {row} (1-{rows})")
-            self._gfx_row = row
+            self.graphics.row = row
         if col is not None:
             if not 1 <= col <= cols:
                 raise ValueError(f"ILLEGAL FUNCTION CALL: LOCATE column {col} (1-{cols})")
-            self._gfx_col = col
+            self.graphics.col = col
 
     def cmd_show(self, rest: str = '') -> None:
         """SHOW [columns] — draw the graphics screen in the terminal."""
@@ -1105,15 +1113,15 @@ class GraphicsMixin(LanguageHost):
             return False
         vp = re.match(r'\s*VIEW\s+PRINT\b\s*(?:(.+?)\s+TO\s+(.+))?$', stmt, re.IGNORECASE)
         if vp:
-            rows = self._canvas.text_grid()[1] if self._canvas is not None else 25
+            rows = self.graphics.canvas.text_grid()[1] if self.graphics.canvas is not None else 25
             if vp.group(1) is None:
-                self._text_top, self._text_bottom = 1, rows
+                self.screen.top, self.screen.bottom = 1, rows
             else:
                 top = int(self._eval_with_vars(vp.group(1), run_vars))
                 bottom = int(self._eval_with_vars(vp.group(2), run_vars))
                 if not 1 <= top <= bottom <= rows:
                     raise ValueError(f"ILLEGAL FUNCTION CALL: VIEW PRINT {top} TO {bottom}")
-                self._text_top, self._text_bottom = top, bottom
+                self.screen.top, self.screen.bottom = top, bottom
             return True
         c = self._gfx()
         pos = m.end()
@@ -1206,7 +1214,7 @@ class GraphicsMixin(LanguageHost):
             raise ValueError("SYNTAX ERROR: GET (x1, y1)-(x2, y2), array")
         name, index = self._gfx_array_target(fields[0], run_vars)
         block = c.get_block(x1, y1, x2, y2)
-        self._sprites[(name.upper(), index)] = block
+        self.graphics.sprites[(name.upper(), index)] = block
         if name in self.arrays and len(self.arrays[name]) >= 2:
             h, w = block.shape
             self.arrays[name][0], self.arrays[name][1] = float(w), float(h)
@@ -1225,7 +1233,7 @@ class GraphicsMixin(LanguageHost):
         action = fields[1].strip().upper() if len(fields) > 1 and fields[1].strip() else 'XOR'
         if action not in _PUT_ACTIONS:
             raise ValueError(f"SYNTAX ERROR: PUT action {action}")
-        block = self._sprites.get((name.upper(), index))
+        block = self.graphics.sprites.get((name.upper(), index))
         if block is None:
             raise ValueError(f"ILLEGAL FUNCTION CALL: {name} holds no image (use GET first)")
         c.put_block(x, y, block, action)
@@ -1582,22 +1590,30 @@ class Speaker:
             winsound.PlaySound(None, winsound.SND_PURGE)
 
 
+@dataclass
+class SoundState:
+    """PLAY, SOUND and BEEP: PLAY's settings, the notes this run made, whether
+    they sound (AUDIO), the speaker, and the background music queue on the
+    clock's time."""
+
+    play: PlayState = field(default_factory=lambda: PlayState())           # octave, length, tempo, style
+    events: list[tuple[float, float]] = field(default_factory=list)        # (frequency, seconds), for SAVEWAV
+    audio: bool = True                                                     # AUDIO ON | OFF
+    speaker: Speaker = field(default_factory=lambda: Speaker())
+    queue: list[tuple[float, float, float]] = field(default_factory=list)  # background music: (frequency, start, end)
+    clock: Callable[[], float] = time.monotonic
+
+
 class SoundMixin(LanguageHost):
     """PLAY, SOUND and BEEP: played at a terminal, gathered for SAVEWAV."""
 
     def _init_sound(self) -> None:
-        self._play_state = PlayState()
-        self._sound_events: list[tuple[float, float]] = []
-        self._audio = True                       # AUDIO ON | OFF
-        self._speaker = Speaker()
-        # The background music queue: (frequency, start, end) on _clock's time.
-        self._bg_queue: list[tuple[float, float, float]] = []
-        self._clock: Callable[[], float] = time.monotonic
+        self.sound = SoundState()
 
     def _audio_on(self) -> bool:
         """Whether sound plays through the speaker: AUDIO ON, at an interactive
         terminal, outside agent mode and the replayed shots of a live run."""
-        return (self._audio and self._on_terminal() and not self.agent_mode
+        return (self.sound.audio and self._on_terminal() and not self.agent_mode
                 and not getattr(self.io, 'replay', False))
 
     def _sound_out(self, events: list[tuple[float, float]], background: bool) -> None:
@@ -1605,40 +1621,40 @@ class SoundMixin(LanguageHost):
         hold the program until they end (MF); off the speaker only the
         background queue's timing is kept, for ON PLAY."""
         if background:
-            now = self._clock()
-            self._bg_queue = [e for e in self._bg_queue if e[2] > now]
-            start = self._bg_queue[-1][2] if self._bg_queue else now
+            now = self.sound.clock()
+            self.sound.queue = [e for e in self.sound.queue if e[2] > now]
+            start = self.sound.queue[-1][2] if self.sound.queue else now
             for freq, seconds in events:
-                self._bg_queue.append((freq, start, start + seconds))
+                self.sound.queue.append((freq, start, start + seconds))
                 start += seconds
             if self._audio_on():
-                self._speaker.play(synthesize([(f, e - max(s, now)) for f, s, e in self._bg_queue]),
+                self.sound.speaker.play(synthesize([(f, e - max(s, now)) for f, s, e in self.sound.queue]),
                                    wait=False)
             return
         if not self._audio_on() or not events:
             return
         samples = synthesize(events)
-        if not self._speaker.play(samples, wait=True):
+        if not self.sound.speaker.play(samples, wait=True):
             time.sleep(len(samples) / SAMPLE_RATE)
 
     def _bg_remaining(self) -> int:
         """Notes still to play in the background music queue."""
-        now = self._clock()
-        return sum(1 for freq, _, end in self._bg_queue if end > now and freq > 0)
+        now = self.sound.clock()
+        return sum(1 for freq, _, end in self.sound.queue if end > now and freq > 0)
 
     def cmd_audio(self, rest: str = '') -> None:
         """AUDIO [ON | OFF] — play PLAY, SOUND and BEEP through the speaker at an interactive terminal (on by default), or only gather them for SAVEWAV; no argument shows the setting."""
         arg = rest.strip().upper()
         if arg in ('ON', 'OFF'):
-            self._audio = arg == 'ON'
+            self.sound.audio = arg == 'ON'
         elif arg:
             self.io.writeln("?USAGE: AUDIO [ON | OFF]")
             return
-        where = '' if self._speaker.available() else ' (no audio player found)'
-        self.io.writeln(f"AUDIO {'ON' if self._audio else 'OFF'}{where}")
+        where = '' if self.sound.speaker.available() else ' (no audio player found)'
+        self.io.writeln(f"AUDIO {'ON' if self.sound.audio else 'OFF'}{where}")
 
     def _sound_seconds(self) -> float:
-        return sum(seconds for _, seconds in self._sound_events)
+        return sum(seconds for _, seconds in self.sound.events)
 
     def _stmt_play(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
         """PLAY string: queue its notes."""
@@ -1651,9 +1667,9 @@ class SoundMixin(LanguageHost):
         text = self._safe_eval(m.group(1), extra_ns=run_vars)
         if not isinstance(text, str):
             raise ValueError("TYPE MISMATCH: PLAY takes a string")
-        events = parse_play(text, self._play_state)
-        self._sound_events.extend(events)
-        self._sound_out(events, self._play_state.background)
+        events = parse_play(text, self.sound.play)
+        self.sound.events.extend(events)
+        self._sound_out(events, self.sound.play.background)
         return True
 
     def _stmt_sound(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
@@ -1669,12 +1685,12 @@ class SoundMixin(LanguageHost):
         if not (37 <= freq <= 32767) or not 0 <= ticks <= 65535:
             raise ValueError(f"ILLEGAL FUNCTION CALL: SOUND {freq:g}, {ticks:g}")
         tone = (0.0 if freq >= 32767 else freq, ticks / TICKS_PER_SECOND)
-        self._sound_events.append(tone)
-        self._sound_out([tone], self._play_state.background)
+        self.sound.events.append(tone)
+        self._sound_out([tone], self.sound.play.background)
         return True
 
     def _sound_beep(self) -> None:
-        self._sound_events.append((800.0, 0.25))
+        self.sound.events.append((800.0, 0.25))
         self._sound_out([(800.0, 0.25)], False)
 
     def cmd_savewav(self, rest: str) -> None:
@@ -1693,38 +1709,46 @@ class SoundMixin(LanguageHost):
         if checked is None:
             return
         path = checked if checked.lower().endswith('.wav') else checked + '.wav'
-        if not self._sound_events:
+        if not self.sound.events:
             self.io.writeln("?NO SOUND — PLAY, SOUND or BEEP first")
             return
         try:
             with open(path, 'wb') as fh:
-                fh.write(wav_bytes(synthesize(self._sound_events)))
+                fh.write(wav_bytes(synthesize(self.sound.events)))
         except OSError as e:
             self.io.writeln(f"?SAVEWAV ERROR: {e}")
             return
         self.io.writeln(f"SAVED {self._sound_seconds():.2f} s of sound to {path}")
         if len(parts) > 1 and parts[1].upper() == 'CLEAR':
-            self._sound_events.clear()
+            self.sound.events.clear()
 
 
 # ---------------------------------------------------------------------------
 # QUBASIC screen control — SCREEN, COLOR, CLS, LOCATE, PLAY, prompt.
 # ---------------------------------------------------------------------------
 
+@dataclass
+class TextScreen:
+    """QBASIC's 80x25 text screen, kept beside the terminal for SCREEN(), CSRLIN
+    and the text video memory at &HB800: its characters and attributes, the
+    cursor, the rows VIEW PRINT scrolls, and the COLOR codes."""
+
+    cells: list[list[str]] = field(default_factory=lambda: [[' '] * 80 for _ in range(25)])  # characters by row
+    attrs: list[list[int]] = field(default_factory=lambda: [[7] * 80 for _ in range(25)])    # attributes by row
+    row: int = 1                                                                             # cursor row (CSRLIN), counted from 1
+    col: int = 0                                                                             # cursor column (POS), counted from 0
+    top: int = 1                                                                             # VIEW PRINT: the first row that scrolls
+    bottom: int = 25                                                                         # and the last
+    fg: str = ''                                                                             # COLOR foreground escape
+    bg: str = ''                                                                             # COLOR background escape
+
+
 class ScreenMixin(LanguageHost):
     """Screen control commands for QBasicTerminal."""
 
     def _init_screen(self) -> None:
-        self._color_fg: str = ''
-        self._color_bg: str = ''
+        self.screen = TextScreen()
         self._prompt: str = '] '
-        # QBASIC's 80x25 text screen, kept beside the terminal for SCREEN(),
-        # CSRLIN and the text video memory at &HB800; VIEW PRINT sets the rows
-        # that scroll.
-        self._text_screen: list[list[str]] = [[' '] * 80 for _ in range(25)]
-        self._text_attr: list[list[int]] = [[7] * 80 for _ in range(25)]
-        self._print_row = 1
-        self._text_top, self._text_bottom = 1, 25
 
     def _text_put(self, text: str, newline: bool, col: int) -> None:
         """Copy printed text onto the text screen from column col (counted
@@ -1738,34 +1762,34 @@ class ScreenMixin(LanguageHost):
                     continue
             if ch in '\r\a':
                 continue
-            self._text_screen[self._print_row - 1][col] = ch
+            self.screen.cells[self.screen.row - 1][col] = ch
             col += 1
         if newline:
             self._text_newline()
 
     def _text_newline(self) -> None:
-        self._print_row += 1
-        if self._print_row > self._text_bottom:
-            top, bottom = self._text_top - 1, self._text_bottom
-            self._text_screen[top:bottom] = self._text_screen[top + 1:bottom] + [[' '] * 80]
-            self._text_attr[top:bottom] = self._text_attr[top + 1:bottom] + [[7] * 80]
-            self._print_row = self._text_bottom
+        self.screen.row += 1
+        if self.screen.row > self.screen.bottom:
+            top, bottom = self.screen.top - 1, self.screen.bottom
+            self.screen.cells[top:bottom] = self.screen.cells[top + 1:bottom] + [[' '] * 80]
+            self.screen.attrs[top:bottom] = self.screen.attrs[top + 1:bottom] + [[7] * 80]
+            self.screen.row = self.screen.bottom
 
     def _text_clear(self) -> None:
-        for r in range(self._text_top - 1, self._text_bottom):
-            self._text_screen[r] = [' '] * 80
-            self._text_attr[r] = [7] * 80
-        self._print_row = self._text_top
+        for r in range(self.screen.top - 1, self.screen.bottom):
+            self.screen.cells[r] = [' '] * 80
+            self.screen.attrs[r] = [7] * 80
+        self.screen.row = self.screen.top
 
     def _csrlin(self) -> int:
         """CSRLIN: the cursor's row."""
-        return self._gfx_row if self._canvas is not None else self._print_row
+        return self.graphics.row if self.graphics.canvas is not None else self.screen.row
 
     def _screen_fn(self, row: float, col: float, colorflag: float = 0) -> int:
         """SCREEN(row, column[, 1]): the character code at a text position,
         or with 1 its colour attribute."""
         r, c = int(row), int(col)
-        canvas = self._canvas
+        canvas = self.graphics.canvas
         if canvas is not None:
             cols, rows, _ = canvas.text_grid()
             if not (1 <= r <= rows and 1 <= c <= cols):
@@ -1773,7 +1797,7 @@ class ScreenMixin(LanguageHost):
             return canvas.fg if colorflag else canvas.char_at(c - 1, r - 1)
         if not (1 <= r <= 25 and 1 <= c <= 80):
             raise ValueError(f"ILLEGAL FUNCTION CALL: SCREEN({r}, {c})")
-        return self._text_attr[r - 1][c - 1] if colorflag else ord(self._text_screen[r - 1][c - 1])
+        return self.screen.attrs[r - 1][c - 1] if colorflag else ord(self.screen.cells[r - 1][c - 1])
 
     _DISPLAY_NAMES = {0: 'text', 1: 'histogram', 2: 'statevector', 3: 'Bloch',
                       4: 'density', 5: 'circuit'}
@@ -1785,7 +1809,7 @@ class ScreenMixin(LanguageHost):
         text (0); 3-5 also choose how RUN shows results, as DISPLAY does."""
         arg = rest.split(',')[0].strip()
         if not arg:
-            canvas = self._canvas
+            canvas = self.graphics.canvas
             if canvas is not None:
                 self.io.writeln(f"SCREEN {canvas.mode} ({canvas.width}x{canvas.height}, "
                                 f"{canvas.colors} colours)")
@@ -1800,7 +1824,7 @@ class ScreenMixin(LanguageHost):
         if mode == 0 or mode in self._GRAPHICS_MODES:
             self._gfx_screen(mode)
             if mode:
-                c = self._canvas
+                c = self.graphics.canvas
                 assert c is not None
                 self.io.writeln(f"SCREEN {mode} ({c.width}x{c.height}, {c.colors} colours)")
             else:
@@ -1833,7 +1857,7 @@ class ScreenMixin(LanguageHost):
     def cmd_color(self, rest: str) -> None:
         """COLOR foreground[, background] — set terminal colors (on a graphics
         SCREEN, the drawing and background colour numbers)."""
-        if self._canvas is not None:
+        if self.graphics.canvas is not None:
             self._stmt_color('COLOR ' + rest, self.variables)
             return
         from qubasic_core.parser import RE_COLOR
@@ -1841,25 +1865,25 @@ class ScreenMixin(LanguageHost):
         if not m:
             self.io.writeln("?USAGE: COLOR <fg>[, <bg>]")
             return
-        self._color_fg = m.group(1).lower()
-        self._color_bg = m.group(2).lower() if m.group(2) else ''
+        self.screen.fg = m.group(1).lower()
+        self.screen.bg = m.group(2).lower() if m.group(2) else ''
         # Apply via ANSI if Rich is not available
         colors = {
             'black': 30, 'red': 31, 'green': 32, 'yellow': 33,
             'blue': 34, 'magenta': 35, 'cyan': 36, 'white': 37,
         }
-        fg_code = colors.get(self._color_fg, 37)
-        if self._color_bg:
-            bg_code = colors.get(self._color_bg, 40) + 10
+        fg_code = colors.get(self.screen.fg, 37)
+        if self.screen.bg:
+            bg_code = colors.get(self.screen.bg, 40) + 10
             self.io.write(f"\033[{fg_code};{bg_code}m")
         else:
             self.io.write(f"\033[{fg_code}m")
-        self.io.writeln(f"COLOR {self._color_fg}" + (f", {self._color_bg}" if self._color_bg else ""))
+        self.io.writeln(f"COLOR {self.screen.fg}" + (f", {self.screen.bg}" if self.screen.bg else ""))
 
     def cmd_cls(self) -> None:
         """CLS — clear the screen (on a graphics SCREEN, the picture)."""
-        if self._canvas is not None:
-            self._canvas.cls()
+        if self.graphics.canvas is not None:
+            self.graphics.canvas.cls()
             return
         self.io.write('\033[2J\033[H')
 
@@ -1952,21 +1976,27 @@ def _bytes(text: str) -> bytes:
     return text.encode('latin-1', errors='replace')
 
 
+@dataclass
+class FileState:
+    """The numbered files a program has open and the printer: the handles and
+    their OPEN modes, record bookkeeping, PRINT # columns, values INPUT # read
+    and has not yet assigned, CHDIR's directory, and LPRINT's file and column."""
+
+    handles: dict[int, Any] = field(default_factory=dict)         # open files by number
+    modes: dict[int, str] = field(default_factory=dict)           # OPEN mode by number (FILEATTR)
+    records: dict[int, RecordFile] = field(default_factory=dict)  # RANDOM and BINARY bookkeeping
+    cols: dict[int, int] = field(default_factory=dict)            # PRINT # cursor column by number
+    pending: dict[int, list[str]] = field(default_factory=dict)   # values read from a line, not yet assigned
+    cwd: str = ''                                                 # CHDIR: relative to the working directory
+    printer: str | None = None                                    # LPRINT's file (None: the screen)
+    printer_col: int = 0                                          # printer column (LPOS)
+
+
 class FileIOMixin(LanguageHost):
     """Numbered file handles, as QBASIC opens them."""
 
     def _init_file_handles(self) -> None:
-        self._file_handles: dict[int, Any] = {}
-        self._record_files: dict[int, RecordFile] = {}
-        # Values read from a line by INPUT # and not yet assigned, per handle.
-        self._file_fields: dict[int, list[str]] = {}
-        self._lprint_path: str | None = None
-        self._imported_lines: set[int] = set()
-        self._file_dir = ''                       # CHDIR: relative to the working directory
-        self._file_cols: dict[int, int] = {}      # PRINT # cursor column, per handle
-        self._print_col = 0                       # screen cursor column (POS)
-        self._file_modes: dict[int, str] = {}     # OPEN mode, per handle (FILEATTR)
-        self._lprint_col = 0                      # printer column (LPOS)
+        self.files = FileState()
 
     # ── paths and numbers ───────────────────────────────────────────────
 
@@ -1980,7 +2010,7 @@ class FileIOMixin(LanguageHost):
         name = name.strip()
         if os.path.isabs(name) or re.match(r'^[A-Za-z]:', name) or name.startswith(('//', '\\')):
             raise RuntimeError(f"PERMISSION DENIED: {name} is an absolute path")
-        path = os.path.normpath(os.path.join(self._file_dir or '.', name))
+        path = os.path.normpath(os.path.join(self.files.cwd or '.', name))
         if path == '..' or path.startswith('..' + os.sep):
             raise RuntimeError(f"PERMISSION DENIED: {name} is outside the working directory")
         if self.agent_mode:
@@ -2035,7 +2065,7 @@ class FileIOMixin(LanguageHost):
         (number, path, mode) or raises with the QBASIC error."""
         rv = self.variables if run_vars is None else run_vars
         name, mode, num, reclen, enc = self._parse_open('OPEN ' + rest, rv)
-        if num in self._file_handles:
+        if num in self.files.handles:
             raise RuntimeError(f"FILE ALREADY OPEN: #{num}")
         path = self._basic_path(name, 'OPEN')
         if mode == 'INPUT' and not os.path.isfile(path):
@@ -2045,14 +2075,14 @@ class FileIOMixin(LanguageHost):
                 raise RuntimeError(f"BAD RECORD LENGTH: {reclen}")
             if not os.path.isfile(path):
                 open(path, 'wb').close()
-            self._file_handles[num] = open(path, 'r+b')
-            self._record_files[num] = RecordFile(mode, reclen)
+            self.files.handles[num] = open(path, 'r+b')
+            self.files.records[num] = RecordFile(mode, reclen)
         elif enc.lower() == 'binary':
-            self._file_handles[num] = open(path, {'INPUT': 'rb', 'OUTPUT': 'wb', 'APPEND': 'ab'}[mode])
+            self.files.handles[num] = open(path, {'INPUT': 'rb', 'OUTPUT': 'wb', 'APPEND': 'ab'}[mode])
         else:
-            self._file_handles[num] = open(path, {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a'}[mode],
+            self.files.handles[num] = open(path, {'INPUT': 'r', 'OUTPUT': 'w', 'APPEND': 'a'}[mode],
                                            encoding=enc)
-        self._file_modes[num] = mode
+        self.files.modes[num] = mode
         return num, path, mode
 
     def cmd_open(self, rest: str) -> None:
@@ -2065,11 +2095,11 @@ class FileIOMixin(LanguageHost):
         self.io.writeln(f"OPENED #{handle} ({path}, {mode_str})")
 
     def _close_file(self, handle: int) -> bool:
-        f = self._file_handles.pop(handle, None)
-        self._file_fields.pop(handle, None)
-        self._file_cols.pop(handle, None)
-        self._record_files.pop(handle, None)
-        self._file_modes.pop(handle, None)
+        f = self.files.handles.pop(handle, None)
+        self.files.pending.pop(handle, None)
+        self.files.cols.pop(handle, None)
+        self.files.records.pop(handle, None)
+        self.files.modes.pop(handle, None)
         if f is None:
             return False
         f.close()
@@ -2081,10 +2111,10 @@ class FileIOMixin(LanguageHost):
         """FILEATTR(n, 1) is file n's mode (1 INPUT, 2 OUTPUT, 4 RANDOM, 8
         APPEND, 32 BINARY); FILEATTR(n, 2) its handle number."""
         n = int(handle)
-        if n not in self._file_handles:
+        if n not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{n}")
         if int(attribute) == 1:
-            return self._FILE_MODE_NUMBERS[self._file_modes.get(n, 'OUTPUT')]
+            return self._FILE_MODE_NUMBERS[self.files.modes.get(n, 'OUTPUT')]
         if int(attribute) == 2:
             return n + 4
         raise ValueError(f"ILLEGAL FUNCTION CALL: FILEATTR({n}, {attribute})")
@@ -2096,7 +2126,7 @@ class FileIOMixin(LanguageHost):
         if not m:
             return False
         n = int(self._eval_with_vars(m.group(1), run_vars))
-        if n not in self._file_handles:
+        if n not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{n}")
         return True
 
@@ -2105,7 +2135,7 @@ class FileIOMixin(LanguageHost):
         qubit)."""
         if stmt.strip().upper() != 'RESET':
             return False
-        for handle in list(self._file_handles):
+        for handle in list(self.files.handles):
             self._close_file(handle)
         return True
 
@@ -2124,7 +2154,7 @@ class FileIOMixin(LanguageHost):
             raise ValueError("ILLEGAL FUNCTION CALL: SHELL needs a command here")
         import subprocess
         done = subprocess.run(command, shell=True, capture_output=True, text=True,
-                              cwd=os.path.join(os.getcwd(), self._file_dir) if self._file_dir else None)
+                              cwd=os.path.join(os.getcwd(), self.files.cwd) if self.files.cwd else None)
         for line in (done.stdout + done.stderr).splitlines():
             self.io.writeln(line)
         return True
@@ -2170,7 +2200,7 @@ class FileIOMixin(LanguageHost):
 
     def _close_list(self, text: str, run_vars: MutableMapping[str, Any]) -> list[int]:
         if not text.strip():
-            closed = list(self._file_handles)
+            closed = list(self.files.handles)
             for h in closed:
                 self._close_file(h)
             return closed
@@ -2214,11 +2244,11 @@ class FileIOMixin(LanguageHost):
     def _writable(self, handle: int) -> IO[Any]:
         """The open file for handle; BAD FILE NAME OR NUMBER (52) when it is
         not open and BAD FILE MODE (54) when it cannot be written."""
-        if handle not in self._file_handles:
+        if handle not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{handle} is not open")
-        if handle in self._record_files:
-            raise RuntimeError(f"BAD FILE MODE: #{handle} is a {self._record_files[handle].mode} file")
-        f = self._file_handles[handle]
+        if handle in self.files.records:
+            raise RuntimeError(f"BAD FILE MODE: #{handle} is a {self.files.records[handle].mode} file")
+        f = self.files.handles[handle]
         fmode = getattr(f, 'mode', '')
         if fmode.startswith('r') and '+' not in fmode:
             raise RuntimeError(f"BAD FILE MODE: #{handle} is open for input")
@@ -2253,19 +2283,19 @@ class FileIOMixin(LanguageHost):
         handle = self._file_number(split[0], run_vars)
         data = split[1].strip()
         um = re.match(r'USING\s+(.+)$', data, re.IGNORECASE)
-        col = self._file_cols.get(handle, 0)
+        col = self.files.cols.get(handle, 0)
         if um:
             head, *tail = _top_split(um.group(1), ';')
             text, newline = self._using_text(head.strip(), ';'.join(tail), run_vars)
         else:
             text, newline = self._format_print(data, run_vars, start=col)
-        self._file_cols[handle] = 0 if newline else next_column(col, text)
+        self.files.cols[handle] = 0 if newline else next_column(col, text)
         return self._write_to_handle(handle, text, newline)
 
     def _readable(self, handle: int) -> IO[str]:
-        if handle not in self._file_handles:
+        if handle not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{handle} is not open")
-        f = self._file_handles[handle]
+        f = self.files.handles[handle]
         fmode = getattr(f, 'mode', '')
         if fmode.startswith(('w', 'a')) and '+' not in fmode:
             raise RuntimeError(f"BAD FILE MODE: #{handle} is not open for input")
@@ -2289,7 +2319,7 @@ class FileIOMixin(LanguageHost):
         if split is None:
             raise ValueError("SYNTAX ERROR: INPUT #n, variable")
         handle = self._file_number(split[0], run_vars)
-        pending = self._file_fields.setdefault(handle, [])
+        pending = self.files.pending.setdefault(handle, [])
         from qubasic_core.interpreter import _input_fields, _parse_input_number
         for target in self._split_arg_list(split[1]):
             lv = self._lvalue(target, run_vars)
@@ -2318,7 +2348,7 @@ class FileIOMixin(LanguageHost):
         if split is None:
             raise ValueError("SYNTAX ERROR: LINE INPUT #n, variable$")
         handle = self._file_number(split[0], run_vars)
-        self._file_fields.pop(handle, None)
+        self.files.pending.pop(handle, None)
         line = self._read_text_line(handle)
         if not line:
             raise RuntimeError("INPUT PAST END OF FILE")
@@ -2349,12 +2379,12 @@ class FileIOMixin(LanguageHost):
     # ── RANDOM and BINARY files ─────────────────────────────────────────
 
     def _record_file(self, handle: int) -> tuple[Any, RecordFile]:
-        if handle not in self._file_handles:
+        if handle not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{handle} is not open")
-        info = self._record_files.get(handle)
+        info = self.files.records.get(handle)
         if info is None:
             raise RuntimeError(f"BAD FILE MODE: #{handle} is not a RANDOM or BINARY file")
-        return self._file_handles[handle], info
+        return self.files.handles[handle], info
 
     def _stmt_field(self, stmt: str, run_vars: MutableMapping[str, Any]) -> bool:
         """FIELD #n, width AS var$[, width AS var$ ...] — lay string variables
@@ -2384,7 +2414,7 @@ class FileIOMixin(LanguageHost):
         return True
 
     def _field_width(self, name: str) -> int | None:
-        for info in self._record_files.values():
+        for info in self.files.records.values():
             for var, width in info.fields:
                 if var.upper() == name.upper():
                     return width
@@ -2543,45 +2573,45 @@ class FileIOMixin(LanguageHost):
         pos = int(round(float(self._safe_eval(parts[1], extra_ns=run_vars))))
         if pos < 1:
             raise RuntimeError(f"BAD RECORD NUMBER: {pos}")
-        if handle in self._record_files:
-            self._record_files[handle].next = pos
+        if handle in self.files.records:
+            self.files.records[handle].next = pos
         else:
             self._readable(handle).seek(pos - 1)
-            self._file_fields.pop(handle, None)
+            self.files.pending.pop(handle, None)
         return True
 
     def _seek_fn(self, handle: Any) -> int:
         """SEEK(n): the next record (RANDOM) or byte position."""
         h = int(handle)
-        if h in self._record_files:
-            return self._record_files[h].next
-        if h not in self._file_handles:
+        if h in self.files.records:
+            return self.files.records[h].next
+        if h not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{h} is not open")
-        return int(self._file_handles[h].tell()) + 1
+        return int(self.files.handles[h].tell()) + 1
 
     def _loc_fn(self, handle: Any) -> int:
         """LOC(n): the last record (RANDOM) or byte (BINARY) read or written;
         for sequential files the position in 128-byte blocks."""
         h = int(handle)
-        if h in self._record_files:
-            return self._record_files[h].last
-        if h not in self._file_handles:
+        if h in self.files.records:
+            return self.files.records[h].last
+        if h not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{h} is not open")
-        return int(self._file_handles[h].tell()) // 128
+        return int(self.files.handles[h].tell()) // 128
 
     def _freefile(self) -> int:
         """FREEFILE: the lowest file number not in use."""
         n = 1
-        while n in self._file_handles:
+        while n in self.files.handles:
             n += 1
         return n
 
     def _lof(self, handle: Any) -> int:
         """LOF(n): length of the open file in bytes."""
         h = int(handle)
-        if h not in self._file_handles:
+        if h not in self.files.handles:
             raise RuntimeError(f"BAD FILE NAME OR NUMBER: #{h} is not open")
-        f = self._file_handles[h]
+        f = self.files.handles[h]
         try:
             f.flush()
         except Exception:
@@ -2592,15 +2622,15 @@ class FileIOMixin(LanguageHost):
         """EOF(n) — -1 (true) at the end of the file (for RANDOM, after a GET
         past the last record), else 0."""
         h = int(handle)
-        if h not in self._file_handles:
+        if h not in self.files.handles:
             return -1
-        info = self._record_files.get(h)
-        f = self._file_handles[h]
+        info = self.files.records.get(h)
+        f = self.files.handles[h]
         if info is not None:
             if info.mode == 'RANDOM':
                 return -1 if info.past_end else 0
             return -1 if info.next - 1 >= self._lof(h) else 0
-        if self._file_fields.get(h):
+        if self.files.pending.get(h):
             return 0
         pos = f.tell()
         try:
@@ -2629,14 +2659,14 @@ class FileIOMixin(LanguageHost):
                 raise ValueError("SYNTAX ERROR: LPRINT USING fmt$; values")
             text, newline = self._using_text(parsed.fmt, parsed.values, run_vars)
         else:
-            text, newline = self._format_print(rest, run_vars, start=self._lprint_col)
+            text, newline = self._format_print(rest, run_vars, start=self.files.printer_col)
         out = text + ('\n' if newline else '')
-        if self._lprint_path:
-            with open(self._lprint_path, 'a', encoding='utf-8') as f:
+        if self.files.printer:
+            with open(self.files.printer, 'a', encoding='utf-8') as f:
                 f.write(out)
         else:
             self.io.write(out)
-        self._lprint_col = 0 if newline else next_column(self._lprint_col, text)
+        self.files.printer_col = 0 if newline else next_column(self.files.printer_col, text)
         return True
 
     # ── the file system ─────────────────────────────────────────────────
@@ -2678,7 +2708,7 @@ class FileIOMixin(LanguageHost):
                 matches = [target] if os.path.isfile(target) else []
             if not matches:
                 raise RuntimeError(f"FILE NOT FOUND: {name}")
-            open_paths = {os.path.realpath(getattr(f, 'name', '')) for f in self._file_handles.values()}
+            open_paths = {os.path.realpath(getattr(f, 'name', '')) for f in self.files.handles.values()}
             for path in matches:
                 if os.path.realpath(path) in open_paths:
                     raise RuntimeError(f"FILE ALREADY OPEN: {os.path.basename(path)}")
@@ -2694,7 +2724,7 @@ class FileIOMixin(LanguageHost):
             else:
                 if not os.path.isdir(path):
                     raise RuntimeError(f"PATH NOT FOUND: {name}")
-                self._file_dir = '' if path == '.' else path
+                self.files.cwd = '' if path == '.' else path
         except FileNotFoundError:
             raise RuntimeError(f"PATH NOT FOUND: {name}") from None
         except FileExistsError:

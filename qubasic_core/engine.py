@@ -94,6 +94,19 @@ ExecOutcome = ExecResult | int
 # QUBASIC structured error hierarchy.
 # ---------------------------------------------------------------------------
 
+@dataclass
+class RunReport:
+    """What a RUN leaves for the RUN command to show after the summary line:
+    the counts to draw as a histogram (readout mitigation follows it), whether
+    DISPLAY and the LQUBITS trailer apply, the note to print when there is
+    nothing to draw, and whether the run was long enough to ring the bell."""
+    counts: dict[str, int] | None = None
+    display: bool = False
+    logical: bool = False
+    note: str | None = None
+    bell: bool = False
+
+
 class QBasicError(Exception):
     """Base for all QUBASIC errors."""
 
@@ -212,12 +225,11 @@ class TerminalProtocol(Protocol):
     locc: Any | None
     locc_mode: bool
 
-    _undo_stack: list[dict[int, str]]
+    editor: Any          # EditorState: undo, banks, AUTO, INCLUDE
+    noise: Any           # NoiseState: the active noise model
     _gosub_stack: list[int]
     _custom_gates: dict[str, np.ndarray]
-    _noise_model: Any | None
     _max_iterations: int
-    _include_depth: int
     _parsed: dict[int, Any]
     _circuit_cache_key: Any | None
     _circuit_cache: Any | None

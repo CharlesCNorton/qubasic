@@ -411,7 +411,7 @@ class OptimizeMixin(ApplicationsHost):
             pmap = {p: pobjs[p] for p in params if pobjs[p] in qc_t.parameters}
             if not pmap:
                 return None
-            noisy = bool(self._noise_model or getattr(self, '_qubit_noise', None))
+            noisy = bool(self.noise.model or self.noise.per_qubit)
             shots = self.shots if (sampling or noisy) else 1
             return {'qc': qc_t, 'backend': backend, 'pmap': pmap, 'shots': shots}
         except Exception:
@@ -699,7 +699,7 @@ class EstimationMixin(ApplicationsHost):
             prep, _ = self.build_circuit()    # the program prepares the target eigenstate
             nq = self.num_qubits
             anc = nq                          # dedicated ancilla beyond the system
-            backend = AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
+            backend = AerSimulator(noise_model=self.noise.model) if self.noise.model else AerSimulator()
             phase_bits = [0] * bits
             # Estimate from least significant bit upward, feeding back the phase.
             for k in range(bits - 1, -1, -1):
@@ -1236,7 +1236,7 @@ class OracleMixin(ApplicationsHost):
             shots = opts.get('SHOTS', self.shots)
             meas = qc.copy()
             meas.measure_all()
-            backend = AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
+            backend = AerSimulator(noise_model=self.noise.model) if self.noise.model else AerSimulator()
             kw: dict = {'shots': shots}
             if self._seed is not None:
                 kw['seed_simulator'] = self._seed

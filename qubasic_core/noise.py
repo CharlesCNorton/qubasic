@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
@@ -32,13 +33,13 @@ if TYPE_CHECKING:
 # writes the whole model back as one NOISE line.
 # ---------------------------------------------------------------------------
 
-_1Q = ['h', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'sx', 'rx', 'ry', 'rz', 'p', 'u', 'id']
-_2Q = ['cx', 'cy', 'cz', 'ch', 'swap', 'dcx', 'iswap', 'crx', 'cry', 'crz', 'cp',
-       'rxx', 'ryy', 'rzz']
-_3Q = ['ccx', 'cswap']
+_1Q = ['h', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'sx', 'sxdg', 'rx', 'ry', 'rz', 'p', 'u', 'id']
+_2Q = ['cx', 'cy', 'cz', 'ch', 'swap', 'dcx', 'iswap', 'ecr', 'cs', 'csdg', 'csx', 'crx',
+       'cry', 'crz', 'cp', 'rxx', 'ryy', 'rzz', 'rzx']
+_3Q = ['ccx', 'cswap', 'ccz']
 
 NOISE_TYPES = ('depolarizing', 'amplitude_damping', 'phase_flip', 'thermal', 'readout',
-               'combined', 'pauli', 'reset', 'crosstalk')
+               'combined', 'pauli', 'lindblad', 'reset', 'crosstalk')
 
 # Channels the numpy LOCC engine reproduces (one channel, its first parameter).
 _LOCC_TYPES = frozenset({'depolarizing', 'amplitude_damping', 'phase_flip'})
@@ -113,6 +114,8 @@ def add_channel(nm: NoiseModel, ntype: str, params: list[str], readout: list) ->
             raise ValueError("pauli probabilities sum past 1")
         _per_qubit(nm, pauli_error([('X', px), ('Y', py), ('Z', pz), ('I', 1 - px - py - pz)]))
         return f"pauli px={px:g} py={py:g} pz={pz:g}"
+    if ntype == 'lindblad':
+        return _lindblad(nm, params)
     if ntype == 'reset':
         p0, p1 = _floats(params, (0.01, 0.01))
         _per_qubit(nm, reset_error(p0, p1))
@@ -123,6 +126,35 @@ def add_channel(nm: NoiseModel, ntype: str, params: list[str], readout: list) ->
                                        warnings=False)
         return f"crosstalk (correlated ZZ after 2-qubit gates) p={p:g}"
     raise ValueError(f"UNKNOWN NOISE TYPE: {ntype}")
+
+
+def _lindblad(nm: NoiseModel, params: list[str]) -> str:
+    """The Pauli-Lindblad channel exp(sum r_k (P_k rho P_k - rho)) of
+    generator and rate pairs: single-qubit generators act after every gate
+    on each qubit it touches, two-qubit ones (Qiskit order, the rightmost
+    letter on the gate's first qubit) after every two-qubit gate."""
+    from qiskit.quantum_info import PauliList
+    from qiskit_aer.noise import PauliLindbladError
+    if not params or len(params) % 2:
+        raise ValueError("lindblad needs generator and rate pairs: lindblad X 0.01 ZZ 0.002")
+    by_width: dict[int, tuple[list[str], list[float]]] = {}
+    for label, rate in zip(params[0::2], params[1::2]):
+        label = label.upper()
+        if not label or set(label) - set('IXYZ') or len(label) > 2 or set(label) == {'I'}:
+            raise ValueError(f"lindblad generator {label!r}: one or two of X, Y, Z (and I)")
+        r = float(rate)
+        if r < 0:
+            raise ValueError(f"lindblad rate {r:g} is negative")
+        gens, rates = by_width.setdefault(len(label), ([], []))
+        gens.append(label)
+        rates.append(r)
+    if 1 in by_width:
+        _per_qubit(nm, PauliLindbladError(PauliList(by_width[1][0]), by_width[1][1]))
+    if 2 in by_width:
+        nm.add_all_qubit_quantum_error(PauliLindbladError(PauliList(by_width[2][0]), by_width[2][1]),
+                                       _2Q, warnings=False)
+    terms = [f"{g}:{r:g}" for gens, rates in by_width.values() for g, r in zip(gens, rates)]
+    return "lindblad " + ' '.join(terms)
 
 
 class NoiseMixin(SimulationHost):
@@ -140,6 +172,7 @@ class NoiseMixin(SimulationHost):
           combined <p_amp> <p_phase>    amplitude + phase damping
           pauli <px> <py> <pz>          Pauli channel
           reset <p0> <p1>               spontaneous reset to |0> or |1>
+          lindblad <P> <r> [<P> <r> ...]  Pauli-Lindblad generators and rates
           crosstalk <p>                 correlated ZZ after 2-qubit gates
         The single-qubit channels act on every qubit a multi-qubit gate touches;
         times take any one unit. Channels joined by ';' compose."""
@@ -148,11 +181,11 @@ class NoiseMixin(SimulationHost):
             self._noise_info()
             return
         if not arg or arg.upper() == 'OFF':
-            self._noise_model = None
-            self._noise_depol_p = 0.0
-            self._noise_locc_type = 'none'
-            self._noise_locc_param = 0.0
-            self._noise_spec = None
+            self.noise.model = None
+            self.noise.depol_p = 0.0
+            self.noise.locc_type = 'none'
+            self.noise.locc_param = 0.0
+            self.noise.spec = None
             self._device_spec = None
             if self.locc is not None:
                 self.locc.noise_param = 0.0
@@ -161,7 +194,7 @@ class NoiseMixin(SimulationHost):
             return
         m = re.match(r'ADD\s+(.+)$', arg, re.IGNORECASE)
         if m:
-            spec = f"{self._noise_spec}; {m.group(1).strip()}" if self._noise_spec else m.group(1).strip()
+            spec = f"{self.noise.spec}; {m.group(1).strip()}" if self.noise.spec else m.group(1).strip()
         else:
             spec = arg
         components = [c.strip() for c in spec.split(';') if c.strip()]
@@ -191,36 +224,36 @@ class NoiseMixin(SimulationHost):
             for extra in readout[1:]:
                 total = total @ extra
             nm.add_all_qubit_readout_error(ReadoutError(total), warnings=False)
-        self._noise_model = nm
-        self._noise_spec = '; '.join(components)
+        self.noise.model = nm
+        self.noise.spec = '; '.join(components)
         self._device_spec = None
         self._circuit_cache_key = None
-        self._noise_depol_p = next((float(p[0]) if p else 0.01
+        self.noise.depol_p = next((float(p[0]) if p else 0.01
                                     for k, p in kinds if k == 'depolarizing'), 0.0)
         if len(kinds) == 1 and kinds[0][0] in _LOCC_TYPES:
-            self._noise_locc_type = kinds[0][0]
-            self._noise_locc_param = float(kinds[0][1][0]) if kinds[0][1] else 0.01
+            self.noise.locc_type = kinds[0][0]
+            self.noise.locc_param = float(kinds[0][1][0]) if kinds[0][1] else 0.01
         else:
-            self._noise_locc_type = 'none'
-            self._noise_locc_param = 0.0
+            self.noise.locc_type = 'none'
+            self.noise.locc_param = 0.0
         if self.locc is not None:
-            self.locc.noise_type = self._noise_locc_type
-            self.locc.noise_param = self._noise_locc_param
+            self.locc.noise_type = self.noise.locc_type
+            self.locc.noise_param = self.noise.locc_param
         for line in lines:
             self.io.writeln(f"NOISE {line}")
 
     def _noise_info(self) -> None:
-        if self._noise_model is None:
+        if self.noise.model is None:
             self.io.writeln("  NOISE OFF (no noise model active)")
             return
         self.io.writeln("  Noise model active:")
-        if self._noise_spec:
-            for comp in self._noise_spec.split(';'):
+        if self.noise.spec:
+            for comp in self.noise.spec.split(';'):
                 self.io.writeln(f"    {comp.strip()}")
         elif getattr(self, '_device_spec', None):
             self.io.writeln(f"    DEVICE {self._device_spec}")
-        self.io.writeln(f"    depol_p = {self._noise_depol_p}")
-        for line in str(self._noise_model).split('\n'):
+        self.io.writeln(f"    depol_p = {self.noise.depol_p}")
+        for line in str(self.noise.model).split('\n'):
             self.io.writeln(f"    {line}")
         if self.locc is not None and self.locc.noise_param > 0:
             self.io.writeln(f"    LOCC engine: {self.locc.noise_type} p={self.locc.noise_param}")
@@ -311,29 +344,45 @@ def extrapolate(scales: Sequence[float], values: Sequence[float], fit: str) -> f
     raise ValueError(f"FIT is LINEAR, QUADRATIC, RICHARDSON or EXP, not {fit}")
 
 
+@dataclass
+class NoiseState:
+    """The active noise: the Aer model and the NOISE arguments that built it,
+    the depolarizing rate, the channel the LOCC engine applies, the per-qubit
+    noise poked into the memory map, and readout calibration for MITIGATE."""
+
+    model: NoiseModel | None = None
+    spec: str | None = None                                                # the NOISE arguments, for SAVE
+    depol_p: float = 0.0
+    locc_type: str = 'none'                    # the LOCC engine's channel, or 'none'
+    locc_param: float = 0.0
+    # Poked at $D100 + 2*qubit: qubit -> (type, parameter), type 1 depolarizing,
+    # 2 amplitude damping, 3 phase flip.
+    per_qubit: dict[int, tuple[int, float]] = field(default_factory=dict)
+    readout: list[tuple[float, float]] | None = None                       # MITIGATE READOUT's calibration
+
+
 class MitigationMixin(SimulationHost):
     """MITIGATE READOUT and ZNE."""
 
     def _init_mitigation(self) -> None:
-        self._readout_errors: list[tuple[float, float]] | None = None
         self.last_mitigated: dict[str, float] | None = None
 
     def cmd_mitigate(self, rest: str) -> None:
         """MITIGATE READOUT [ON|OFF] | STATUS — calibrate and invert readout error on every RUN."""
         words = rest.upper().split()
         if not words or words[0] == 'STATUS':
-            if self._readout_errors is None:
+            if self.noise.readout is None:
                 self.io.writeln("MITIGATE READOUT OFF")
             else:
-                worst = max(max(e) for e in self._readout_errors)
-                self.io.writeln(f"MITIGATE READOUT ON ({len(self._readout_errors)} qubits, "
+                worst = max(max(e) for e in self.noise.readout)
+                self.io.writeln(f"MITIGATE READOUT ON ({len(self.noise.readout)} qubits, "
                                 f"worst flip probability {worst:.4f})")
             return
         if words[0] != 'READOUT' or (len(words) > 1 and words[1] not in ('ON', 'OFF')):
             self.io.writeln("?USAGE: MITIGATE READOUT [ON|OFF] | STATUS")
             return
         if len(words) > 1 and words[1] == 'OFF':
-            self._readout_errors = None
+            self.noise.readout = None
             self.last_mitigated = None
             self.io.writeln("MITIGATE READOUT OFF")
             return
@@ -342,18 +391,18 @@ class MitigationMixin(SimulationHost):
             self.io.writeln(f"?MITIGATE READOUT corrects at most {MAX_MITIGATED_QUBITS} qubits")
             return
         try:
-            self._readout_errors = self._calibrate_readout(n)
+            self.noise.readout = self._calibrate_readout(n)
         except Exception as e:
             self.io.writeln(f"?MITIGATE ERROR: {e}")
             return
-        flips = ', '.join(f"q{q} {e0:.3f}/{e1:.3f}" for q, (e0, e1) in enumerate(self._readout_errors[:6]))
+        flips = ', '.join(f"q{q} {e0:.3f}/{e1:.3f}" for q, (e0, e1) in enumerate(self.noise.readout[:6]))
         more = ' ...' if n > 6 else ''
         self.io.writeln(f"MITIGATE READOUT ON: P(1|0)/P(0|1) {flips}{more}")
 
     def _calibrate_readout(self, n: int, shots: int = 4000) -> list[tuple[float, float]]:
         from qiskit import QuantumCircuit, transpile
         from qiskit_aer import AerSimulator
-        backend = AerSimulator(noise_model=self._noise_model) if self._noise_model else AerSimulator()
+        backend = AerSimulator(noise_model=self.noise.model) if self.noise.model else AerSimulator()
         errors = []
         marginals = []
         for prep in (0, 1):
@@ -380,7 +429,7 @@ class MitigationMixin(SimulationHost):
 
     def _mitigate_after_run(self) -> None:
         """Show the readout-corrected histogram of the run just finished."""
-        errors = self._readout_errors
+        errors = self.noise.readout
         if errors is None or not self.last_counts:
             return
         key_len = len(next(iter(self.last_counts)).replace(' ', ''))
@@ -434,7 +483,7 @@ class MitigationMixin(SimulationHost):
             ideal = self._noisy_expectation(base, observable, noise=False)
             estimate = extrapolate(scales, noisy, fit)
             self.io.writeln(f"\n  ZNE ({fit.lower()} fit) on {base.num_qubits} qubits, "
-                            f"{'noise model' if self._noise_model else 'no noise model'}:")
+                            f"{'noise model' if self.noise.model else 'no noise model'}:")
             for s, v in zip(scales, noisy):
                 self.io.writeln(f"    scale {s:<3} <O> = {v:+.6f}")
             self.io.writeln(f"    extrapolated  <O> = {estimate:+.6f}")
@@ -449,7 +498,7 @@ class MitigationMixin(SimulationHost):
     def _noisy_expectation(self, qc: QuantumCircuit, observable: SparsePauliOp, noise: bool = True) -> float:
         from qiskit import transpile
         from qiskit_aer import AerSimulator
-        model = self._noise_model if noise else None
+        model = self.noise.model if noise else None
         circ = qc.copy()
         circ.save_expectation_value(observable, list(range(circ.num_qubits)))
         if model is not None and circ.num_qubits <= 12:

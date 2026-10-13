@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -115,8 +116,8 @@ class EditingMixin(LanguageHost):
         self.program = new_prog
         self._parsed = {num: parse_stmt(s) for num, s in new_prog.items()}
         # Move breakpoints to their renumbered lines.
-        if getattr(self, '_breakpoints', None):
-            self._breakpoints = {line_map.get(b, b) for b in self._breakpoints}
+        if self.debug.breakpoints:
+            self.debug.breakpoints = {line_map.get(b, b) for b in self.debug.breakpoints}
         self.io.writeln(f"RENUMBERED {len(new_prog)} LINES (start={start}, step={step})")
         # Computed jumps (ON <var> GOTO via runtime values) can't be remapped statically.
         if any(re.search(r'\bON\b.*\bGO(TO|SUB)\b', s, re.IGNORECASE)
@@ -139,7 +140,7 @@ class EditingMixin(LanguageHost):
             fm = RE_DEF_FN.match(f"DEF {rest}")
             if fm:
                 fparams = [p.strip() for p in fm.group(2).split(',') if p.strip()]
-                self._user_fns['FN' + fm.group(1).upper()] = {
+                self.symbols.fns['FN' + fm.group(1).upper()] = {
                     'params': fparams, 'body': fm.group(3).strip()}
                 self.io.writeln(f"DEF FN {fm.group(1).upper()}({', '.join(fparams)})")
                 return
@@ -211,26 +212,26 @@ class EditingMixin(LanguageHost):
         # Always use the accumulation path — works for both REPL and scripts.
         # In REPL, repl() calls process() per line, which feeds _accumulate_type_field.
         # In scripts, cmd_load/cmd_include call process() per line likewise.
-        self._pending_type = {'name': type_name, 'fields': []}
+        self.symbols.pending_type = {'name': type_name, 'fields': []}
         self.io.writeln(f"  TYPE {type_name} (enter fields, END TYPE to finish)")
 
     def _accumulate_type_field(self, line: str) -> None:
         """Accumulate a field for a pending TYPE definition, or finalize on END TYPE."""
         from qubasic_core.parser import RE_END_TYPE, RE_TYPE_FIELD
-        assert self._pending_type is not None  # only called while a TYPE is open
+        assert self.symbols.pending_type is not None  # only called while a TYPE is open
         stripped = line.strip()
         if RE_END_TYPE.match(stripped):
             # Finalize the type definition
-            type_name = self._pending_type['name']
-            fields = self._pending_type['fields']
-            self._pending_type = None
-            self._user_types[type_name] = fields
+            type_name = self.symbols.pending_type['name']
+            fields = self.symbols.pending_type['fields']
+            self.symbols.pending_type = None
+            self.symbols.types[type_name] = fields
             self.io.writeln(f"TYPE {type_name} ({len(fields)} fields)")
             return
         fm = RE_TYPE_FIELD.match(stripped)
         if fm:
             ftype = fm.group(2).upper() + (f"*{fm.group(3)}" if fm.group(3) else '')
-            self._pending_type['fields'].append((fm.group(1).lower(), ftype))
+            self.symbols.pending_type['fields'].append((fm.group(1).lower(), ftype))
         elif stripped:
             self.io.writeln("  ?EXPECTED: <name> AS <type>")
 
@@ -335,10 +336,10 @@ class EditingMixin(LanguageHost):
 
     def cmd_undo_preview(self) -> None:
         """UNDO — show what will change and restore."""
-        if not self._undo_stack:
+        if not self.editor.undo:
             self.io.writeln("?NOTHING TO UNDO")
             return
-        prev = self._undo_stack[-1]
+        prev = self.editor.undo[-1]
         # Show diff
         added = set(self.program.keys()) - set(prev.keys())
         removed = set(prev.keys()) - set(self.program.keys())
@@ -352,7 +353,7 @@ class EditingMixin(LanguageHost):
             for k in sorted(changed):
                 self.io.writeln(f"  Undo will revert {k}: {self.program[k]} -> {prev[k]}")
         # Apply
-        self.program = self._undo_stack.pop()
+        self.program = self.editor.undo.pop()
         self._parsed.clear()
         self.io.writeln(f"UNDO ({len(self.program)} lines)")
 
@@ -361,15 +362,24 @@ class EditingMixin(LanguageHost):
 # QUBASIC program management — AUTO, EDIT, COPY, MOVE, FIND, REPLACE, slots, CHECKSUM, CHAIN, MERGE, LIST+.
 # ---------------------------------------------------------------------------
 
+@dataclass
+class EditorState:
+    """Editing the program: the undo stack, the program banks, AUTO numbering,
+    the INCLUDE nesting, and the lines a .bas import numbered."""
+
+    undo: list[dict[int, str]] = field(default_factory=list)        # program snapshots for UNDO
+    slots: dict[int, dict[int, str]] = field(default_factory=dict)  # BANK: programs by slot
+    slot: int = 0
+    auto: bool = False                                              # AUTO numbering
+    auto_line: int = 10
+    auto_step: int = 10
+    include_depth: int = 0
+    include_stack: list[str] = field(default_factory=list)          # the files INCLUDE is inside
+    imported: set[int] = field(default_factory=set)                 # lines a .bas import numbered
+
+
 class ProgramMgmtMixin(LanguageHost):
     """Program management commands for QBasicTerminal."""
-
-    def _init_program_mgmt(self) -> None:
-        self._program_slots: dict[int, dict[int, str]] = {}
-        self._current_slot: int = 0
-        self._auto_mode: bool = False
-        self._auto_line: int = 10
-        self._auto_step: int = 10
 
     # ── AUTO ───────────────────────────────────────────────────────────
 
@@ -377,22 +387,22 @@ class ProgramMgmtMixin(LanguageHost):
         """AUTO [start][, step] — auto-generate line numbers."""
         parts = rest.replace(',', ' ').split()
         if parts:
-            self._auto_line = int(parts[0])
+            self.editor.auto_line = int(parts[0])
         if len(parts) > 1:
-            self._auto_step = int(parts[1])
-        self._auto_mode = True
-        self.io.writeln(f"AUTO {self._auto_line}, {self._auto_step} — type . to stop")
-        while self._auto_mode:
+            self.editor.auto_step = int(parts[1])
+        self.editor.auto = True
+        self.io.writeln(f"AUTO {self.editor.auto_line}, {self.editor.auto_step} — type . to stop")
+        while self.editor.auto:
             try:
-                line = self.io.read_line(f'{self._auto_line} ').rstrip()
+                line = self.io.read_line(f'{self.editor.auto_line} ').rstrip()
                 if line == '.':
-                    self._auto_mode = False
+                    self.editor.auto = False
                     break
                 if line:
-                    self.process(f'{self._auto_line} {line}')
-                self._auto_line += self._auto_step
+                    self.process(f'{self.editor.auto_line} {line}')
+                self.editor.auto_line += self.editor.auto_step
             except (KeyboardInterrupt, EOFError):
-                self._auto_mode = False
+                self.editor.auto = False
                 self.io.writeln('')
                 break
 
@@ -463,16 +473,16 @@ class ProgramMgmtMixin(LanguageHost):
     def cmd_bank(self, rest: str) -> None:
         """BANK <n> — switch to program slot n."""
         if not rest.strip():
-            self.io.writeln(f"  Current slot: {self._current_slot}")
-            self.io.writeln(f"  Slots in use: {sorted(self._program_slots.keys())}")
+            self.io.writeln(f"  Current slot: {self.editor.slot}")
+            self.io.writeln(f"  Slots in use: {sorted(self.editor.slots.keys())}")
             return
         slot = int(rest.strip())
         # Save current
-        self._program_slots[self._current_slot] = dict(self.program)
+        self.editor.slots[self.editor.slot] = dict(self.program)
         # Load target
-        self._current_slot = slot
-        if slot in self._program_slots:
-            self.program = dict(self._program_slots[slot])
+        self.editor.slot = slot
+        if slot in self.editor.slots:
+            self.program = dict(self.editor.slots[slot])
             self.io.writeln(f"BANK {slot} ({len(self.program)} lines)")
         else:
             self.program = {}
@@ -812,7 +822,7 @@ class PersistenceMixin(LanguageHost):
             return
         path = checked
         if path.lower().endswith('.bas'):
-            imported_bas: set[int] = getattr(self, '_imported_lines', set())
+            imported_bas: set[int] = self.editor.imported
             lines = [n for n in sorted(self.program) if n not in imported_bas]
             try:
                 with open(path, 'w', encoding='utf-8') as f:
@@ -837,8 +847,8 @@ class PersistenceMixin(LanguageHost):
                     f.write(f"PRECISION {self.sim_precision.upper()}\n")
                 if getattr(self, '_screen_mode', 0):
                     f.write(f"DISPLAY {self._screen_mode}\n")
-                if getattr(self, '_option_base', 0):
-                    f.write(f"OPTION BASE {self._option_base}\n")
+                if self.symbols.option_base:
+                    f.write(f"OPTION BASE {self.symbols.option_base}\n")
                 if getattr(self, '_endian_big', False):
                     f.write("OPTION ENDIAN BIG\n")
                 if getattr(self, '_seed', None) is not None:
@@ -851,13 +861,13 @@ class PersistenceMixin(LanguageHost):
                     sizes = ' '.join(str(s) for s in self.locc.sizes)
                     f.write(f"LOCC {mode} {sizes}\n")
                 # Save user-defined TYPEs (multi-line block, re-read on LOAD)
-                for tname, fields in getattr(self, '_user_types', {}).items():
+                for tname, fields in self.symbols.types.items():
                     f.write(f"TYPE {tname}\n")
                     for fname, ftype in fields:
                         f.write(f"  {fname} AS {ftype}\n")
                     f.write("END TYPE\n")
                 # Save DEF FN user functions
-                for fname, fdef in getattr(self, '_user_fns', {}).items():
+                for fname, fdef in self.symbols.fns.items():
                     short = fname[2:] if fname.upper().startswith('FN') else fname
                     params = ', '.join(fdef['params'])
                     f.write(f"DEF FN {short}({params}) = {fdef['body']}\n")
@@ -893,7 +903,7 @@ class PersistenceMixin(LanguageHost):
                         continue        # arrays of results, matrices, records of other kinds
                     f.write(f"LET {name} = {_literal(val)}\n")
                 # Save program (exclude lines injected by IMPORT)
-                imported: set[int] = getattr(self, '_imported_lines', set())
+                imported: set[int] = self.editor.imported
                 saved = [n for n in sorted(self.program.keys()) if n not in imported]
                 for num in saved:
                     f.write(f"{num} {self.program[num]}\n")
@@ -915,7 +925,7 @@ class PersistenceMixin(LanguageHost):
             elif self._device_spec.split()[0] not in ('all', 'full'):
                 lines.append("COUPLING OFF")
         else:
-            spec = (lm.get('saved_noise') or (None, None))[1] if lm else self._noise_spec
+            spec = (lm.get('saved_noise') or (None, None))[1] if lm else self.noise.spec
             if spec:
                 lines.append(f"NOISE {spec}")
             if edges:
@@ -996,7 +1006,7 @@ class PersistenceMixin(LanguageHost):
         an included script cannot write arbitrary files or recurse further
         without the user's direct interaction.
         """
-        if self._include_depth >= MAX_INCLUDE_DEPTH:
+        if self.editor.include_depth >= MAX_INCLUDE_DEPTH:
             self.io.writeln(f"?INCLUDE DEPTH LIMIT ({MAX_INCLUDE_DEPTH}) — possible recursion")
             return
         try:
@@ -1009,12 +1019,12 @@ class PersistenceMixin(LanguageHost):
             self.io.writeln(f"?FILE NOT FOUND: {path}")
             return
         resolved = os.path.realpath(path)
-        if resolved in self._include_stack:
+        if resolved in self.editor.include_stack:
             self.io.writeln(f"?INCLUDE CYCLE: {path} already in include chain")
             return
         count = 0
-        self._include_depth += 1
-        self._include_stack.append(resolved)
+        self.editor.include_depth += 1
+        self.editor.include_stack.append(resolved)
         try:
             with open(path, 'r', encoding='utf-8-sig') as f:
                 for line in f:
@@ -1029,8 +1039,8 @@ class PersistenceMixin(LanguageHost):
                     self.process(line, track_undo=False)
                     count += 1
         finally:
-            self._include_stack.pop()
-            self._include_depth -= 1
+            self.editor.include_stack.pop()
+            self.editor.include_depth -= 1
         self.io.writeln(f"INCLUDED {path} ({count} lines)")
 
     def cmd_import(self, rest: str) -> None:
@@ -1073,7 +1083,7 @@ class PersistenceMixin(LanguageHost):
                         ln += 10
                     _import_line_counter = ln + 10
                     self.process(f"{ln} {line}", track_undo=False)
-                    self._imported_lines.add(ln)
+                    self.editor.imported.add(ln)
                     continue
                 if upper.startswith('DEF ') and '=' in line and not upper.startswith('DEF BEGIN'):
                     from qubasic_core.parser import RE_DEF_SINGLE
@@ -1094,7 +1104,7 @@ class PersistenceMixin(LanguageHost):
                         ln += 10
                     _import_line_counter = ln + 10
                     self.process(f"{ln} {line}", track_undo=False)
-                    self._imported_lines.add(ln)
+                    self.editor.imported.add(ln)
                     in_procedure = not upper.startswith('END')
                     import_count += in_procedure
         self.io.writeln(f"IMPORTED {mod_name} ({import_count} definitions from {path})")

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import cos, pi, sin, sqrt
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -1130,13 +1130,20 @@ class PauliPropMixin(SimulationHost):
 #   QMEASURE [shots]  Sample measurement outcomes (base-d strings)
 # ---------------------------------------------------------------------------
 
+@dataclass
+class QuditState:
+    """QUDIT's register: the level count d, the qudits and their state."""
+
+    d: int = 0
+    n: int = 0
+    sv: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=complex))  # set by QUDIT
+
+
 class QuditMixin(SimulationHost):
     """A d-level (qudit) statevector engine for QBasicTerminal."""
 
     def _init_qudits(self) -> None:
-        self._qd = 0
-        self._qn = 0
-        self._qsv: np.ndarray = np.zeros(0, dtype=complex)   # set by QUDIT
+        self.qudit = QuditState()
 
     def _qudit_apply(self, mat: np.ndarray, targets: list[int]) -> None:
         """Apply a single- or two-qudit matrix to the qudit statevector.
@@ -1144,21 +1151,21 @@ class QuditMixin(SimulationHost):
         Qudit q is digit q of the base-d index (qudit 0 least significant),
         the qubit convention, so a state prints with qudit 0 rightmost.
         """
-        d, n = self._qd, self._qn
+        d, n = self.qudit.d, self.qudit.n
         k = len(targets)
-        t = self._qsv.reshape([d] * n)
+        t = self.qudit.sv.reshape([d] * n)
         axes = [n - 1 - q for q in targets]
         t = np.tensordot(mat.reshape([d] * (2 * k)), t,
                          axes=(list(range(k, 2 * k)), axes))
         t = np.moveaxis(t, list(range(k)), axes)
-        self._qsv = np.ascontiguousarray(t).reshape(-1)
+        self.qudit.sv = np.ascontiguousarray(t).reshape(-1)
 
     def cmd_qudit(self, rest: str) -> None:
         """QUDIT <d> [n] — initialize n qudits of dimension d in |0...0>."""
         parts = rest.split()
         if not parts:
-            if self._qd:
-                self.io.writeln(f"QUDIT: {self._qn} qudits of dimension {self._qd}")
+            if self.qudit.d:
+                self.io.writeln(f"QUDIT: {self.qudit.n} qudits of dimension {self.qudit.d}")
             else:
                 self.io.writeln("?USAGE: QUDIT <d> [n]")
             return
@@ -1170,16 +1177,16 @@ class QuditMixin(SimulationHost):
         if d ** n > 1 << 20:
             self.io.writeln(f"?QUDIT state d^n = {d ** n} too large")
             return
-        self._qd, self._qn = d, n
-        self._qsv = np.zeros(d ** n, dtype=complex)
-        self._qsv[0] = 1.0
+        self.qudit.d, self.qudit.n = d, n
+        self.qudit.sv = np.zeros(d ** n, dtype=complex)
+        self.qudit.sv[0] = 1.0
         self.io.writeln(f"QUDIT: {n} qudit(s) of dimension {d} in |{'0' * n}>")
 
     def _qcheck(self, q: int) -> None:
-        if not self._qd:
+        if not self.qudit.d:
             raise ValueError("no qudit register (use QUDIT <d> [n] first)")
-        if q < 0 or q >= self._qn:
-            raise ValueError(f"qudit {q} out of range (0-{self._qn - 1})")
+        if q < 0 or q >= self.qudit.n:
+            raise ValueError(f"qudit {q} out of range (0-{self.qudit.n - 1})")
 
     def cmd_qx(self, rest: str) -> None:
         """QX <qudit> [k] — generalized shift X^k."""
@@ -1188,7 +1195,7 @@ class QuditMixin(SimulationHost):
             q = int(parts[0])
             k = int(parts[1]) if len(parts) > 1 else 1
             self._qcheck(q)
-            d = self._qd
+            d = self.qudit.d
             X = np.zeros((d, d), dtype=complex)
             for j in range(d):
                 X[(j + k) % d, j] = 1.0
@@ -1203,7 +1210,7 @@ class QuditMixin(SimulationHost):
             q = int(parts[0])
             k = int(parts[1]) if len(parts) > 1 else 1
             self._qcheck(q)
-            d = self._qd
+            d = self.qudit.d
             w = np.exp(2j * np.pi / d)
             Z = np.diag([w ** ((k * j) % d) for j in range(d)]).astype(complex)
             self._qudit_apply(Z, [q])
@@ -1215,7 +1222,7 @@ class QuditMixin(SimulationHost):
         try:
             q = int(rest.split()[0])
             self._qcheck(q)
-            d = self._qd
+            d = self.qudit.d
             w = np.exp(2j * np.pi / d)
             F = np.array([[w ** ((i * j) % d) for j in range(d)] for i in range(d)],
                          dtype=complex) / np.sqrt(d)
@@ -1230,7 +1237,7 @@ class QuditMixin(SimulationHost):
             c, t = int(parts[0]), int(parts[1])
             self._qcheck(c)
             self._qcheck(t)
-            d = self._qd
+            d = self.qudit.d
             SUM = np.zeros((d * d, d * d), dtype=complex)
             for a in range(d):
                 for b in range(d):
@@ -1241,25 +1248,25 @@ class QuditMixin(SimulationHost):
 
     def cmd_qstate(self, rest: str = '') -> None:
         """QSTATE — show non-zero amplitudes of the qudit statevector."""
-        if not self._qd:
+        if not self.qudit.d:
             self.io.writeln("?NO QUDIT STATE — use QUDIT <d> [n]")
             return
-        d, n = self._qd, self._qn
+        d, n = self.qudit.d, self.qudit.n
         self.io.writeln(f"\n  Qudit state (d={d}, {n} qudit(s)):")
-        for i in np.flatnonzero(np.abs(self._qsv) > 1e-9):
-            amp = complex(self._qsv[i])
+        for i in np.flatnonzero(np.abs(self.qudit.sv) > 1e-9):
+            amp = complex(self.qudit.sv[i])
             digits = self._bits(np.base_repr(int(i), d).rjust(n, '0'))
             self.io.writeln(f"    |{digits}>  {amp.real:+.4f}{amp.imag:+.4f}j  "
                             f"(P={abs(amp) ** 2:.4f})")
 
     def cmd_qmeasure(self, rest: str = '') -> None:
         """QMEASURE [shots] — sample qudit measurement outcomes."""
-        if not self._qd:
+        if not self.qudit.d:
             self.io.writeln("?NO QUDIT STATE — use QUDIT <d> [n]")
             return
-        d, n = self._qd, self._qn
+        d, n = self.qudit.d, self.qudit.n
         shots = int(rest.strip()) if rest.strip() else self.shots
-        probs = np.abs(self._qsv) ** 2
+        probs = np.abs(self.qudit.sv) ** 2
         probs = probs / probs.sum()
         rng = np.random.default_rng(self._seed)
         draws = rng.choice(len(probs), size=shots, p=probs)
@@ -1294,36 +1301,43 @@ def _expm_anti(G: np.ndarray) -> np.ndarray:
     return (V * np.exp(-1j * w)) @ V.conj().T
 
 
+@dataclass
+class BosonState:
+    """BOSONIC's register: the modes, the Fock cutoff and their state."""
+
+    modes: int = 0
+    cutoff: int = 0
+    sv: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=complex))  # set by BOSONIC
+
+
 class BosonicMixin(SimulationHost):
     """Continuous-variable Fock-space engine for QBasicTerminal."""
 
     def _init_bosonic(self) -> None:
-        self._bmodes = 0
-        self._bcut = 0
-        self._bsv: np.ndarray = np.zeros(0, dtype=complex)   # set by BOSONIC
+        self.bosons = BosonState()
 
     def _annihilation(self) -> np.ndarray:
-        N = self._bcut
+        N = self.bosons.cutoff
         a = np.zeros((N, N), dtype=complex)
         for n in range(1, N):
             a[n - 1, n] = np.sqrt(n)
         return a
 
     def _bos_apply(self, mat: np.ndarray, modes: list[int]) -> None:
-        N, m = self._bcut, self._bmodes
+        N, m = self.bosons.cutoff, self.bosons.modes
         k = len(modes)
-        t = self._bsv.reshape([N] * m)
+        t = self.bosons.sv.reshape([N] * m)
         t = np.tensordot(mat.reshape([N] * (2 * k)), t,
                          axes=(list(range(k, 2 * k)), list(modes)))
         t = np.moveaxis(t, list(range(k)), list(modes))
-        self._bsv = np.ascontiguousarray(t).reshape(-1)
+        self.bosons.sv = np.ascontiguousarray(t).reshape(-1)
 
     def cmd_bosonic(self, rest: str) -> None:
         """BOSONIC <modes> <cutoff> — initialize modes in vacuum."""
         parts = rest.split()
         if len(parts) < 2:
-            if self._bmodes:
-                self.io.writeln(f"BOSONIC: {self._bmodes} mode(s), cutoff {self._bcut}")
+            if self.bosons.modes:
+                self.io.writeln(f"BOSONIC: {self.bosons.modes} mode(s), cutoff {self.bosons.cutoff}")
             else:
                 self.io.writeln("?USAGE: BOSONIC <modes> <cutoff>")
             return
@@ -1332,16 +1346,16 @@ class BosonicMixin(SimulationHost):
         if cut ** m > 1 << 20:
             self.io.writeln(f"?BOSONIC cutoff^modes = {cut ** m} too large")
             return
-        self._bmodes, self._bcut = m, cut
-        self._bsv = np.zeros(cut ** m, dtype=complex)
-        self._bsv[0] = 1.0
+        self.bosons.modes, self.bosons.cutoff = m, cut
+        self.bosons.sv = np.zeros(cut ** m, dtype=complex)
+        self.bosons.sv[0] = 1.0
         self.io.writeln(f"BOSONIC: {m} mode(s), Fock cutoff {cut}, in vacuum")
 
     def _bcheck(self, mode: int) -> None:
-        if not self._bmodes:
+        if not self.bosons.modes:
             raise ValueError("no bosonic register (use BOSONIC <modes> <cutoff>)")
-        if mode < 0 or mode >= self._bmodes:
-            raise ValueError(f"mode {mode} out of range (0-{self._bmodes - 1})")
+        if mode < 0 or mode >= self.bosons.modes:
+            raise ValueError(f"mode {mode} out of range (0-{self.bosons.modes - 1})")
 
     def cmd_displace(self, rest: str) -> None:
         """DISPLACE <mode> <re> [im] — displacement D(alpha) = exp(alpha a^dag - alpha* a)."""
@@ -1378,7 +1392,7 @@ class BosonicMixin(SimulationHost):
             self._bcheck(m1)
             self._bcheck(m2)
             theta = float(self._eval_with_vars(parts[2], {}))
-            N = self._bcut
+            N = self.bosons.cutoff
             a = self._annihilation()
             I = np.eye(N, dtype=complex)
             aa = np.kron(a, I)
@@ -1397,7 +1411,7 @@ class BosonicMixin(SimulationHost):
             self._bcheck(mode)
             alpha = complex(float(self._eval_with_vars(parts[1], {})),
                             float(self._eval_with_vars(parts[2], {})) if len(parts) > 2 else 0.0)
-            N = self._bcut
+            N = self.bosons.cutoff
             a = self._annihilation()
             vac = np.zeros(N, dtype=complex)
             vac[0] = 1.0
@@ -1414,38 +1428,38 @@ class BosonicMixin(SimulationHost):
     def _replace_mode(self, mode: int, state: np.ndarray) -> None:
         """Put one mode in `state`, keeping the other modes' state; a mode
         entangled with the others has no state of its own to replace."""
-        N, m = self._bcut, self._bmodes
-        t = np.moveaxis(self._bsv.reshape([N] * m), mode, 0).reshape(N, -1)
+        N, m = self.bosons.cutoff, self.bosons.modes
+        t = np.moveaxis(self.bosons.sv.reshape([N] * m), mode, 0).reshape(N, -1)
         _, s, vh = np.linalg.svd(t, full_matrices=False)
         if len(s) > 1 and s[1] > 1e-6:
             raise ValueError(f"mode {mode} is entangled with the other modes")
         rest = s[0] * vh[0]
         joint = np.outer(state, rest).reshape([N] * m)
-        self._bsv = np.moveaxis(joint, 0, mode).reshape(-1)
+        self.bosons.sv = np.moveaxis(joint, 0, mode).reshape(-1)
 
     def _mode_rdm_diag(self, mode: int) -> np.ndarray:
         """Photon-number distribution (diagonal of the reduced density matrix) of a mode."""
-        N, m = self._bcut, self._bmodes
-        t: np.ndarray = self._bsv.reshape([N] * m)
+        N, m = self.bosons.cutoff, self.bosons.modes
+        t: np.ndarray = self.bosons.sv.reshape([N] * m)
         t = np.moveaxis(t, mode, 0).reshape(N, -1)
         return np.real(np.sum(np.abs(t) ** 2, axis=1))
 
     def _report_n(self, mode: int) -> None:
         diag = self._mode_rdm_diag(mode)
-        nbar = float(np.sum(np.arange(self._bcut) * diag))
+        nbar = float(np.sum(np.arange(self.bosons.cutoff) * diag))
         self.io.writeln(f"  mode {mode}: <n> = {nbar:.4f}")
 
     def cmd_bstate(self, rest: str = '') -> None:
         """BSTATE [mode] — show <n> and the photon-number distribution."""
-        if not self._bmodes:
+        if not self.bosons.modes:
             self.io.writeln("?NO BOSONIC STATE — use BOSONIC <modes> <cutoff>")
             return
-        modes = [int(rest)] if rest.strip() else list(range(self._bmodes))
+        modes = [int(rest)] if rest.strip() else list(range(self.bosons.modes))
         for mode in modes:
             diag = self._mode_rdm_diag(mode)
-            nbar = float(np.sum(np.arange(self._bcut) * diag))
+            nbar = float(np.sum(np.arange(self.bosons.cutoff) * diag))
             self.io.writeln(f"\n  Mode {mode}: <n> = {nbar:.4f}")
-            for k in range(self._bcut):
+            for k in range(self.bosons.cutoff):
                 if diag[k] > 1e-4:
                     bar = '#' * int(40 * diag[k])
                     self.io.writeln(f"    |{k}>  {diag[k]:6.4f}  {bar}")

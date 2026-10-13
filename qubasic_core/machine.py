@@ -12,6 +12,7 @@ import re
 import sys
 import time
 from collections.abc import MutableMapping
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -133,7 +134,7 @@ class ConfigMixin(SimulationHost):
             except Exception:
                 pass
             self.io.writeln(f"  devices: CPU{', GPU' if gpu_ok else ''}")
-            if self._noise_model:
+            if self.noise.model:
                 self.io.writeln("  noise: active")
             return
         val = rest.strip().upper()
@@ -285,20 +286,20 @@ class ConfigMixin(SimulationHost):
             'bit_order': ('big-endian (qubit 0 = leftmost bit)'
                           if getattr(self, '_endian_big', False)
                           else 'little-endian (qubit 0 = rightmost bit)'),
-            'option_base': getattr(self, '_option_base', 0),
+            'option_base': self.symbols.option_base,
             'locc_mode': bool(getattr(self, 'locc_mode', False)),
             'locc_registers': (list(self.locc.names)
                                if self.locc_mode and self.locc is not None else []),
-            'noise_active': getattr(self, '_noise_model', None) is not None,
-            'noise_spec': getattr(self, '_noise_spec', None),
+            'noise_active': self.noise.model is not None,
+            'noise_spec': self.noise.spec,
             'coupling_map': ([list(e) for e in cmap] if cmap else None),
             'basis_gates': getattr(self, '_basis_gates', None),
             'pending_set_state': getattr(self, '_pending_set_state', None) is not None,
             'pending_set_density': getattr(self, '_pending_set_density', None) is not None,
             'screen_mode': getattr(self, '_screen_mode', 0),
-            'graphics_screen': self._canvas.mode if self._canvas is not None else 0,
-            'trace_mode': bool(getattr(self, '_trace_mode', False)),
-            'bank': getattr(self, '_current_slot', 0),
+            'graphics_screen': self.graphics.canvas.mode if self.graphics.canvas is not None else 0,
+            'trace_mode': bool(self.debug.trace),
+            'bank': self.editor.slot,
             'program_lines': len(self.program),
             'variables': sum(1 for k in self.variables if not k.startswith('_')),
             'arrays': len(self.arrays),
@@ -405,8 +406,8 @@ class ConfigMixin(SimulationHost):
                 pass
         self.io.writeln(f"  Features: {', '.join(flags) if flags else 'base'}")
         self.io.writeln(f"  Device: {self.sim_device}  Method: {self.sim_method}")
-        if self._noise_model:
-            self.io.writeln(f"  Noise: active (depol_p={self._noise_depol_p})")
+        if self.noise.model:
+            self.io.writeln(f"  Noise: active (depol_p={self.noise.depol_p})")
 
 
 # ---------------------------------------------------------------------------
@@ -460,23 +461,62 @@ SYS_ROUTINES = {
 }
 
 
+@dataclass
+class AerTuning:
+    """Aer's tuning options as POKE sets them at $D008-$D00B; None leaves
+    Aer's own default, which PEEK reports."""
+
+    fusion_enable: bool | None = None
+    mps_truncation: float | None = None
+    sv_parallel_threshold: int | None = None
+    es_approx_error: float | None = None
+
+    DEFAULTS = {'fusion_enable': 1.0, 'mps_truncation': 1e-16, 'sv_parallel_threshold': 14.0,
+                'es_approx_error': 0.05}
+    _AER_NAMES = {'fusion_enable': 'fusion_enable',
+                  'mps_truncation': 'matrix_product_state_truncation_threshold',
+                  'sv_parallel_threshold': 'statevector_parallel_threshold',
+                  'es_approx_error': 'extended_stabilizer_approximation_error'}
+
+    def options(self) -> dict[str, Any]:
+        """The set options under Aer's names."""
+        return {aer: getattr(self, mine) for mine, aer in self._AER_NAMES.items()
+                if getattr(self, mine) is not None}
+
+    def value(self, name: str) -> float:
+        """An option as PEEK reads it."""
+        v = getattr(self, name)
+        return float(self.DEFAULTS[name] if v is None else v)
+
+
+@dataclass
+class MachineState:
+    """The memory map's own storage and the profiler: the zero page, the
+    status registers, SYS INSTALL's routines, PROFILE's per-line timings and
+    STATS' run history."""
+
+    zero_page: list[float] = field(default_factory=lambda: [0.0] * 64)
+    status: dict[int, float] = field(default_factory=lambda: {a: 0.0 for a in STS_NAMES})
+    user_sys: dict[int, str] = field(default_factory=dict)                                 # SYS INSTALL: address -> program
+    profiling: bool = False
+    profile: dict[int, dict[str, float]] = field(default_factory=dict)                     # line -> timings
+    profile_start: float = 0.0
+    runs: list[dict[str, int]] = field(default_factory=list)                               # STATS: one entry per run
+
+
 class MemoryMixin(SimulationHost):
     """Memory-mapped PEEK/POKE, SYS, USR, WAIT, DUMP, MAP, MONITOR, CATALOG."""
 
     def _init_memory(self) -> None:
-        self._zero_page: list[float] = [0.0] * 64
-        self._status: dict[int, float] = {a: 0.0 for a in STS_NAMES}
-        self._status[0xD013] = 1.0
-        self._user_sys: dict[int, str] = {}
+        self.machine = MachineState()
+        self.aer = AerTuning()
+        self.machine.status[0xD013] = 1.0
         self._screen_mode: int = 0
-        # Per-qubit noise: $D100 + qubit*2 = noise_type, +1 = noise_param
-        # noise_type: 0=none, 1=depolarizing, 2=amplitude_damping, 3=phase_flip
-        self._qubit_noise: dict[int, tuple[int, float]] = {}  # qubit -> (type, param)
 
     def _update_status(self, **kw: float) -> None:
         for addr, name in STS_NAMES.items():
             if name in kw:
-                self._status[addr] = float(kw[name])
+                self.machine.status[addr] = float(kw[name])
 
     def _state_status(self, addr: int) -> float:
         """$D013 (total probability) and $D014 (entanglement entropy of qubit
@@ -502,20 +542,20 @@ class MemoryMixin(SimulationHost):
             return float(self._segment_read(int(addr)))
         a = int(addr)
         if 0x0000 <= a <= 0x003F:
-            return self._zero_page[a]
+            return self.machine.zero_page[a]
         if 0x0100 <= a <= 0x01FF:
             return self._peek_qubit(a)
         if 0xD100 <= a <= 0xD1FF:
             qubit = (a - 0xD100) // 2
             field = (a - 0xD100) % 2
-            ntype, nparam = self._qubit_noise.get(qubit, (0, 0.0))
+            ntype, nparam = self.noise.per_qubit.get(qubit, (0, 0.0))
             return float(ntype) if field == 0 else nparam
         if a in CFG_NAMES:
             return self._peek_config(a)
         if a in (0xD013, 0xD014):
             return self._state_status(a)
         if a in STS_NAMES:
-            return self._status.get(a, 0.0)
+            return self.machine.status.get(a, 0.0)
         return 0.0
 
     def _peek_qubit(self, addr: int) -> float:
@@ -562,21 +602,15 @@ class MemoryMixin(SimulationHost):
         if n == 'sim_device':
             return float(SIM_DEVICES_REV.get(self.sim_device, 0))
         if n == 'noise_type':
-            return 0.0 if self._noise_model is None else 1.0
+            return 0.0 if self.noise.model is None else 1.0
         if n == 'noise_param':
-            return float(self._noise_depol_p) if self._noise_model is not None else 0.0
+            return float(self.noise.depol_p) if self.noise.model is not None else 0.0
         if n == 'max_iterations':
             return float(self._max_iterations)
         if n == 'screen_mode':
-            return float(self._canvas.mode if self._canvas is not None else self._screen_mode)
-        if n == 'fusion_enable':
-            return float(getattr(self, '_fusion_enable', 1))
-        if n == 'mps_truncation':
-            return float(getattr(self, '_mps_truncation', 1e-16))
-        if n == 'sv_parallel_threshold':
-            return float(getattr(self, '_sv_parallel_threshold', 14))
-        if n == 'es_approx_error':
-            return float(getattr(self, '_es_approx_error', 0.05))
+            return float(self.graphics.canvas.mode if self.graphics.canvas is not None else self._screen_mode)
+        if n in AerTuning.DEFAULTS:
+            return self.aer.value(n)
         if n == 'precision':
             return 1.0 if self.sim_precision == 'single' else 0.0
         return 0.0
@@ -594,7 +628,7 @@ class MemoryMixin(SimulationHost):
                 return
             if abs(v) > 1e15:
                 self.io.writeln(f"?WARNING: suspiciously large zero-page value: {v}")
-            self._zero_page[a] = v
+            self.machine.zero_page[a] = v
             return
         if a == 0xD000:
             from qubasic_core.engine import METHOD_MAX_QUBITS
@@ -618,21 +652,21 @@ class MemoryMixin(SimulationHost):
         elif a == 0xD007:
             self.cmd_screen(str(int(v)))          # as SCREEN n: graphics, text or a display mode
         elif a == 0xD008:
-            self._fusion_enable = bool(int(v))
+            self.aer.fusion_enable = bool(int(v))
         elif a == 0xD009:
-            self._mps_truncation = v
+            self.aer.mps_truncation = v
         elif a == 0xD00A:
-            self._sv_parallel_threshold = int(v)
+            self.aer.sv_parallel_threshold = int(v)
         elif a == 0xD00B:
-            self._es_approx_error = v
+            self.aer.es_approx_error = v
         elif 0xD100 <= a <= 0xD1FF:
             qubit = (a - 0xD100) // 2
             field = (a - 0xD100) % 2
-            ntype, nparam = self._qubit_noise.get(qubit, (0, 0.0))
+            ntype, nparam = self.noise.per_qubit.get(qubit, (0, 0.0))
             if field == 0:
-                self._qubit_noise[qubit] = (int(v), nparam)
+                self.noise.per_qubit[qubit] = (int(v), nparam)
             else:
-                self._qubit_noise[qubit] = (ntype, v)
+                self.noise.per_qubit[qubit] = (ntype, v)
         elif 0xD010 <= a <= 0xD01F:
             self.io.writeln(f"?READ-ONLY: ${a:04X}")
         elif 0x0100 <= a <= 0x01FF:
@@ -740,7 +774,7 @@ class MemoryMixin(SimulationHost):
             if not (0xF000 <= addr <= 0xFFFF):
                 self.io.writeln(f"?USER SYS RANGE: $F000-$FFFF (got ${addr:04X})")
                 return
-            self._user_sys[addr] = name
+            self.machine.user_sys[addr] = name
             self.io.writeln(f"INSTALLED {name} AT ${addr:04X}")
             return
         addr = self._eval_int(rest)
@@ -748,8 +782,8 @@ class MemoryMixin(SimulationHost):
             if SYS_ROUTINES[addr] == 'STRESS':
                 self.io.writeln("  (note: STRESS runs a 20-qubit circuit; this can take a while)")
             self.cmd_demo(SYS_ROUTINES[addr])
-        elif addr in self._user_sys:
-            name = self._user_sys[addr]
+        elif addr in self.machine.user_sys:
+            name = self.machine.user_sys[addr]
             if name in self.subroutines:
                 sub = self.subroutines[name]
                 body = sub['body'] if isinstance(sub, dict) else sub
@@ -769,8 +803,8 @@ class MemoryMixin(SimulationHost):
         a = int(addr)
         if a in SYS_ROUTINES:
             self.cmd_demo(SYS_ROUTINES[a])
-        elif a in self._user_sys:
-            name = self._user_sys[a]
+        elif a in self.machine.user_sys:
+            name = self.machine.user_sys[a]
             if name in self.subroutines:
                 sub = self.subroutines[name]
                 body = sub['body'] if isinstance(sub, dict) else sub
@@ -823,9 +857,9 @@ class MemoryMixin(SimulationHost):
         for addr, name in sorted(SYS_ROUTINES.items()):
             backend = self._SYS_BACKENDS.get(name, 'Aer')
             self.io.writeln(f"    ${addr:04X}  {name:20s} [{backend}]")
-        if self._user_sys:
+        if self.machine.user_sys:
             self.io.writeln("\n  User SYS Routines:")
-            for addr, name in sorted(self._user_sys.items()):
+            for addr, name in sorted(self.machine.user_sys.items()):
                 self.io.writeln(f"    ${addr:04X}  {name}")
         self.io.writeln('')
 
@@ -846,7 +880,7 @@ class MemoryMixin(SimulationHost):
         """MAP — print the full memory map with current values."""
         self.io.writeln("\n  Memory Map:")
         self.io.writeln("  $0000-$003F  Zero Page        (64 slots)")
-        nz = sum(1 for v in self._zero_page if v != 0)
+        nz = sum(1 for v in self.machine.zero_page if v != 0)
         self.io.writeln(f"               {nz} non-zero values")
         self.io.writeln(f"  $0100-$01FF  Qubit State      ({self.num_qubits} qubits, 8 addr/qubit)")
         if self.last_sv is not None:
@@ -865,7 +899,7 @@ class MemoryMixin(SimulationHost):
             val = self._peek(addr)
             self.io.writeln(f"               ${addr:04X} {name:20s} = {val}")
         self.io.writeln(f"  $E000-$E0B0  SYS Routines     ({len(SYS_ROUTINES)} built-in)")
-        self.io.writeln(f"  $F000-$FFFF  User SYS         ({len(self._user_sys)} installed)")
+        self.io.writeln(f"  $F000-$FFFF  User SYS         ({len(self.machine.user_sys)} installed)")
         self.io.writeln('')
 
     def cmd_monitor(self) -> None:
@@ -941,23 +975,17 @@ MAX_STATS_RUNS = 10000
 class ProfilerMixin(SimulationHost):
     """Profiling and statistics for QBasicTerminal."""
 
-    def _init_profiler(self) -> None:
-        self._profile_mode: bool = False
-        self._profile_data: dict[int, dict[str, float]] = {}
-        self._profile_start: float = 0.0
-        self._stats_runs: list[dict[str, int]] = []
-
     # ── Profile mode ───────────────────────────────────────────────────
 
     def cmd_profile(self, rest: str = '') -> None:
         """PROFILE [ON|OFF|SHOW] — toggle profiling or show results."""
         arg = rest.strip().upper()
         if arg == 'ON':
-            self._profile_mode = True
-            self._profile_data.clear()
+            self.machine.profiling = True
+            self.machine.profile.clear()
             self.io.writeln("PROFILE ON")
         elif arg == 'OFF':
-            self._profile_mode = False
+            self.machine.profiling = False
             self.io.writeln("PROFILE OFF")
         elif arg == 'SHOW' or not arg:
             self._show_profile()
@@ -965,28 +993,28 @@ class ProfilerMixin(SimulationHost):
             self.io.writeln("?USAGE: PROFILE [ON|OFF|SHOW]")
 
     def _profile_line_start(self, line_num: int) -> None:
-        if self._profile_mode:
-            self._profile_start = time.perf_counter()
+        if self.machine.profiling:
+            self.machine.profile_start = time.perf_counter()
 
     def _profile_line_end(self, line_num: int, gates: int = 0) -> None:
-        if self._profile_mode:
-            dt = (time.perf_counter() - self._profile_start) * 1000  # ms
-            if line_num not in self._profile_data:
-                self._profile_data[line_num] = {'time_ms': 0.0, 'calls': 0, 'gates': 0}
-            entry = self._profile_data[line_num]
+        if self.machine.profiling:
+            dt = (time.perf_counter() - self.machine.profile_start) * 1000  # ms
+            if line_num not in self.machine.profile:
+                self.machine.profile[line_num] = {'time_ms': 0.0, 'calls': 0, 'gates': 0}
+            entry = self.machine.profile[line_num]
             entry['time_ms'] += dt
             entry['calls'] += 1
             entry['gates'] += gates
 
     def _show_profile(self) -> None:
-        if not self._profile_data:
+        if not self.machine.profile:
             self.io.writeln("  No profile data (PROFILE ON, then RUN)")
             return
         self.io.writeln("\n  Profile Results:")
         self.io.writeln(f"  {'Line':>6}  {'Time(ms)':>10}  {'%':>5}  {'Calls':>6}  {'Gates':>6}  Source")
-        total_time = sum(d['time_ms'] for d in self._profile_data.values())
-        for ln in sorted(self._profile_data.keys()):
-            d = self._profile_data[ln]
+        total_time = sum(d['time_ms'] for d in self.machine.profile.values())
+        for ln in sorted(self.machine.profile.keys()):
+            d = self.machine.profile[ln]
             src = self.program.get(ln, '')[:40]
             pct = 100 * d['time_ms'] / total_time if total_time > 0 else 0
             self.io.writeln(f"  {ln:>6}  {d['time_ms']:>10.2f}  {pct:>5.1f}  {d['calls']:>6}  "
@@ -1000,7 +1028,7 @@ class ProfilerMixin(SimulationHost):
         """STATS [N|SHOW|CLEAR|CSV <file>] — run the program N times and summarize the counts."""
         arg = rest.strip().upper()
         if arg == 'CLEAR':
-            self._stats_runs.clear()
+            self.machine.runs.clear()
             self.io.writeln("STATS CLEARED")
             return
         if arg == 'SHOW' or not arg:
@@ -1038,10 +1066,10 @@ class ProfilerMixin(SimulationHost):
                 finally:
                     sys.stdout = old_stdout
                 if self.last_counts:
-                    if len(self._stats_runs) >= MAX_STATS_RUNS:
+                    if len(self.machine.runs) >= MAX_STATS_RUNS:
                         self.io.writeln(f"?STATS: run limit ({MAX_STATS_RUNS}) reached, stopping collection")
                         break
-                    self._stats_runs.append(dict(self.last_counts))
+                    self.machine.runs.append(dict(self.last_counts))
                 # Spinner only in an interactive terminal: carriage-return
                 # animation turns into junk in piped or captured output.
                 if n > 10 and (trial + 1) % (n // 10) == 0 and sys.stdout.isatty():
@@ -1056,16 +1084,16 @@ class ProfilerMixin(SimulationHost):
                 self._seed = base_seed
         if n > 10 and sys.stdout.isatty():
             self.io.write(" " * 30 + '\r')
-        self.io.writeln(f"Collected {len(self._stats_runs)} runs ({n} trials)")
+        self.io.writeln(f"Collected {len(self.machine.runs)} runs ({n} trials)")
 
     def _show_stats(self) -> None:
-        if not self._stats_runs:
+        if not self.machine.runs:
             self.io.writeln("  No statistics collected (STATS N to run N trials)")
             return
-        n = len(self._stats_runs)
+        n = len(self.machine.runs)
         # Aggregate: count how often each state appears across runs
         state_totals: dict[str, list[int]] = {}
-        for run in self._stats_runs:
+        for run in self.machine.runs:
             for state, count in run.items():
                 if state not in state_totals:
                     state_totals[state] = []
@@ -1080,7 +1108,7 @@ class ProfilerMixin(SimulationHost):
             while len(state_totals[state]) < n:
                 state_totals[state].append(0)
         # Compute per-run shot totals for probability conversion
-        shot_totals = [sum(run.values()) for run in self._stats_runs]
+        shot_totals = [sum(run.values()) for run in self.machine.runs]
         avg_shots = sum(shot_totals) / len(shot_totals) if shot_totals else 1
         self.io.writeln(f"\n  Statistics over {n} runs ({avg_shots:.0f} shots/run):")
         self.io.writeln(f"  {'State':>10}  {'Mean':>8}  {'StdDev':>8}  {'Min':>6}  {'Max':>6}  {'P(mean)':>8}")
@@ -1095,7 +1123,7 @@ class ProfilerMixin(SimulationHost):
 
     def _stats_export_csv(self, path: str) -> None:
         """Export accumulated stats to CSV."""
-        if not self._stats_runs:
+        if not self.machine.runs:
             self.io.writeln("  No statistics collected")
             return
         if not path:
@@ -1106,9 +1134,9 @@ class ProfilerMixin(SimulationHost):
         except (ValueError, AttributeError) as e:
             self.io.writeln(f"?STATS CSV ERROR: {e}")
             return
-        n = len(self._stats_runs)
+        n = len(self.machine.runs)
         state_totals: dict[str, list[int]] = {}
-        for run in self._stats_runs:
+        for run in self.machine.runs:
             for state, count in run.items():
                 if state not in state_totals:
                     state_totals[state] = []
@@ -1119,7 +1147,7 @@ class ProfilerMixin(SimulationHost):
         for state in state_totals:
             while len(state_totals[state]) < n:
                 state_totals[state].append(0)
-        shot_totals = [sum(run.values()) for run in self._stats_runs]
+        shot_totals = [sum(run.values()) for run in self.machine.runs]
         avg_shots = sum(shot_totals) / len(shot_totals) if shot_totals else 1
         lines = ['state,mean,stddev,min,max,probability']
         for state in sorted(state_totals.keys()):

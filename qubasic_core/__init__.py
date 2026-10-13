@@ -56,7 +56,7 @@ def __getattr__(name: str) -> Any:
         'ExecOutcome': 'qubasic_core.engine',
         'QBasicTerminal': 'qubasic_core.terminal',
         'Engine': 'qubasic_core.terminal',
-        'ExecutorMixin': 'qubasic_core.simulator',
+        'ExecutorMixin': 'qubasic_core.circuits',
         'ExpressionMixin': 'qubasic_core.expression',
         'DisplayMixin': 'qubasic_core.display',
         'LOCCMixin': 'qubasic_core.locc',

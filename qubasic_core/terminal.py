@@ -2,10 +2,11 @@
 QBasicTerminal, which composes Engine with every layer's mixins and keeps the
 REPL, the command tables and the merged keyword-statement table.
 
-A program runs through one of four execution paths, all driven by the
-statement list parser.compile_program produces:
+RUN (RunCommandMixin.cmd_run) runs a program through one of four execution
+paths, all driven by the statement list parser.compile_program produces, and
+shows the RunReport the path returns:
 
-    circuit build   RunPipelineMixin.cmd_run -> ExecutorMixin.build_circuit
+    circuit build   RunPipelineMixin._simulate -> ExecutorMixin.build_circuit
                     -> a Qiskit circuit on Aer (dynamic IF on MEAS bits)
     live            LiveMixin: shot by shot on a numpy state, for programs
                     that read measurement results as numbers
@@ -47,9 +48,18 @@ from qubasic_core.algorithms import (
 )
 from qubasic_core.analysis import AnalysisMixin, AssistMixin, ExportMixin, tip_of_the_day
 from qubasic_core.benchmarking import BenchmarkingMixin, ResourceMixin
+from qubasic_core.circuits import ExecutorMixin, QuantumStatementMixin
 from qubasic_core.devices import FileIOMixin, GraphicsMixin, ScreenMixin, SoundMixin
-from qubasic_core.display import BANNER_ART, HELP_TEXT, DisplayMixin, StateDisplayMixin, SweepMixin, VisualizeMixin
-from qubasic_core.editing import EditingMixin, PersistenceMixin, ProgramMgmtMixin
+from qubasic_core.display import (
+    BANNER_ART,
+    HELP_TEXT,
+    DisplayMixin,
+    RunCommandMixin,
+    StateDisplayMixin,
+    SweepMixin,
+    VisualizeMixin,
+)
+from qubasic_core.editing import EditingMixin, EditorState, PersistenceMixin, ProgramMgmtMixin
 from qubasic_core.engine import (
     DEFAULT_QUBITS,
     DEFAULT_SHOTS,
@@ -60,7 +70,7 @@ from qubasic_core.engine import (
     ServicesMixin,
     StdIOPort,
 )
-from qubasic_core.expression import ExpressionMixin, StringMixin, VariableMixin
+from qubasic_core.expression import ExpressionMixin, StringMixin, SymbolState, VariableMixin
 from qubasic_core.host import HostState
 from qubasic_core.interpreter import (
     ClassicMixin,
@@ -73,16 +83,15 @@ from qubasic_core.interpreter import (
 from qubasic_core.locc import LOCCMixin
 from qubasic_core.logical import EncodedMixin, LatticeMixin, LogicalMixin
 from qubasic_core.machine import ConfigMixin, DemoMixin, MemoryMixin, ProfilerMixin
-from qubasic_core.noise import MitigationMixin, NoiseMixin
+from qubasic_core.noise import MitigationMixin, NoiseMixin, NoiseState
 from qubasic_core.parser import GATE_ALIASES, GATE_TABLE, RE_LINE_NUM, parse_stmt, strip_comment
 from qubasic_core.physics import BosonicMixin, DynamicsMixin, PauliPropMixin, QuditMixin
 from qubasic_core.qec import CodesMixin, DecodingMixin, RatesMixin
 from qubasic_core.simtools import ram_gb
-from qubasic_core.simulator import ExecutorMixin, LiveMixin, QuantumStatementMixin, RunPipelineMixin, RunStateMixin
+from qubasic_core.simulator import LiveMixin, RunPipelineMixin, RunStateMixin
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
-    from qiskit_aer.noise import NoiseModel
 
     from qubasic_core.locc import LOCCEngine
 
@@ -104,7 +113,7 @@ class Engine(HostState):
         # Program
         self.program: dict[int, str] = {}
         self._parsed: dict[int, Any] = {}
-        self._undo_stack: list[dict[int, str]] = []
+        self.editor = EditorState()
 
         # Configuration
         self.num_qubits: int = DEFAULT_QUBITS
@@ -114,27 +123,15 @@ class Engine(HostState):
         # Amplitude precision for Aer and the numpy engines: 'double'
         # (complex128) or 'single' (complex64, half the memory).
         self.sim_precision: str = 'double'
-        self._noise_model: NoiseModel | None = None
-        self._noise_depol_p: float = 0.0
-        # Noise channel propagated to the numpy LOCC engine (depolarizing,
-        # amplitude_damping, or phase_flip; 'none' if unsupported there).
-        self._noise_locc_type: str = 'none'
-        self._noise_locc_param: float = 0.0
-        # The NOISE model as its command arguments, and the DEVICE that built
-        # the model (topology, qubits, T1, T2), for SAVE round-tripping.
-        self._noise_spec: str | None = None
+        self.noise = NoiseState()
         self._device_spec: str | None = None
         self._seed: int | None = None
         self._max_iterations: int = MAX_LOOP_ITERATIONS
-        self._include_depth: int = 0
 
         # Variables and arrays
         self.variables: dict[str, Any] = {}
         self.arrays: dict[str, Any] = {}
-        self._array_dims: dict[str, list[int]] = {}
-        # Arrays declared with DIM/REDIM enforce their bounds on write;
-        # arrays created implicitly by first assignment keep auto-growing.
-        self._dimmed_arrays: set[str] = set()
+        self.symbols = SymbolState()
         # Density matrix (and the measure-free circuit to solve it lazily)
         # for a run with SET_DENSITY, computed on demand by DENSITY.
         self._last_density: np.ndarray | None = None
@@ -171,11 +168,6 @@ class Engine(HostState):
 
         # Security
         self.agent_mode: bool = False
-        self._include_stack: list[str] = []
-
-        # User-defined types
-        self._user_types: dict[str, list[tuple[str, str]]] = {}
-        self._pending_type: dict | None = None
 
         # Timing
         self._start_time: float = time.time()
@@ -201,8 +193,8 @@ class Engine(HostState):
         self.registers.clear()
         self.variables.clear()
         self.arrays.clear()
-        self._array_dims.clear()
-        self._dimmed_arrays.clear()
+        self.symbols.array_dims.clear()
+        self.symbols.dimmed.clear()
         self._last_density = None
         self._last_density_qc = None
         self.last_counts = None
@@ -229,7 +221,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
                      BenchmarkingMixin, EstimationMixin, PhaseMixin, QMLMixin, FactoringMixin, HHLMixin,
                      PauliPropMixin, QuditMixin, BosonicMixin, ResourceMixin, LiveMixin,
                      VariationalMixin, OracleMixin, LatticeMixin, EncodedMixin, RunStateMixin,
-                     QuantumStatementMixin, ServicesMixin):
+                     QuantumStatementMixin, ServicesMixin, RunCommandMixin):
     """The QUBASIC session: Engine's state with every layer's mixins.
 
     Mixins, by layer (each derives from its layer's host in host.py):
@@ -250,8 +242,9 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
                       FactoringMixin, HHLMixin, BenchmarkingMixin,
                       ResourceMixin, CodesMixin, DecodingMixin, RatesMixin,
                       LogicalMixin, LatticeMixin, EncodedMixin
-        presentation  DisplayMixin, StateDisplayMixin, VisualizeMixin,
-                      SweepMixin, AnalysisMixin, ExportMixin, AssistMixin
+        presentation  RunCommandMixin, DisplayMixin, StateDisplayMixin,
+                      VisualizeMixin, SweepMixin, AnalysisMixin, ExportMixin,
+                      AssistMixin
 
     This class keeps the REPL, the command tables, the merged statement
     table, the hooks only it can implement, HELP, PROBE and the banner.
@@ -267,11 +260,8 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         self._init_graphics()
         self._init_sound()
         self._init_classic()
-        self._init_variables()
         self._init_subs()
         self._init_debug()
-        self._init_program_mgmt()
-        self._init_profiler()
         self._init_file_handles()
         self._init_assist()
         self._init_dynamics()
@@ -370,7 +360,7 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
     def process(self, line: str, *, track_undo: bool = True) -> None:
         """Process a line of input (numbered line or immediate command)."""
         # Accumulate TYPE fields when a pending TYPE definition is active
-        if self._pending_type is not None:
+        if self.symbols.pending_type is not None:
             self._accumulate_type_field(line)
             return
         # Line number -> store in program
@@ -380,9 +370,9 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
             content = m.group(2).strip()
             # Save undo state (skip during script/file loading)
             if track_undo:
-                self._undo_stack.append(dict(self.program))
-                if len(self._undo_stack) > MAX_UNDO_STACK:
-                    self._undo_stack.pop(0)
+                self.editor.undo.append(dict(self.program))
+                if len(self.editor.undo) > MAX_UNDO_STACK:
+                    self.editor.undo.pop(0)
             if content:
                 self.program[num] = content
                 self._parsed[num] = parse_stmt(content)
@@ -619,8 +609,8 @@ class QBasicTerminal(RunPipelineMixin, StatementMixin, VariableMixin, ConfigMixi
         self.process('10 H 0', track_undo=False)
         self.process('20 CX 0,1', track_undo=False)
         self.process('30 MEASURE', track_undo=False)
-        self._noise_model = None
-        self._noise_depol_p = 0.0
+        self.noise.model = None
+        self.noise.depol_p = 0.0
         self.sim_device = 'CPU'
         self.cmd_run()
         bell_ok = self.last_counts and set(self.last_counts.keys()) <= {'00', '11'}
