@@ -102,7 +102,7 @@ program lines, and most can be typed at the prompt as well.
 | COUPLING | `COUPLING linear\|ring\|heavyhex\|full\|OFF\|<edges>` | Constrain 2-qubit connectivity. |
 | BASIS | `BASIS <gate list>\|OFF` | Restrict transpilation to a native gate set. |
 | DEVICE | `DEVICE <topology> [n] [T1us] [T2us] \| DEVICE IBM <device> \| DEVICE OFF` | Load a device model. |
-| QPU | `QPU LIST \| QPU <device> [SHOTS n] \| QPU JOB <id>` | Run the program on IBM quantum hardware. |
+| QPU | `QPU LIST \| QPU <device> [SHOTS n] [SWEEP var start end [steps]] \| QPU JOB <id>` | Run the program on IBM quantum hardware. |
 | OPTIMIZE | `OPTIMIZE [level]` | Transpile the program and report the reduction. |
 | RAM | `RAM` | Memory now available, what the current configuration costs, and the widest statevector that fits at each precision. |
 | BENCH | `BENCH [n1 n2 ...]` | Time a statevector run (H, a CX chain and T on every qubit, 100 shots) at each qubit count with its memory; a count that does not fit in available memory is skipped. |

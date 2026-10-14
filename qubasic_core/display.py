@@ -30,11 +30,6 @@ if TYPE_CHECKING:
 
     from qubasic_core.simtools import Tableau
 
-try:
-    import plotille as _plotille
-except ImportError:
-    _plotille = None
-
 
 # ---------------------------------------------------------------------------
 # QUBASIC help text and banner art.
@@ -830,17 +825,8 @@ class SweepMixin(PresentationHost):
                         if has_measure:
                             qc.measure_all()
                         result = backend.run(transpile(qc, backend, optimization_level=self._transpile_opt_level), shots=self.shots).result()
-                    counts = dict(result.get_counts())
-                    ranked = sorted(counts.items(), key=lambda x: -x[1])
-                    top = ranked[0]
-                    bar_len = int(30 * top[1] / self.shots)
-                    top2 = f" |{self._bits(ranked[1][0])}\u27E9={ranked[1][1]}" if len(ranked) > 1 else ""
-                    n_unique = len(ranked)
-                    bar = '\u2588' * bar_len
-                    self.io.writeln(f"  {var}={val:8.4f}  |{self._bits(top[0])}\u27E9 {top[1]:>5}/{self.shots} "
-                                   f"{bar}{top2}  ({n_unique} states)")
+                    sweep_ys.append(self._sweep_row(var, val, dict(result.get_counts())))
                     sweep_xs.append(val)
-                    sweep_ys.append(top[1] / self.shots)
                 except Exception as e:
                     self.io.writeln(f"  {var}={val:8.4f}  ERROR: {e}")
                 if _prog is not None and _ptask is not None:
@@ -853,14 +839,5 @@ class SweepMixin(PresentationHost):
             else:
                 self.variables.pop(var, None)
 
-        # Plotille chart of P(top state) vs variable
-        if _plotille is not None and len(sweep_xs) >= 2:
-            self.io.writeln('')
-            self.io.writeln(_plotille.plot(
-                sweep_xs, sweep_ys,
-                width=60, height=15,
-                X_label=var,
-                Y_label='P(top)',
-                y_min=0.0, y_max=1.0,
-                lc='cyan'))
+        self._sweep_chart(var, sweep_xs, sweep_ys)
         self.io.writeln('')

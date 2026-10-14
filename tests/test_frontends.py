@@ -994,6 +994,7 @@ class _FakeRuntime:
     def __init__(self):
         backend = _FakeBackend()
         jobs = {}
+        self.jobs_sent = jobs_sent = []                  # circuits in each job, in order
 
         class Service:
             def backends(self):
@@ -1011,6 +1012,7 @@ class _FakeRuntime:
 
             def run(self, pubs, shots):
                 from qiskit_aer.primitives import SamplerV2
+                jobs_sent.append(len(pubs))
                 job = _FakeJob(SamplerV2(seed=7).run(pubs, shots=shots).result(), self.mode)
                 jobs[job.job_id()] = job
                 return job
@@ -1024,9 +1026,23 @@ class TestIBMHardware(unittest.TestCase):
 
     def setUp(self):
         from qubasic_core import benchmarking
-        patcher = mock.patch.object(benchmarking, '_runtime', return_value=_FakeRuntime())
+        self.runtime = _FakeRuntime()
+        patcher = mock.patch.object(benchmarking, '_runtime', return_value=self.runtime)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_qpu_sweep_sends_every_point_in_one_job(self):
+        t = term(1, seed=1)
+        t.variables['theta'] = 0.25
+        out = feed(t, '10 RY theta, 0', '20 MEASURE', 'QPU fake_five SHOTS 300 SWEEP theta 0 PI 3')
+        self.assertEqual(self.runtime.jobs_sent, [3])                # three points, one job
+        self.assertIn('3 points of 300 shots in one job', out)
+        self.assertIn('theta=  0.0000  |0⟩   300/300', out)
+        self.assertIn('theta=  3.1416  |1⟩   300/300', out)
+        self.assertEqual(t.variables['theta'], 0.25)                 # the program's own value again
+        self.assertIn('theta=  1.5708', feed(t, 'QPU JOB job-123'))
+        self.assertIn('SWEEP var start end', feed(t, 'QPU fake_five SWEEP theta 0'))
+        self.assertIn('1 to 300 steps', feed(t, 'QPU fake_five SWEEP theta 0 1 301'))
 
     def test_qpu_lists_runs_and_collects(self):
         t = term(2, seed=1)

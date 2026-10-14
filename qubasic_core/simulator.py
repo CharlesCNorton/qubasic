@@ -198,6 +198,29 @@ class RunStateMixin(SimulationHost):
             return f"  bit order  {labels}   (qubit 0 = {'leftmost' if big else 'rightmost'})"
         return f"  bit order  qubit 0 = {'leftmost' if big else 'rightmost'} bit"
 
+    def _sweep_row(self, var: str, val: float, counts: dict[str, int]) -> float:
+        """Print one sweep point (the top state, its share of the shots with a
+        bar, the runner-up and how many states appeared); return P(top)."""
+        shots = sum(counts.values())
+        ranked = sorted(counts.items(), key=lambda x: -x[1])
+        top = ranked[0]
+        bar = '█' * int(30 * top[1] / shots)
+        top2 = f" |{self._bits(ranked[1][0])}⟩={ranked[1][1]}" if len(ranked) > 1 else ""
+        self.io.writeln(f"  {var}={val:8.4f}  |{self._bits(top[0])}⟩ {top[1]:>5}/{shots} "
+                        f"{bar}{top2}  ({len(ranked)} states)")
+        return top[1] / shots
+
+    def _sweep_chart(self, var: str, xs: Sequence[float], ys: Sequence[float]) -> None:
+        """A braille chart of P(top) against the swept variable, when plotille is installed."""
+        try:
+            import plotille
+        except ImportError:
+            return
+        if len(xs) >= 2:
+            self.io.writeln('')
+            self.io.writeln(plotille.plot(list(xs), list(ys), width=60, height=15, X_label=var,
+                                          Y_label='P(top)', y_min=0.0, y_max=1.0, lc='cyan'))
+
     def print_histogram(self, counts: dict[str, int]) -> None:
         """Measurement histogram with optional rich-table formatting."""
         total = sum(counts.values())

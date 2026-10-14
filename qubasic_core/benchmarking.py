@@ -677,6 +677,7 @@ class ResourceMixin(ApplicationsHost):
 #
 #   QPU LIST                    the devices the saved account reaches, with queues
 #   QPU <device> [SHOTS n]      run the program there and show the histogram
+#   QPU <device> SWEEP v a b n  the program at n values of v, every point in one job
 #   QPU JOB <id>                collect a job whose wait was interrupted
 #   DEVICE IBM <device>         simulate that device: Aer's noise model from its
 #                               current calibration, routed on its coupling map
@@ -684,9 +685,12 @@ class ResourceMixin(ApplicationsHost):
 # The account is the one QiskitRuntimeService.save_account stored. A device
 # run transpiles the program for the device's native gates and qubits and runs
 # it through SamplerV2; it spends the account's QPU time, which the report
-# gives. Programs that read measured bits as numbers run live, shot by shot,
-# and stay on the simulator.
+# gives. A job costs a fixed overhead beyond its shots, so a SWEEP sends all
+# its points together, up to the 300 circuits a job holds. Programs that read
+# measured bits as numbers run live, shot by shot, and stay on the simulator.
 # ---------------------------------------------------------------------------
+
+QPU_MAX_CIRCUITS = 300
 
 def _runtime() -> Any:
     """qiskit_ibm_runtime, or a ValueError saying how to get it."""
@@ -704,6 +708,7 @@ class HardwareMixin(ApplicationsHost):
     def _init_hardware(self) -> None:
         self._ibm: Any = None                       # the QiskitRuntimeService, made on first use
         self._ibm_jobs: list[tuple[str, str]] = []  # (job id, device) of each QPU run
+        self._ibm_sweeps: dict[str, tuple[str, list[float]]] = {}   # job id -> (variable, values)
 
     def _ibm_service(self) -> Any:
         if self._ibm is None:
@@ -711,16 +716,19 @@ class HardwareMixin(ApplicationsHost):
         return self._ibm
 
     def cmd_qpu(self, rest: str) -> None:
-        """QPU LIST | QPU <device> [SHOTS n] | QPU JOB <id> — run the program on IBM quantum hardware.
+        """QPU LIST | QPU <device> [SHOTS n] [SWEEP var start end [steps]] | QPU JOB <id> — run the program on IBM quantum hardware.
 
         QPU LIST shows the devices the saved Qiskit Runtime account reaches
         and their queues. QPU <device> transpiles the program for the device,
-        runs it through SamplerV2 and shows the histogram; Ctrl-C stops the
-        wait, the job keeps its place, and QPU JOB <id> collects it later.
-        Each run spends the account's QPU time, which the report gives."""
+        runs it through SamplerV2 and shows the histogram. With SWEEP it
+        builds the program at each value of the variable, as SWEEP does, and
+        sends every point in one job, which spends far less QPU time than a
+        job per point. Ctrl-C stops the wait, the job keeps its place, and
+        QPU JOB <id> collects it later. Each run spends the account's QPU
+        time, which the report gives."""
         parts = rest.split()
         if not parts:
-            self.io.writeln("?USAGE: QPU LIST | QPU <device> [SHOTS n] | QPU JOB <id>")
+            self.io.writeln("?USAGE: QPU LIST | QPU <device> [SHOTS n] [SWEEP var start end [steps]] | QPU JOB <id>")
             return
         try:
             word = parts[0].upper()
@@ -731,10 +739,8 @@ class HardwareMixin(ApplicationsHost):
                     raise ValueError("QPU JOB needs a job id (QPU runs list theirs)")
                 self._qpu_collect(self._ibm_service().job(parts[1]))
             else:
-                shots = self.shots
-                if len(parts) >= 3 and parts[1].upper() == 'SHOTS':
-                    shots = int(parts[2])
-                self._qpu_run(parts[0], shots)
+                shots, sweep = self._qpu_options(parts[1:])
+                self._qpu_run(parts[0], shots, sweep)
         except KeyboardInterrupt:
             self.io.writeln("\n?STOPPED WAITING: the job keeps its place; QPU JOB <id> collects it")
         except Exception as e:
@@ -747,37 +753,94 @@ class HardwareMixin(ApplicationsHost):
             state = 'online' if st.operational else 'offline'
             self.io.writeln(f"  {b.name:<16}  {b.num_qubits:6d}  {st.pending_jobs:5d}  {state}")
 
-    def _qpu_run(self, name: str, shots: int) -> None:
+    def _qpu_options(self, words: list[str]) -> tuple[int, tuple[str, float, float, int] | None]:
+        """The shots and the sweep (variable, start, end, steps) of a QPU run."""
+        shots: int = self.shots
+        sweep = None
+        i = 0
+        while i < len(words):
+            word = words[i].upper()
+            if word == 'SHOTS' and i + 1 < len(words):
+                shots = int(words[i + 1])
+                i += 2
+            elif word == 'SWEEP' and i + 3 < len(words):
+                j, steps = i + 4, 10
+                if j < len(words) and words[j].upper() != 'SHOTS':
+                    steps = int(words[j])
+                    j += 1
+                sweep = (words[i + 1], float(self.eval_expr(words[i + 2])), float(self.eval_expr(words[i + 3])), steps)
+                i = j
+            else:
+                raise ValueError("QPU <device> [SHOTS n] [SWEEP var start end [steps]]")
+        return shots, sweep
+
+    def _qpu_circuits(self, sweep: tuple[str, float, float, int] | None) -> tuple[list[QuantumCircuit], list[float] | None]:
+        """The program's measured circuit, or one for each SWEEP value with
+        the variable set to it (and restored afterwards), and the values."""
+        values: list[float] | None = None
+        var = None
+        if sweep is not None:
+            var, start, end, steps = sweep
+            if not 1 <= steps <= QPU_MAX_CIRCUITS:
+                raise ValueError(f"SWEEP takes 1 to {QPU_MAX_CIRCUITS} steps, the most a job holds")
+            values = [start] if steps == 1 else [start + (end - start) * k / (steps - 1) for k in range(steps)]
+        had, prior = (var in self.variables, self.variables.get(var)) if var else (False, None)
+        circuits = []
+        points: list[float | None] = [*values] if values is not None else [None]
+        try:
+            for val in points:
+                if var is not None:
+                    self.variables[var] = val
+                qc, has_measure = self.build_circuit()
+                if not has_measure:
+                    raise ValueError("the program has no MEASURE, so the device would return nothing")
+                self._add_final_measurement(qc)
+                circuits.append(qc)
+        finally:
+            if var is not None:
+                if had:
+                    self.variables[var] = prior
+                else:
+                    self.variables.pop(var, None)
+        return circuits, values
+
+    def _qpu_run(self, name: str, shots: int, sweep: tuple[str, float, float, int] | None = None) -> None:
         if not self.program:
             raise ValueError("NOTHING TO RUN")
         if self._needs_live(sorted(self.program)):
             raise ValueError("this program reads measured bits as numbers and runs shot by shot, "
                              "which a device cannot")
-        qc, has_measure = self.build_circuit()
-        if not has_measure:
-            raise ValueError("the program has no MEASURE, so the device would return nothing")
-        self._add_final_measurement(qc)
+        circuits, values = self._qpu_circuits(sweep)
         backend = self._ibm_service().backend(name)
         import warnings
 
         from qiskit.transpiler import generate_preset_pass_manager
         with warnings.catch_warnings():                 # a DELAY rounded to the device's clock cycle
             warnings.filterwarnings('ignore', message=r'Duration is rounded', category=UserWarning)
-            isa = generate_preset_pass_manager(backend=backend, optimization_level=1).run(qc)
-        two = sum(1 for inst in isa.data if inst.operation.num_qubits == 2)
-        job = _runtime().SamplerV2(mode=backend).run([isa], shots=shots)
+            isa = generate_preset_pass_manager(backend=backend, optimization_level=1).run(circuits)
+        job = _runtime().SamplerV2(mode=backend).run(isa, shots=shots)
         self._ibm_jobs.append((job.job_id(), name))
-        self.io.writeln(f"QPU {name}: job {job.job_id()} queued, {shots} shots, depth {isa.depth()}, "
-                        f"{two} two-qubit gates on the device")
+        if sweep is None or values is None:
+            two = sum(1 for inst in isa[0].data if inst.operation.num_qubits == 2)
+            self.io.writeln(f"QPU {name}: job {job.job_id()} queued, {shots} shots, depth {isa[0].depth()}, "
+                            f"{two} two-qubit gates on the device")
+        else:
+            self._ibm_sweeps[job.job_id()] = (sweep[0], values)
+            self.io.writeln(f"QPU {name}: job {job.job_id()} queued, {len(isa)} points of {shots} shots in one "
+                            f"job, depth up to {max(c.depth() for c in isa)} on the device")
         self._qpu_collect(job)
 
     def _qpu_collect(self, job: Any) -> None:
-        """Wait for a job, then keep and show its histogram and QPU time."""
-        data = job.result()[0].data
-        registers = list(data.keys())
-        name = next((r for r in ('sub', 'meas') if r in registers), registers[0])
-        counts = dict(getattr(data, name).get_counts())
-        self.last_counts = counts
+        """Wait for a job, then keep and show its histogram, or for a sweep
+        a row per point and the chart, and the QPU time it spent."""
+        result = job.result()
+        counts = []
+        for k in range(len(result)):
+            data = result[k].data
+            registers = list(data.keys())
+            name = next((r for r in ('sub', 'meas') if r in registers), registers[0])
+            counts.append(dict(getattr(data, name).get_counts()))
+        self.last_counts = counts[-1]
         seconds = None
         try:
             seconds = float(job.usage())
@@ -788,5 +851,13 @@ class HardwareMixin(ApplicationsHost):
                 pass
         spent = f", {seconds:.1f} s of QPU time" if seconds is not None else ""
         device = job.backend().name if callable(getattr(job, 'backend', None)) else '?'
-        self.io.writeln(f"\nQPU job {job.job_id()} on {device}: {sum(counts.values())} shots{spent}")
-        self.print_histogram(counts)
+        shots = sum(counts[-1].values())
+        sweep = self._ibm_sweeps.get(job.job_id())
+        if sweep is None and len(counts) == 1:
+            self.io.writeln(f"\nQPU job {job.job_id()} on {device}: {shots} shots{spent}")
+            self.print_histogram(counts[0])
+            return
+        var, values = sweep or ('point', [float(k + 1) for k in range(len(counts))])
+        self.io.writeln(f"\nQPU job {job.job_id()} on {device}: {len(counts)} points of {shots} shots{spent}")
+        tops = [self._sweep_row(var, val, c) for val, c in zip(values, counts)]
+        self._sweep_chart(var, values, tops)

@@ -260,6 +260,7 @@ pip install "qubasic[ibm]"
 QPU LIST                                              devices, queues and status
 DEVICE IBM ibm_fez                                    simulate that device as calibrated now
 QPU ibm_fez SHOTS 4000                                run the program on the device
+QPU ibm_fez SWEEP T 0 40 21                           the program at 21 values of T, in one job
 QPU JOB <id>                                          collect a job after an interrupted wait
 ```
 
@@ -268,9 +269,11 @@ QPU JOB <id>                                          collect a job after an int
 from the device's current calibration (gate and readout errors, and T1 and T2
 relaxation during gates and idle time) and routes every run onto its coupling
 map and native gates. `QPU` compiles the program the same way, runs it through
-the Sampler primitive and shows the histogram with the QPU time it spent. A
-program that reads measured bits as numbers runs shot by shot and stays on the
-simulator. `DELAY q, microseconds` leaves qubits idle: an ideal simulation
+the Sampler primitive and shows the histogram with the QPU time it spent.
+`QPU ... SWEEP` builds the program at each value of a variable, as `SWEEP`
+does on the simulator, and sends every point in one job (up to 300), since
+each job carries a fixed overhead beyond its shots. A program that reads
+measured bits as numbers runs shot by shot and stays on the simulator. `DELAY q, microseconds` leaves qubits idle: an ideal simulation
 ignores it, while a device model or a QPU run decoheres them.
 
 ## Algorithms
